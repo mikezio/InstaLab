@@ -54,6 +54,7 @@ DB_PATH_DEFAULT = BASE_DIR / "instaloader.db"
 # Environment variables are already loaded by db module
 ENV_PATH = Path(os.getenv("INSTALAB_ENV", "/srv/secrets/instalab.env"))
 COOKIE_DIR = Path(os.getenv("INSTALAB_COOKIE_DIR", "/data/instalab/cookies"))
+UI_BASE_URL = os.getenv("INSTALAB_UI_BASE_URL", "")  # e.g., "http://localhost:8000" or empty to use dynamic host
 
 JOB_TMP_DIR = BASE_DIR / "job_runs"
 
@@ -3354,14 +3355,24 @@ def api_rebuild():
 
 @app.route("/control")
 def control_page():
+    """Redirect to Django UI. Uses INSTALAB_UI_BASE_URL if set, otherwise constructs from request host."""
+    if UI_BASE_URL:
+        return redirect(UI_BASE_URL, code=302)
+    # Fallback: construct URL from request host (works for local development)
     host = request.host.split(":")[0]
-    return redirect(f"http://{host}:8000/", code=302)
+    ui_port = os.getenv("INSTALAB_UI_PORT", "8000")
+    return redirect(f"http://{host}:{ui_port}/", code=302)
 
 
 @app.route("/")
 def root():
+    """Redirect root to Django UI. Uses INSTALAB_UI_BASE_URL if set, otherwise constructs from request host."""
+    if UI_BASE_URL:
+        return redirect(UI_BASE_URL, code=302)
+    # Fallback: construct URL from request host (works for local development)
     host = request.host.split(":")[0]
-    return redirect(f"http://{host}:8000/", code=302)
+    ui_port = os.getenv("INSTALAB_UI_PORT", "8000")
+    return redirect(f"http://{host}:{ui_port}/", code=302)
 
 
 if __name__ == "__main__":
