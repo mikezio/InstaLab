@@ -101,7 +101,7 @@ services:
       - /srv/secrets/instalab-cookies:/data/instalab/cookies
       - /srv/data/instalab:/data/instalab
     ports:
-      - "127.0.0.1:7900:7900"
+      - "0.0.0.0:7900:7900"
     restart: unless-stopped
 
 networks:
