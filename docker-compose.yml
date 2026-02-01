@@ -13,6 +13,8 @@ services:
       INSTALAB_ENV: /srv/secrets/instalab.env
       INSTALAB_DB_HOST: apps-postgres
       HOME: /data/instalab/home
+      # UI redirect configuration - set INSTALAB_UI_BASE_URL for external access
+      # Example: INSTALAB_UI_BASE_URL: http://192.168.4.30:8002
       DD_SERVICE: instalab-api
       DD_ENV: homelab
       DD_VERSION: "1"
