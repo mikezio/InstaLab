@@ -23,6 +23,6 @@ sqlparse==0.5.5
 tqdm==4.67.1
 typing_extensions==4.15.0
 tzlocal==5.3.1
-urllib3==2.6.2
+urllib3==2.6.3
 Werkzeug==3.1.4
 ddtrace==2.16.1
