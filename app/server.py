@@ -31,7 +31,6 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory, redirect
 
 from instaloader_tracker import update_run_duration, _init_db as _init_instaloader_db
@@ -51,15 +50,7 @@ LOCAL_TZ = ZoneInfo("America/New_York")
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH_DEFAULT = BASE_DIR / "instaloader.db"
-ENV_PATH = Path(os.getenv("INSTALAB_ENV", "/srv/secrets/instalab.env"))
-
-# Load environment (credentials live here)
-if ENV_PATH.exists():
-    load_dotenv(ENV_PATH)
-else:
-    load_dotenv(BASE_DIR / ".env")
-
-# Initialize COOKIE_DIR after loading environment
+# Environment variables are already loaded by db module
 COOKIE_DIR = Path(os.getenv("INSTALAB_COOKIE_DIR", "/data/instalab/cookies"))
 
 JOB_TMP_DIR = BASE_DIR / "job_runs"
@@ -155,6 +146,10 @@ CONFIG_CACHE_TTL = 5.0
 LOGIN_FILE_PATH = os.getenv("INSTALAB_LOGINS_FILE", "/srv/secrets/instalab-logins.json")
 LOGIN_CACHE = {"profiles": [], "lookup": {}, "ts": 0.0}
 LOGIN_CACHE_TTL = 5.0
+
+# Cache backend availability check (since imports are expensive in health checks)
+_BACKEND_HEALTH_CACHE = {"backend": None, "status": None, "ts": 0.0}
+_BACKEND_HEALTH_CACHE_TTL = 60.0  # Cache for 1 minute
 
 BASE_LOGIN_PROFILES = [
     {
@@ -567,6 +562,14 @@ def _health_check_sessions():
 
 def _health_check_scraper():
     backend = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "selenium").strip().lower()
+    
+    # Check cache first
+    now = time.time()
+    if (_BACKEND_HEALTH_CACHE["backend"] == backend and 
+        _BACKEND_HEALTH_CACHE["ts"] > 0 and 
+        now - _BACKEND_HEALTH_CACHE["ts"] < _BACKEND_HEALTH_CACHE_TTL):
+        return _BACKEND_HEALTH_CACHE["status"]
+    
     details = {"backend": backend}
     status = "ok"
     if backend in {"instaloader", "insta", "iloader"}:
@@ -587,7 +590,13 @@ def _health_check_scraper():
         details["chromedriver"] = chromedriver
         if not chromedriver:
             status = "degraded" if status == "ok" else status
-    return {"status": status, "details": details}
+    
+    result = {"status": status, "details": details}
+    # Update cache
+    _BACKEND_HEALTH_CACHE["backend"] = backend
+    _BACKEND_HEALTH_CACHE["status"] = result
+    _BACKEND_HEALTH_CACHE["ts"] = now
+    return result
 
 
 def _health_check_runs():
