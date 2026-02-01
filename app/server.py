@@ -28,6 +28,7 @@ import ssl
 import secrets
 import shlex
 import re
+from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1844,6 +1845,15 @@ def _cookie_filename_for(login_username: str) -> str:
     return f"cookies_{login_username}.txt"
 
 
+def _docker_client():
+    try:
+        import docker  # local import to avoid hard dependency if unused
+
+        return docker.from_env()
+    except Exception:
+        return None
+
+
 def _launch_login_flow(login_username: str):
     cookie_dir = Path(os.getenv("INSTALAB_COOKIE_DIR", "/data/instalab/cookies"))
     cookie_dir.mkdir(parents=True, exist_ok=True)
@@ -1851,13 +1861,20 @@ def _launch_login_flow(login_username: str):
     cookie_path = str(cookie_dir / cookie_file)
     pipe_path = f"/tmp/instalab_login_pipe_{login_username}"
     log_path = f"/tmp/selenium_login_{login_username}.out"
+    client = _docker_client()
+    if not client:
+        raise RuntimeError("docker client unavailable; cannot launch VNC login")
+    try:
+        container = client.containers.get("instalab-vnc")
+    except Exception as exc:
+        raise RuntimeError(f"instalab-vnc container not available: {exc}")
     cmd = (
         f"mkfifo -m 666 {shlex.quote(pipe_path)} || true; "
         f"(tail -f {shlex.quote(pipe_path)} | DISPLAY=:1 python3 /app/scripts/selenium_login.py "
         f"--login {shlex.quote(login_username)} --cookie-out {shlex.quote(cookie_path)}) "
         f"> {shlex.quote(log_path)} 2>&1"
     )
-    proc = subprocess.Popen(["bash", "-lc", cmd], env=os.environ.copy())
+    container.exec_run(["bash", "-lc", cmd], detach=True)
     LOGIN_LAUNCH.update(
         {
             "active": True,
@@ -1865,7 +1882,7 @@ def _launch_login_flow(login_username: str):
             "cookie_file": cookie_file,
             "cookie_path": cookie_path,
             "pipe_path": pipe_path,
-            "pid": proc.pid,
+            "pid": None,
             "started_at": datetime.now(LOCAL_TZ).isoformat(),
             "status": "waiting",
         }
@@ -1878,8 +1895,11 @@ def _finalize_login_flow():
     if not pipe_path:
         return False, "login session not initialized"
     try:
-        with open(pipe_path, "w", encoding="utf-8") as fh:
-            fh.write("\n")
+        client = _docker_client()
+        if not client:
+            return False, "docker client unavailable; cannot signal login"
+        container = client.containers.get("instalab-vnc")
+        container.exec_run(["bash", "-lc", f"echo done > {shlex.quote(pipe_path)}"], detach=True)
     except Exception as exc:
         return False, f"failed to signal login: {exc}"
     return True, ""

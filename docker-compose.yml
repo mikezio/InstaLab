@@ -25,6 +25,7 @@ services:
       - /srv/secrets/instalab-logins.json:/srv/secrets/instalab-logins.json
       - /srv/secrets/instalab-cookies:/data/instalab/cookies
       - /srv/data/instalab:/data/instalab
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "192.168.4.30:5000:5000"
     restart: unless-stopped
