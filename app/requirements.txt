@@ -6,7 +6,7 @@ charset-normalizer==3.4.4
 click==8.3.1
 Django==5.2.9
 Flask==3.1.2
-gunicorn==21.2.0
+gunicorn==23.0.0
 greenlet==3.3.0
 idna==3.11
 instaloader==4.15
