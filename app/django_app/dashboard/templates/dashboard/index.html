@@ -90,6 +90,7 @@
             </div>
             <div class="flex flex-wrap items-center gap-2">
               <span class="chip neutral" id="kpi-last-run">Last run —</span>
+              <span class="chip proxy-chip off" id="proxy-pill">Proxy: off</span>
               <button class="secondary" id="toggle-log">Activity log</button>
               <button class="ghost-btn" id="open-accounts">Accounts</button>
               <button class="ghost-btn" id="open-config">Settings</button>
@@ -720,6 +721,10 @@
           <label for="cfg-proxy-api-key">API key (optional)</label>
           <input id="cfg-proxy-api-key" type="password" placeholder="optional">
           <div class="config-help">Native proxying needs the zone username + password. API key is for Bright Data API access.</div>
+          <div class="proxy-actions">
+            <button class="secondary" id="cfg-proxy-test">Test proxy</button>
+            <div class="proxy-test-status" id="cfg-proxy-test-status">No proxy test yet.</div>
+          </div>
         </div>
       </div>
       <div class="config-actions">
@@ -795,6 +800,7 @@
     const logEl = document.getElementById('log');
     let configCache = { ui_timezone: 'America/New_York' };
     let configDefaults = {};
+    let proxyTestState = { status: 'idle', message: 'No proxy test yet.', last: null };
     let loginsList = [];
     let primaryLogin = '';
     let targetsCache = [];
@@ -1295,6 +1301,7 @@
       if (schWeekday) schWeekday.value = dow;
       toggleFrequencyUI();
       updateProxyConfigUI();
+      updateProxyPill();
     }
 
     function fillConfigForm(fromDefaults=false) {
@@ -1332,7 +1339,9 @@
       const proxyKey = document.getElementById('cfg-proxy-api-key');
       if (proxyPass) proxyPass.value = '';
       if (proxyKey) proxyKey.value = '';
+      proxyTestState = { status: 'idle', message: 'No proxy test yet.', last: null };
       updateProxyConfigUI();
+      updateProxyPill();
     }
 
     function openConfigModal() {
@@ -1393,6 +1402,7 @@
       try {
         const res = await fetchJSON('/config', {method: 'PUT', body: JSON.stringify(payload)});
         configCache = res.config || configCache;
+        proxyTestState = { status: 'idle', message: 'No proxy test yet.', last: null };
         applyConfigToUI();
         loadSchedules();
         loadTargetsOverview();
@@ -1623,6 +1633,53 @@
       const keyEl = document.getElementById('cfg-proxy-api-key');
       if (passEl) passEl.placeholder = passSet ? '•••••• saved' : 'not set';
       if (keyEl) keyEl.placeholder = keySet ? '•••••• saved' : 'optional';
+    }
+
+    function updateProxyPill() {
+      const pill = document.getElementById('proxy-pill');
+      if (!pill) return;
+      const enabled = getConfigValue('proxy_enabled', false);
+      if (!enabled) {
+        pill.textContent = 'Proxy: off';
+        pill.className = 'chip proxy-chip off';
+        return;
+      }
+      if (proxyTestState.status === 'ok') {
+        pill.textContent = 'Proxy: healthy';
+        pill.className = 'chip proxy-chip ok';
+        return;
+      }
+      if (proxyTestState.status === 'fail') {
+        pill.textContent = 'Proxy: error';
+        pill.className = 'chip proxy-chip warn';
+        return;
+      }
+      pill.textContent = 'Proxy: on';
+      pill.className = 'chip proxy-chip idle';
+    }
+
+    async function testProxy() {
+      const btn = document.getElementById('cfg-proxy-test');
+      const statusEl = document.getElementById('cfg-proxy-test-status');
+      if (!btn || !statusEl) return;
+      btn.disabled = true;
+      statusEl.textContent = 'Testing proxy…';
+      statusEl.className = 'proxy-test-status testing';
+      try {
+        const res = await fetchJSON('/proxy/test', {method: 'POST'});
+        const latency = res.latency_ms != null ? `${res.latency_ms}ms` : '—';
+        const detail = res.body ? res.body.split('\n')[0] : 'Proxy reachable';
+        proxyTestState = { status: res.ok ? 'ok' : 'fail', message: detail, last: new Date() };
+        statusEl.textContent = `${res.ok ? 'Proxy OK' : 'Proxy error'} · ${latency}`;
+        statusEl.className = `proxy-test-status ${res.ok ? 'ok' : 'fail'}`;
+      } catch (e) {
+        proxyTestState = { status: 'fail', message: e.message, last: new Date() };
+        statusEl.textContent = `Proxy error · ${e.message}`;
+        statusEl.className = 'proxy-test-status fail';
+      } finally {
+        btn.disabled = false;
+        updateProxyPill();
+      }
     }
 
     function updateRailSessionStatus() {
@@ -3057,6 +3114,8 @@
     if (accountsRefreshBtn) accountsRefreshBtn.onclick = loadLogins;
     const cfgSaveBtn = document.getElementById('cfg-save');
     if (cfgSaveBtn) cfgSaveBtn.onclick = saveConfig;
+    const cfgProxyTestBtn = document.getElementById('cfg-proxy-test');
+    if (cfgProxyTestBtn) cfgProxyTestBtn.onclick = testProxy;
     const cfgResetBtn = document.getElementById('cfg-reset');
     if (cfgResetBtn) cfgResetBtn.onclick = () => fillConfigForm(true);
     const acctAddLoginBtn = document.getElementById('acct-add-login');

@@ -179,6 +179,16 @@
   .proxy-badge { @apply text-[10px] uppercase tracking-wide font-semibold px-2 py-1 rounded-full border; }
   .proxy-badge.on { background: #ecfdf3; border-color: #bbf7d0; color: #047857; }
   .proxy-badge.off { background: #f8fafc; border-color: #e2e8f0; color: #64748b; }
+  .proxy-actions { @apply mt-3 flex flex-wrap items-center gap-3; }
+  .proxy-test-status { @apply text-xs text-gray-500; }
+  .proxy-test-status.ok { @apply text-emerald-700; }
+  .proxy-test-status.fail { @apply text-rose-600; }
+  .proxy-test-status.testing { @apply text-amber-700; }
+  .proxy-chip { @apply border border-black/10 uppercase tracking-wide text-[10px] font-semibold px-3 py-1 rounded-full; }
+  .proxy-chip.off { background: #f8fafc; color: #64748b; }
+  .proxy-chip.idle { background: #fffbeb; color: #92400e; border-color: #fcd34d; }
+  .proxy-chip.ok { background: #ecfdf3; color: #047857; border-color: #bbf7d0; }
+  .proxy-chip.warn { background: #fff1f2; color: #be123c; border-color: #fecdd3; }
 
   .explorer-grid { @apply grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]; }
   .explorer-rail { @apply space-y-4; }

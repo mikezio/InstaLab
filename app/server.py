@@ -23,6 +23,8 @@ import subprocess
 import sys
 import time
 import threading
+import urllib.request
+import ssl
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -886,6 +888,12 @@ def _apply_proxy_env(env: dict):
         env["INSTALAB_PROXY_USERNAME"] = proxy.get("username")
     if proxy.get("password"):
         env["INSTALAB_PROXY_PASSWORD"] = proxy.get("password")
+
+
+def _proxy_test_url(provider: str) -> str:
+    if provider == "brightdata":
+        return "https://geo.brdtest.com/welcome.txt?product=resi&method=native"
+    return "https://geo.brdtest.com/welcome.txt?product=resi&method=native"
 
 def _init_unfollow_table():
     conn = _get_db()
@@ -3271,6 +3279,45 @@ def api_unfollow_init():
         proxy.get("password"),
     )
     return jsonify({"started": True, "note": "interactive login opened"})
+
+
+@app.route("/api/proxy/test", methods=["POST", "GET"])
+def api_proxy_test():
+    proxy = _get_proxy_config()
+    if not proxy.get("enabled"):
+        return jsonify({"ok": False, "error": "proxy disabled"}), 400
+    if not proxy.get("host") or not proxy.get("port") or not proxy.get("username") or not proxy.get("password"):
+        return jsonify({"ok": False, "error": "proxy credentials incomplete"}), 400
+
+    proxy_url = f"http://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
+    test_url = _proxy_test_url(proxy.get("provider", "brightdata"))
+
+    handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    ctx = ssl._create_unverified_context()
+    opener = urllib.request.build_opener(handler, urllib.request.HTTPSHandler(context=ctx))
+    req = urllib.request.Request(
+        test_url,
+        headers={
+            "User-Agent": "InstaLabProxyCheck/1.0",
+            "Accept": "text/plain",
+        },
+    )
+    start = time.monotonic()
+    try:
+        with opener.open(req, timeout=20) as resp:
+            body = resp.read(2048).decode("utf-8", errors="ignore").strip()
+            latency_ms = int((time.monotonic() - start) * 1000)
+            return jsonify(
+                {
+                    "ok": resp.status == 200,
+                    "status": resp.status,
+                    "latency_ms": latency_ms,
+                    "body": body[:400],
+                }
+            )
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return jsonify({"ok": False, "error": str(exc), "latency_ms": latency_ms}), 502
 
 
 @app.route("/api/run/cancel", methods=["POST"])
