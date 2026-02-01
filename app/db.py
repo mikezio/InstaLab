@@ -106,6 +106,11 @@ def get_db():
 
 
 def get_columns(conn: DBConn, table: str):
+    # Whitelist valid table names to prevent SQL injection
+    VALID_TABLES = {"config", "runs", "run_followers", "run_followees", "schedules", "unfollow_actions"}
+    if table not in VALID_TABLES:
+        raise ValueError(f"Invalid table name: {table}")
+    
     if is_postgres():
         cur = conn.execute(
             """
@@ -116,6 +121,8 @@ def get_columns(conn: DBConn, table: str):
             (table,),
         )
         return {row[0] for row in cur.fetchall()}
+    # For SQLite, use parameterized query with quote_identifier pattern
+    # SQLite doesn't support parameterized table names in PRAGMA, so we validate first
     cur = conn.execute(f"PRAGMA table_info({table})")
     return {row[1] for row in cur.fetchall()}
 
