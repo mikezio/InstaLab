@@ -42,3 +42,15 @@ If you prefer Postgres instead of SQLite:
 
 ## Operational notes
 - This repo contains code and compose; environment-specific ops runbooks live outside the repo.
+
+## Branching
+- `dev`: active development
+- `main`: stable / public-ready
+
+## Release checklist
+- Update version / changelog (if you keep one)
+- Run UI build (`cd app && npm run build`)
+- Verify API + UI start clean (`docker compose up -d`)
+- Sanity check a run end-to-end in dev
+- Merge `dev` -> `main`
+- Tag release (`git tag vX.Y.Z && git push --tags`)
