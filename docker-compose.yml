@@ -48,7 +48,7 @@ services:
       context: /srv/apps/instalab
     container_name: instalab-ui
     user: "1001:1003"
-    command: ddtrace-run gunicorn controlpanel.wsgi:application --chdir /app/django_app --bind 0.0.0.0:8000 --workers 3 --timeout 120
+    command: /app/scripts/start_ui.sh
     env_file:
       - /srv/secrets/instalab.env
     environment:
