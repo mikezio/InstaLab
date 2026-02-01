@@ -363,6 +363,10 @@ def _get_db():
     except Exception as e:
         # Schema migration errors are logged but non-fatal
         print(f"Warning: Schema migration failed: {e}", file=sys.stderr)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     return conn
 
 

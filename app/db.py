@@ -107,7 +107,17 @@ def get_db():
 
 def get_columns(conn: DBConn, table: str):
     # Whitelist valid table names to prevent SQL injection
-    VALID_TABLES = {"config", "runs", "run_followers", "run_followees", "schedules", "unfollow_actions"}
+    VALID_TABLES = {
+        "config",
+        "runs",
+        "run_followers",
+        "run_followees",
+        "followers_history",
+        "followees_history",
+        "schedules",
+        "unfollow_actions",
+        "count_checks",
+    }
     if table not in VALID_TABLES:
         raise ValueError(f"Invalid table name: {table}")
     
