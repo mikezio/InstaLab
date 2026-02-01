@@ -8,7 +8,10 @@ __pycache__/
 instaloader.db
 django_app/db.sqlite3
 job_runs/
+job_runs
 data_*/
+data_davidjones_tv
+data_mzio
 .playwright/
 /dashboard/
 ui_checks/
