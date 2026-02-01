@@ -51,3 +51,8 @@ jobs:
       - name: Build UI
         run: npm run build
         working-directory: app
+
+      - name: Run Python tests
+        run: |
+          pip install -r app/requirements-dev.txt
+          pytest
