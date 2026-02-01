@@ -2401,7 +2401,7 @@ def api_targets_summary():
         placeholders = ",".join(["?"] * len(targets))
         
         # Get latest 2 runs per target for delta calculation
-        # Filter by rn <= 2 in the subquery to reduce data transfer
+        # Filter in outer query to retrieve only top 2 rows per target
         latest_query = f"""
         SELECT 
             target_username,
@@ -2435,7 +2435,7 @@ def api_targets_summary():
             rows_by_target[target].append(row_dict)
         
         # Get history data (first 30 runs ordered by timestamp)
-        # Filter by rn <= 30 in the WHERE clause for efficiency
+        # Filter ranked results to first 30 rows per target for efficiency
         history_query = f"""
         SELECT target_username, followers_count
         FROM (
