@@ -4,6 +4,8 @@ services:
       context: /srv/apps/instalab
     container_name: instalab-api
     user: "1001:1003"
+    group_add:
+      - "999"
     command: ddtrace-run python server.py
     env_file:
       - /srv/secrets/instalab.env
