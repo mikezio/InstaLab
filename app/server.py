@@ -348,7 +348,10 @@ def _get_db():
             conn.execute("ALTER TABLE runs ADD COLUMN confidence_flag TEXT")
         conn.commit()
     except Exception:
-        pass
+        try:
+            conn.rollback()
+        except Exception:
+            pass
     return conn
 
 
