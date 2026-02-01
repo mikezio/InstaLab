@@ -4,7 +4,6 @@ Lightweight web control panel + scheduler for Instaloader.
 Features:
 - One-off runs via /api/run
 - Interval schedules persisted in SQLite and executed via APScheduler
-- Rebuild dashboard after runs (optional)
 - Simple control UI at /control (static HTML/JS)
 
 Run:
@@ -35,7 +34,6 @@ from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, jsonify, request, send_from_directory, redirect
 
 from instaloader_tracker import update_run_duration, _init_db as _init_instaloader_db
-import dashboard as dashboard_builder
 from unfollow_bot import AuthRequiredError, ensure_auth_state, unfollow_users, init_login
 from db import get_db, get_columns, ddl, is_postgres
 
@@ -1350,7 +1348,7 @@ def _schedule_job(schedule_id, login_username, target_username, cron_expr):
     def _scheduled_wrapper():
         try:
             started = datetime.now(LOCAL_TZ).isoformat()
-            res = guarded_run(login_username, target_username, rebuild_dashboard=True, source=f"schedule:{schedule_id}")
+            res = guarded_run(login_username, target_username, source=f"schedule:{schedule_id}")
             finished = datetime.now(LOCAL_TZ).isoformat()
             try:
                 elapsed = int((datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds())
@@ -1757,7 +1755,7 @@ def _terminate_proc(proc: subprocess.Popen):
         pass
 
 
-def run_snapshot(login_username, target_username, rebuild_dashboard=True, job_id=None, two_factor_code=None):
+def run_snapshot(login_username, target_username, job_id=None, two_factor_code=None):
     _ensure_job_tmp_dir()
     creds = _get_credentials(login_username)
     job = ACTIVE_JOBS.get(login_username)
@@ -1891,16 +1889,10 @@ def run_snapshot(login_username, target_username, rebuild_dashboard=True, job_id
     except Exception:
         pass
     
-    if rebuild_dashboard:
-        dashboard_builder.build_dashboard(
-            base_dir=str(BASE_DIR),
-            output_path=str(BASE_DIR / "dashboard" / "index.html"),
-            db_path=str(DB_PATH_DEFAULT),
-        )
     return result
 
 
-def guarded_run(login_username, target_username, rebuild_dashboard=True, source="api", job_id=None, two_factor_code=None):
+def guarded_run(login_username, target_username, source="api", job_id=None, two_factor_code=None):
     """Serialise runs per login across API + scheduler."""
     _acquire_run_slot(source, login_username, target_username, job_id=job_id)
     try:
@@ -1912,7 +1904,6 @@ def guarded_run(login_username, target_username, rebuild_dashboard=True, source=
         return run_snapshot(
             login_username,
             target_username,
-            rebuild_dashboard=rebuild_dashboard,
             job_id=job_id,
             two_factor_code=two_factor_code,
         )
@@ -2060,7 +2051,7 @@ _restore_schedules()
 _schedule_monitor_job()
 threading.Thread(target=_watchdog_loop, daemon=True).start()
 
-app = Flask(__name__, static_folder=str(BASE_DIR / "dashboard"), static_url_path="/dashboard")
+app = Flask(__name__)
 
 
 @app.route("/api/logins", methods=["GET"])
@@ -2753,7 +2744,6 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
             res = guarded_run(
                 login_username,
                 target_username,
-                rebuild_dashboard=rebuild,
                 source=source,
                 job_id=job_id,
                 two_factor_code=two_factor_code,
@@ -2799,8 +2789,6 @@ def api_run():
     login_username = data.get("login_username")
     target_username = data.get("target_username")
     two_factor_code = data.get("two_factor_code") or data.get("twoFactorCode")
-    # Always rebuild dashboard after a run so new targets appear
-    rebuild = True
     if not login_username or not target_username:
         return jsonify({"error": "login_username and target_username are required"}), 400
     if _is_blocked_login(login_username):
@@ -3216,12 +3204,6 @@ def api_run_delete(run_id):
     target = _delete_run(run_id)
     if not target:
         return jsonify({"error": "run not found"}), 404
-    # Rebuild dashboard so UI reflects deletion
-    dashboard_builder.build_dashboard(
-        base_dir=str(BASE_DIR),
-        output_path=str(BASE_DIR / "dashboard" / "index.html"),
-        db_path=str(DB_PATH_DEFAULT),
-    )
     return jsonify({"deleted": run_id, "target": target, "undo": True})
 
 
@@ -3230,11 +3212,6 @@ def api_run_undo(run_id):
     ok, msg = _restore_run(run_id)
     if not ok:
         return jsonify({"error": msg}), 400
-    dashboard_builder.build_dashboard(
-        base_dir=str(BASE_DIR),
-        output_path=str(BASE_DIR / "dashboard" / "index.html"),
-        db_path=str(DB_PATH_DEFAULT),
-    )
     return jsonify({"restored": run_id})
 
 
@@ -3343,16 +3320,6 @@ def api_schedule_update(schedule_id):
     finally:
         conn.close()
     return jsonify({"updated": schedule_id})
-
-
-@app.route("/api/rebuild", methods=["POST"])
-def api_rebuild():
-    dashboard_builder.build_dashboard(
-        base_dir=str(BASE_DIR),
-        output_path=str(BASE_DIR / "dashboard" / "index.html"),
-        db_path=str(DB_PATH_DEFAULT),
-    )
-    return jsonify({"status": "rebuilt"})
 
 
 def _get_ui_redirect_url():
