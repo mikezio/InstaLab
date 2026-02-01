@@ -72,6 +72,28 @@ def _ensure_job_tmp_dir():
 
 _ensure_job_tmp_dir()
 
+
+def _cleanup_old_job_dirs():
+    """Clean up job directories older than 24 hours."""
+    try:
+        if not JOB_TMP_DIR.exists():
+            return
+        now = time.time()
+        max_age_seconds = 24 * 3600  # 24 hours
+        for item in JOB_TMP_DIR.iterdir():
+            if not item.is_dir():
+                continue
+            try:
+                # Check if directory is older than max_age
+                mtime = item.stat().st_mtime
+                if now - mtime > max_age_seconds:
+                    shutil.rmtree(item, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _ensure_cookie_dir():
     global COOKIE_DIR
     try:
@@ -338,6 +360,7 @@ def _get_db():
             conn.execute("PRAGMA busy_timeout=30000")
         except Exception as e:
             print(f"Warning: Could not set busy_timeout: {e}", file=sys.stderr)
+    # Add schema migrations if needed
     try:
         cols = get_columns(conn, "runs")
         if "duration_seconds" not in cols:
@@ -1424,9 +1447,21 @@ def _run_count_check(login_username, target_username):
         proc.communicate(timeout=180)
     except Exception:
         _terminate_proc(proc)
+        # Clean up temp directory on failure
+        try:
+            shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception:
+            pass
         return None
 
     payload = _read_json_file(result_path) or {}
+    
+    # Clean up temp directory after reading results
+    try:
+        shutil.rmtree(job_dir, ignore_errors=True)
+    except Exception:
+        pass
+    
     if payload.get("status") != "success":
         return None
     return payload.get("result") or None
@@ -1829,11 +1864,28 @@ def run_snapshot(login_username, target_username, rebuild_dashboard=True, job_id
     result_payload = _read_json_file(result_path)
     if not result_payload:
         tail = _tail_file(err_path)
+        # Clean up temp directory on failure
+        try:
+            shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception:
+            pass
         raise RuntimeError(f"worker exited without result{(': ' + tail) if tail else ''}")
     if result_payload.get("status") != "success":
+        # Clean up temp directory on failure
+        try:
+            shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception:
+            pass
         raise RuntimeError(result_payload.get("error", "worker failed"))
 
     result = result_payload.get("result") or {}
+    
+    # Clean up temp directory after successful completion
+    try:
+        shutil.rmtree(job_dir, ignore_errors=True)
+    except Exception:
+        pass
+    
     if rebuild_dashboard:
         dashboard_builder.build_dashboard(
             base_dir=str(BASE_DIR),
@@ -1869,6 +1921,15 @@ executor = ThreadPoolExecutor(max_workers=3)
 scheduler = BackgroundScheduler()
 scheduler.configure(timezone=LOCAL_TZ)
 scheduler.start()
+
+# Schedule periodic cleanup of old job directories (runs every 6 hours)
+scheduler.add_job(
+    _cleanup_old_job_dirs,
+    trigger="interval",
+    hours=6,
+    id="cleanup_old_job_dirs",
+    name="Cleanup old job directories",
+)
 
 # Track in-flight manual runs
 RUN_FUTURES = {}
