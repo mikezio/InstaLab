@@ -10,16 +10,20 @@ InstaLab is an operations console for Instagram snapshot runs (followers/followi
 
 ## Repo layout
 - `docker-compose.yml` / `docker-compose.preview.yml`
+- `docker-compose.local.yml` (one-command local setup)
 - `Dockerfile`
 - `app/` (Flask API, Django UI, workers, scripts, UI build pipeline)
 
 ## Quick start (local)
-1) Copy env template and fill secrets:
+1) Create a local env:
    - `cp .env.example .env`
 2) Build and run:
-   - `docker compose up -d`
+   - `docker compose -f docker-compose.local.yml up -d --build`
+   - Or: `./scripts/local_up.sh`
 3) Open UI:
-   - http://localhost:8000 (if your compose exposes it)
+   - http://localhost:8000
+4) Optional VNC login helper:
+   - http://localhost:7900
 
 ## Environment and secrets
 - Secrets are not committed. Use `.env.example` as a template.

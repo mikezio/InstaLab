@@ -1,0 +1,75 @@
+services:
+  instalab-api:
+    build: .
+    container_name: instalab-api
+    command: python server.py
+    environment:
+      INSTALAB_ENV: /app/.env
+      INSTALAB_API_BASE: http://instalab-api:5000/
+    volumes:
+      - ./app:/app
+      - ./.env:/app/.env:ro
+      - instalab_data:/data/instalab
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  instalab-ui:
+    build: .
+    container_name: instalab-ui
+    command: gunicorn controlpanel.wsgi:application --chdir /app/django_app --bind 0.0.0.0:8000 --workers 3 --timeout 120
+    environment:
+      INSTALAB_ENV: /app/.env
+      INSTALAB_API_BASE: http://instalab-api:5000/
+    volumes:
+      - ./app:/app
+      - ./.env:/app/.env:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      - instalab-api
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  instalab-vnc:
+    build: .
+    container_name: instalab-vnc
+    command: /app/scripts/start_vnc.sh
+    environment:
+      DISPLAY_NUM: "1"
+      VNC_PORT: "5900"
+      NOVNC_PORT: "7900"
+      INSTALAB_ENV: /app/.env
+    volumes:
+      - ./app:/app
+      - ./.env:/app/.env:ro
+      - instalab_data:/data/instalab
+    ports:
+      - "7900:7900"
+    restart: unless-stopped
+
+volumes:
+  instalab_data:
