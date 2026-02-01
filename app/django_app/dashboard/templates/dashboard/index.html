@@ -1,0 +1,3002 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>InstaLab Console</title>
+  <script src="https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js" type="text/javascript"></script>
+  <script>
+    window.DD_RUM && window.DD_RUM.init({
+      clientToken: "pubb92001b43e6a371049bd2f502f1c40fa",
+      applicationId: "d444dffb-5a99-48cc-9398-92fb50a74ea1",
+      site: "datadoghq.com",
+      service: "instalab-ui",
+      env: "homelab",
+      version: "1",
+      sessionSampleRate: 100,
+      sessionReplaySampleRate: 0,
+      trackUserInteractions: true,
+      trackResources: true,
+      trackLongTasks: true,
+      defaultPrivacyLevel: "mask-user-input",
+      allowedTracingOrigins: ["https://instalab.mzio.dev"],
+      tracingSampleRate: 100
+    });
+  </script>
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/static/ui.css?v=20260126f">
+
+</head>
+<body>
+  <div id="status-ticker" class="status-ticker hidden">
+    <div class="ticker-track" id="ticker-track">
+      <span class="ticker-text" id="ticker-text"></span>
+      <span class="ticker-text" id="ticker-text-clone"></span>
+    </div>
+  </div>
+  <div id="mini-now" class="mini-now hidden">
+    <div class="mini-title">Now running</div>
+    <div class="mini-list" id="mini-now-list"></div>
+  </div>
+        <div class="flex h-screen overflow-hidden bg-gray-50">
+    <aside class="hidden lg:flex lg:w-72 lg:flex-col border-r border-gray-200 bg-white px-5 py-6">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-xs uppercase tracking-[0.35em] text-gray-400 font-semibold">InstaLab</div>
+          <div class="text-xl font-semibold text-gray-900">Command</div>
+        </div>
+        <span class="status-pill idle" id="rail-status">Idle</span>
+      </div>
+
+      <div class="mt-6">
+        <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Views</div>
+        <div class="mt-3 flex flex-col gap-2">
+          <button class="view-tab active" data-view="overview">Overview</button>
+          <button class="view-tab" data-view="explorer">Explorer</button>
+        </div>
+      </div>
+
+      <div class="mt-6">
+        <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Operator</div>
+        <label for="rail-login" class="mt-3 block text-xs uppercase tracking-wide text-gray-500 font-semibold">Collector login</label>
+        <select id="rail-login" class="mt-2 w-full border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700"></select>
+        <div class="mt-2 text-xs text-gray-500" id="rail-session-status">Session status: —</div>
+      </div>
+
+      <div class="mt-6">
+        <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Run status</div>
+        <div class="mt-3 flex flex-wrap gap-2" id="run-status"></div>
+      </div>
+    </aside>
+
+    <div class="relative flex flex-1 flex-col overflow-y-auto">
+      <header class="sticky top-0 z-20 border-b border-gray-200 bg-white/80 backdrop-blur">
+        <div class="mx-auto max-w-[1600px] px-6 py-4">
+          <div class="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <div class="text-xs uppercase tracking-[0.35em] text-gray-400 font-semibold">InstaLab Command Center</div>
+              <h1 class="text-3xl font-semibold text-gray-900">Operations</h1>
+              <p class="text-sm text-gray-500">Operational surface for captures, queue flow, and cleanup readiness.</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="chip neutral" id="kpi-last-run">Last run —</span>
+              <button class="secondary" id="toggle-log">Activity log</button>
+              <button class="ghost-btn" id="open-accounts">Accounts</button>
+              <button class="ghost-btn" id="open-config">Settings</button>
+            </div>
+          </div>
+          <div class="mt-4 flex flex-wrap gap-2">
+            <button class="view-tab active" data-view="overview">Overview</button>
+            <button class="view-tab" data-view="explorer">Explorer</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="flex-1">
+        <div class="mx-auto max-w-[1600px] px-6 py-6">
+          <section class="app-view active" id="view-overview">
+            <div class="border border-gray-200 bg-white px-4 py-3 flex flex-wrap gap-4 items-center">
+              <div class="flex flex-col text-xs uppercase tracking-wide text-gray-400"><span>Active</span><strong id="kpi-active-runs" class="text-lg normal-case text-gray-900">0</strong></div>
+              <div class="flex flex-col text-xs uppercase tracking-wide text-gray-400"><span>Queued</span><strong id="kpi-queued-runs" class="text-lg normal-case text-gray-900">0</strong></div>
+              <div class="flex flex-col text-xs uppercase tracking-wide text-gray-400"><span>Backlog ETA</span><strong id="kpi-backlog-eta" class="text-lg normal-case text-gray-900">—</strong></div>
+              <div class="flex flex-col text-xs uppercase tracking-wide text-gray-400"><span>Pressure</span><strong id="kpi-queue-pressure" class="text-lg normal-case text-gray-900">—</strong></div>
+              <div class="flex flex-col text-xs uppercase tracking-wide text-gray-400"><span>Freshness</span><strong id="kpi-staleness" class="text-lg normal-case text-gray-900">—</strong></div>
+              <div class="flex flex-col text-xs uppercase tracking-wide text-gray-400"><span>Avg runtime</span><strong id="kpi-avg-duration" class="text-lg normal-case text-gray-900">—</strong></div>
+              <div class="flex flex-col text-xs uppercase tracking-wide text-gray-400"><span>Momentum</span><strong id="kpi-momentum" class="text-lg normal-case text-gray-900">—</strong></div>
+              <div class="flex flex-col text-xs uppercase tracking-wide text-gray-400"><span>NFB risk</span><strong id="kpi-nfb-risk" class="text-lg normal-case text-gray-900">—</strong></div>
+              <div class="flex flex-col text-xs uppercase tracking-wide text-gray-400"><span>Tracked</span><strong id="kpi-total-targets" class="text-lg normal-case text-gray-900">—</strong></div>
+              <div class="flex flex-col text-xs uppercase tracking-wide text-gray-400"><span>Total runs</span><strong id="kpi-total-runs" class="text-lg normal-case text-gray-900">—</strong></div>
+              <div class="flex-1"></div>
+            </div>
+
+            <div class="mt-6 grid grid-cols-12 gap-6">
+              <div class="col-span-12 xl:col-span-7 space-y-6">
+                <div class="border border-gray-200 bg-white p-5 space-y-4">
+                  <div class="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Focus account</div>
+                      <h2 id="hero-title" class="text-2xl font-semibold text-gray-900">@—</h2>
+                      <p class="muted" id="hero-sub">Last run: —</p>
+                    </div>
+                    <div class="hero-actions">
+                      <button class="secondary" id="hero-explorer-btn">Open in Explorer</button>
+                    </div>
+                  </div>
+                  <div class="grid gap-4 sm:grid-cols-3">
+                    <div>
+                      <span class="text-[11px] uppercase tracking-wide text-gray-400">Followers</span>
+                      <strong id="hero-followers" class="text-2xl text-gray-900">—</strong>
+                      <div class="delta" id="hero-followers-delta">—</div>
+                    </div>
+                    <div>
+                      <span class="text-[11px] uppercase tracking-wide text-gray-400">Following</span>
+                      <strong id="hero-following" class="text-2xl text-gray-900">—</strong>
+                      <div class="delta" id="hero-following-delta">—</div>
+                    </div>
+                    <div>
+                      <span class="text-[11px] uppercase tracking-wide text-gray-400">No follow-back</span>
+                      <strong id="hero-nfb" class="text-2xl text-gray-900">—</strong>
+                      <div class="muted" id="hero-nfb-sub">latest</div>
+                    </div>
+                  </div>
+                  <div class="grid gap-4 lg:grid-cols-2">
+                    <div>
+                      <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Change summary</div>
+                      <div class="chip-row" id="hero-changes"></div>
+                      <div class="ratio" id="hero-ratio"></div>
+                    </div>
+                    <div>
+                      <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Focus insight</div>
+                      <div class="muted" id="hero-insight">Select a run for deeper insight in Explorer.</div>
+                    </div>
+                  </div>
+                  <div id="unfollow-hidden" style="display:none;">
+                    <span id="uf-state"></span>
+                    <input id="uf-max" type="number" min="0" value="0">
+                    <input id="uf-delay-min" type="number" min="5" value="25">
+                    <input id="uf-delay-max" type="number" min="5" value="45">
+                    <select id="uf-dry">
+                      <option value="true">Yes (preview only)</option>
+                      <option value="false" selected>No (unfollow)</option>
+                    </select>
+                    <div id="uf-status"></div>
+                    <div id="uf-preview"></div>
+                    <div id="uf-log"></div>
+                  </div>
+                </div>
+
+                <div class="border border-gray-200 bg-white p-5 space-y-3">
+                  <div class="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Queue flow</div>
+                      <p class="muted">Active captures, queued runs, and pace cues.</p>
+                    </div>
+                    <span class="chip neutral" id="timezone-chip">Timezone: ET</span>
+                  </div>
+                  <div class="border border-dashed border-gray-200 p-4 text-sm text-gray-500" id="status-ticker-slot">
+                    Waiting for live queue updates…
+                  </div>
+                </div>
+              </div>
+
+              <div class="col-span-12 xl:col-span-5 space-y-6">
+                <div class="border border-gray-200 bg-white p-5">
+                  <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Live lanes</div>
+                  <div class="timeline-list" id="timeline-list"></div>
+                </div>
+                <div class="border border-gray-200 bg-white p-5">
+                  <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Queue telemetry</div>
+                  <span class="status-pill idle" id="system-state-pill">Idle</span>
+                  <div class="status-list" id="sys-status"></div>
+                </div>
+                <div class="border border-gray-200 bg-white p-5" id="run-panel">
+                  <div class="flex items-center justify-between">
+                    <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Launch capture</div>
+                    <span class="status-pill idle" id="run-panel-pill">Ready</span>
+                  </div>
+                  <div class="form-grid mt-3">
+                    <div>
+                      <label for="run-login">Collector login</label>
+                      <select id="run-login"></select>
+                    </div>
+                    <div>
+                      <label for="run-target">Tracked account</label>
+                      <input id="run-target" placeholder="e.g. joeeverett30">
+                    </div>
+                    <div>
+                      <label for="run-2fa">2FA code</label>
+                      <input id="run-2fa" placeholder="123456" autocomplete="one-time-code">
+                      <div class="config-help">Leave blank unless prompted.</div>
+                    </div>
+                    <div class="field-action">
+                      <button id="run-btn">Run now</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="border border-gray-200 bg-white p-5">
+                  <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Cleanup runbook</div>
+                  <span class="status-pill idle" id="hero-cleanup-pill">Idle</span>
+                  <div class="row" style="gap:8px;">
+                    <button id="hero-cleanup-btn">Clean no-follow-back</button>
+                    <button class="secondary" id="hero-init-btn" style="display:none;">Init login</button>
+                  </div>
+                  <div class="row" style="margin-top: 8px; gap:8px;">
+                    <span class="muted" id="hero-cleanup-meta"></span>
+                  </div>
+                  <div id="hero-cleanup-alert" class="alert-banner hidden" style="margin-top: 8px;"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-6 border border-gray-200 bg-white p-5">
+              <div>
+                <div class="text-[11px] uppercase tracking-[0.3em] text-gray-400 font-semibold">Target roster</div>
+                <h3 class="text-lg font-semibold text-gray-900">Signals by account</h3>
+                <p class="muted">Status, deltas, and weekly net in one table.</p>
+              </div>
+              <div class="roster-table" id="targets-grid"></div>
+            </div>
+          </section>
+
+<section class="app-view" id="view-explorer">
+          <section class="section" id="explorer">
+            <div class="section-header">
+              <div>
+                <h2 id="history-title">Run Explorer</h2>
+                <p class="sub" id="history-sub">Investigate snapshots without stacked popups.</p>
+              </div>
+            </div>
+            <div class="panel" style="padding:16px;">
+              <div class="explorer-grid">
+                <div class="explorer-rail">
+                  <div class="rail-title">Pick a tracked account</div>
+                  <select id="hist-target"></select>
+                  <div class="row">
+                    <input id="hist-limit" type="number" min="1" max="200" value="20" style="width: 80px;">
+                    <button id="hist-load">Load</button>
+                  </div>
+                  <div id="history-summary" class="chip-row"></div>
+                  <div id="history-trend" class="spark"></div>
+                  <div id="hist-list" class="history-strip"></div>
+                </div>
+                <div class="explorer-focus">
+                  <div id="history-focus" class="history-focus empty">
+                    <div class="row" style="justify-content: space-between; align-items: center;">
+                      <div>
+                        <h4 style="margin:0;">Run focus</h4>
+                        <p class="muted" style="margin:2px 0 0;">A clean breakdown of the selected run.</p>
+                      </div>
+                      <div class="row" style="gap:8px;">
+                        <button class="secondary" id="back-history">Clear selection</button>
+                        <button class="secondary" id="detail-delete">Delete run</button>
+                      </div>
+                    </div>
+                    <div class="focus-placeholder">Select a run to inspect details.</div>
+                    <div class="focus-body">
+                      <div class="detail-hero">
+                        <div class="row" style="justify-content: space-between; align-items: center;">
+                          <div>
+                            <h3 id="detail-title" style="margin: 0;">Run detail</h3>
+                            <p class="muted" id="detail-meta" style="margin: 2px 0 0;"></p>
+                          </div>
+                        </div>
+                        <div class="detail-kpis">
+                          <div class="detail-kpi">
+                            <span>Followers</span>
+                            <strong id="detail-kpi-followers">—</strong>
+                          </div>
+                          <div class="detail-kpi">
+                            <span>Following</span>
+                            <strong id="detail-kpi-following">—</strong>
+                          </div>
+                          <div class="detail-kpi">
+                            <span>No follow-back</span>
+                            <strong id="detail-kpi-nfb">—</strong>
+                          </div>
+                          <div class="detail-kpi">
+                            <span>Net followers</span>
+                            <strong id="detail-kpi-netfollowers">—</strong>
+                          </div>
+                          <div class="detail-kpi">
+                            <span>Net following</span>
+                            <strong id="detail-kpi-netfollowing">—</strong>
+                          </div>
+                        </div>
+                        <div class="detail-insight" id="detail-insight">Select a run to see its insight.</div>
+                        <div class="focus-highlights">
+                          <div class="highlight-card">
+                            <span>Followers change</span>
+                            <strong id="detail-highlight-followers">—</strong>
+                          </div>
+                          <div class="highlight-card">
+                            <span>Following change</span>
+                            <strong id="detail-highlight-following">—</strong>
+                          </div>
+                          <div class="highlight-card">
+                            <span>No follow-back count</span>
+                            <strong id="detail-highlight-nfb">—</strong>
+                          </div>
+                        </div>
+                        <div class="card" style="margin-top:12px;">
+                          <div class="panel-header">
+                            <div>
+                              <h4 style="margin:0;">Recent follow changes</h4>
+                              <p class="muted" style="margin:2px 0 0;">New follows in the window plus recent unfollows.</p>
+                            </div>
+                            <div class="row" style="gap:8px;">
+                              <select id="detail-cohort-kind">
+                                <option value="followers">Followers</option>
+                                <option value="following">Following</option>
+                              </select>
+                              <select id="detail-cohort-window">
+                                <option value="7">7d</option>
+                                <option value="14">14d</option>
+                                <option value="30">30d</option>
+                              </select>
+                            </div>
+                          </div>
+                          <div class="chip-row" style="margin-top:6px;">
+                            <span class="chip good" id="detail-cohort-active">0 still following</span>
+                            <span class="chip warn" id="detail-cohort-churned">0 unfollowed</span>
+                          </div>
+                          <details class="card-toggle" id="detail-cohort-toggle">
+                            <summary>Show list</summary>
+                            <ul class="list" id="detail-cohort-list"></ul>
+                          </details>
+                        </div>
+                      </div>
+                      <details class="card-toggle" id="detail-expand">
+                        <summary>Show details</summary>
+                        <div class="tab-bar" style="margin-top:10px;">
+                          <button class="tab-btn active" data-tab="summary">Summary</button>
+                          <button class="tab-btn" data-tab="followers">Followers</button>
+                          <button class="tab-btn" data-tab="following">Following</button>
+                          <button class="tab-btn" data-tab="nfb">No follow-back</button>
+                        </div>
+                        <div class="tab-panel active" data-panel="summary">
+                          <div class="card" style="margin-top:10px;">
+                            <div class="panel-header">
+                              <div>
+                                <h4 style="margin:0;">Run performance</h4>
+                                <p class="muted" style="margin:2px 0 0;">Speed details for this snapshot.</p>
+                              </div>
+                            </div>
+                            <div class="metric-grid" id="detail-performance"></div>
+                          </div>
+                          <div class="row" style="margin-top:10px;">
+                            <button class="secondary" id="dl-followers">Download followers CSV</button>
+                            <button class="secondary" id="dl-followees">Download following CSV</button>
+                            <button class="secondary" id="dl-nfb">Download no-follow-back CSV</button>
+                          </div>
+                        </div>
+                        <div class="tab-panel" data-panel="followers">
+                          <div class="split-lists" style="margin-top:10px;">
+                            <div class="list-card">
+                              <div class="panel-header">
+                                <div>
+                                  <h4 style="margin:0;">New followers</h4>
+                                  <p class="muted" style="margin:2px 0 0;">Added in this run.</p>
+                                </div>
+                                <span class="chip good" id="detail-fadd-count">+0</span>
+                              </div>
+                              <details class="card-toggle" id="detail-fadd-toggle">
+                                <summary>Show list</summary>
+                                <ul class="list" id="detail-fadd"></ul>
+                              </details>
+                            </div>
+                            <div class="list-card">
+                              <div class="panel-header">
+                                <div>
+                                  <h4 style="margin:0;">Lost followers</h4>
+                                  <p class="muted" style="margin:2px 0 0;">Unfollowed in this run.</p>
+                                </div>
+                                <span class="chip warn" id="detail-frem-count">-0</span>
+                              </div>
+                              <details class="card-toggle" id="detail-frem-toggle">
+                                <summary>Show list</summary>
+                                <ul class="list" id="detail-frem"></ul>
+                              </details>
+                            </div>
+                            <div class="list-card">
+                              <div class="panel-header">
+                                <div>
+                                  <h4 style="margin:0;">Current followers</h4>
+                                  <p class="muted" style="margin:2px 0 0;">Snapshot list.</p>
+                                </div>
+                              </div>
+                              <details class="card-toggle" id="detail-followers-toggle">
+                                <summary>Show list</summary>
+                                <ul class="list" id="detail-followers"></ul>
+                              </details>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="tab-panel" data-panel="following">
+                          <div class="split-lists" style="margin-top:10px;">
+                            <div class="list-card">
+                              <div class="panel-header">
+                                <div>
+                                  <h4 style="margin:0;">New following</h4>
+                                  <p class="muted" style="margin:2px 0 0;">Added in this run.</p>
+                                </div>
+                                <span class="chip good" id="detail-feadd-count">+0</span>
+                              </div>
+                              <details class="card-toggle" id="detail-feadd-toggle">
+                                <summary>Show list</summary>
+                                <ul class="list" id="detail-feadd"></ul>
+                              </details>
+                            </div>
+                            <div class="list-card">
+                              <div class="panel-header">
+                                <div>
+                                  <h4 style="margin:0;">Unfollowed</h4>
+                                  <p class="muted" style="margin:2px 0 0;">Removed in this run.</p>
+                                </div>
+                                <span class="chip warn" id="detail-ferem-count">-0</span>
+                              </div>
+                              <details class="card-toggle" id="detail-ferem-toggle">
+                                <summary>Show list</summary>
+                                <ul class="list" id="detail-ferem"></ul>
+                              </details>
+                            </div>
+                            <div class="list-card">
+                              <div class="panel-header">
+                                <div>
+                                  <h4 style="margin:0;">Current following</h4>
+                                  <p class="muted" style="margin:2px 0 0;">Snapshot list.</p>
+                                </div>
+                              </div>
+                              <details class="card-toggle" id="detail-followees-toggle">
+                                <summary>Show list</summary>
+                                <ul class="list" id="detail-followees"></ul>
+                              </details>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="tab-panel" data-panel="nfb">
+                          <div class="list-card" style="margin-top:10px;">
+                            <div class="panel-header">
+                              <div>
+                                <h4 style="margin:0;">Doesn't follow target back</h4>
+                                <p class="muted" style="margin:2px 0 0;">Accounts the target follows that don't follow back.</p>
+                              </div>
+                              <span class="chip neutral" id="detail-nfb-count">0</span>
+                            </div>
+                            <details class="card-toggle" id="detail-nfb-toggle" open>
+                              <summary>Show list</summary>
+                              <ul class="list" id="detail-nfb"></ul>
+                            </details>
+                          </div>
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </section>
+        </div>
+      </main>
+    </div>
+  </div>
+<div id="schedule-modal" class="modal">
+    <div class="modal-card">
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <strong>Schedule capture</strong>
+        <button class="secondary" id="close-schedule">Close</button>
+      </div>
+      <div class="schedule-grid" style="margin-top: 12px;">
+        <div class="card">
+          <div class="panel-header">
+            <div>
+              <h3 id="sch-title">Add schedule</h3>
+              <p class="muted">Build a repeatable capture plan.</p>
+            </div>
+          </div>
+          <label for="sch-login">Collector login (your account)</label>
+          <select id="sch-login"></select>
+          <label for="sch-target">Tracked account</label>
+          <div class="row" style="gap: 8px;">
+            <input id="sch-target" placeholder="e.g. davidjones.tv" list="targets-list" style="flex:1; min-width: 160px;">
+            <select id="sch-target-select" style="flex:1; min-width: 140px;">
+              <option value="">Pick previous</option>
+            </select>
+          </div>
+          <label for="sch-frequency">Frequency</label>
+          <select id="sch-frequency">
+            <option value="once_daily">Once daily</option>
+            <option value="twice_daily">Twice daily</option>
+            <option value="every_other_day">Every other day</option>
+            <option value="weekly">Weekly</option>
+          </select>
+          <label for="sch-time1">Time</label>
+          <input id="sch-time1" type="time" value="09:00">
+          <div id="time2-wrap" style="display:none;">
+            <label for="sch-time2">Second time</label>
+            <input id="sch-time2" type="time" value="21:00">
+          </div>
+          <div id="weekday-wrap" style="display:none;">
+            <label for="sch-weekday">Day of week</label>
+            <select id="sch-weekday">
+              <option value="0">Sunday</option>
+              <option value="1">Monday</option>
+              <option value="2">Tuesday</option>
+              <option value="3">Wednesday</option>
+              <option value="4">Thursday</option>
+              <option value="5">Friday</option>
+              <option value="6">Saturday</option>
+            </select>
+          </div>
+          <div class="row" style="margin-top: 10px;">
+            <button id="sch-btn">Create</button>
+            <button class="secondary" id="sch-reset" style="display:none;">Cancel edit</button>
+          </div>
+          <input type="hidden" id="sch-edit-id">
+          <div class="status-line" id="sch-status"></div>
+        </div>
+        <div>
+          <div class="panel-header" style="margin-bottom: 8px;">
+            <div>
+              <h3>Upcoming schedules</h3>
+              <p class="muted">Tap Run now to execute immediately.</p>
+            </div>
+          </div>
+          <div id="schedules-list" class="cards"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="twofa-modal" class="modal">
+    <div class="modal-card" style="max-width: 520px;">
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <strong>Two-factor code required</strong>
+        <button class="secondary" id="close-2fa">Close</button>
+      </div>
+      <p class="muted" id="twofa-subtext" style="margin-top: 8px;">
+        Enter the 6-digit code for <strong id="twofa-login">this login</strong> to continue the run.
+      </p>
+      <div class="form-grid" style="margin-top: 12px;">
+        <div>
+          <label for="twofa-code">2FA code</label>
+          <input id="twofa-code" placeholder="123456" autocomplete="one-time-code">
+        </div>
+        <div class="field-action">
+          <button id="twofa-submit">Continue</button>
+        </div>
+      </div>
+      <div class="row" style="justify-content: flex-end; gap: 8px; margin-top: 6px;">
+        <button class="secondary" id="twofa-skip">Run without code</button>
+      </div>
+      <div class="config-help">You should only need this once per login. A session will be saved after a successful run.</div>
+    </div>
+  </div>
+
+  <div id="config-modal" class="modal">
+    <div class="modal-card">
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <div>
+          <h3 style="margin: 0;">Configuration</h3>
+          <p class="muted" style="margin: 2px 0 0;">Tune defaults, safeguards, and display preferences.</p>
+        </div>
+        <button class="secondary" id="close-config">Close</button>
+      </div>
+      <div class="divider"></div>
+      <div class="config-grid">
+        <div class="card config-section">
+          <h4>Runner safeguards</h4>
+          <label for="cfg-run-stall">Stall timeout (sec)</label>
+          <input id="cfg-run-stall" type="number" min="60" max="21600">
+          <div class="config-help">Cancel a run if no progress is detected.</div>
+          <label for="cfg-run-max">Max run duration (sec)</label>
+          <input id="cfg-run-max" type="number" min="600" max="43200">
+          <div class="config-help">Hard stop for any single snapshot run.</div>
+          <label for="cfg-run-request">Request timeout (sec)</label>
+          <input id="cfg-run-request" type="number" min="10" max="3600">
+          <div class="config-help">Network timeout while fetching data.</div>
+          <label for="cfg-run-delay-min">Per-account delay min (sec)</label>
+          <input id="cfg-run-delay-min" type="number" min="0" max="5" step="0.05">
+          <label for="cfg-run-delay-max">Per-account delay max (sec)</label>
+          <input id="cfg-run-delay-max" type="number" min="0" max="5" step="0.05">
+          <div class="config-help">Adds jitter between account fetches to reduce rate-limit pressure.</div>
+        </div>
+        <div class="card config-section">
+          <h4>Unfollow defaults</h4>
+          <label for="cfg-unfollow-max">Max unfollows per run</label>
+          <input id="cfg-unfollow-max" type="number" min="1" max="500">
+          <label for="cfg-unfollow-delay-min">Delay min (sec)</label>
+          <input id="cfg-unfollow-delay-min" type="number" min="1" max="600">
+          <label for="cfg-unfollow-delay-max">Delay max (sec)</label>
+          <input id="cfg-unfollow-delay-max" type="number" min="1" max="900">
+          <label for="cfg-unfollow-dry">Default mode</label>
+          <select id="cfg-unfollow-dry">
+            <option value="false">Unfollow</option>
+            <option value="true">Preview only</option>
+          </select>
+          <div class="config-help">Used when you hit Clean no-follow-back.</div>
+        </div>
+        <div class="card config-section">
+          <h4>Schedule defaults</h4>
+          <label for="cfg-sch-frequency">Frequency</label>
+          <select id="cfg-sch-frequency">
+            <option value="once_daily">Once daily</option>
+            <option value="twice_daily">Twice daily</option>
+            <option value="every_other_day">Every other day</option>
+            <option value="weekly">Weekly</option>
+          </select>
+          <label for="cfg-sch-time1">Time</label>
+          <input id="cfg-sch-time1" type="time">
+          <label for="cfg-sch-time2">Second time</label>
+          <input id="cfg-sch-time2" type="time">
+          <label for="cfg-sch-weekday">Day of week</label>
+          <select id="cfg-sch-weekday">
+            <option value="0">Sunday</option>
+            <option value="1">Monday</option>
+            <option value="2">Tuesday</option>
+            <option value="3">Wednesday</option>
+            <option value="4">Thursday</option>
+            <option value="5">Friday</option>
+            <option value="6">Saturday</option>
+          </select>
+          <div class="config-help">Applied when you open the schedule builder.</div>
+        </div>
+        <div class="card config-section">
+          <h4>Display</h4>
+          <label for="cfg-ui-timezone">UI timezone</label>
+          <input id="cfg-ui-timezone" placeholder="America/New_York">
+          <div class="config-help">Formatting in the UI only. Server runs stay in ET.</div>
+        </div>
+        <div class="card config-section">
+          <h4>Monitoring</h4>
+          <label for="cfg-monitor-enabled">Auto monitor</label>
+          <select id="cfg-monitor-enabled">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+          <label for="cfg-monitor-interval">Check interval (min)</label>
+          <input id="cfg-monitor-interval" type="number" min="30" max="720">
+          <label for="cfg-monitor-threshold">Trigger threshold (accounts)</label>
+          <input id="cfg-monitor-threshold" type="number" min="1" max="200">
+          <label for="cfg-monitor-gap">Min gap between full runs (min)</label>
+          <input id="cfg-monitor-gap" type="number" min="60" max="1440">
+          <label for="cfg-monitor-login">Monitor login</label>
+          <select id="cfg-monitor-login"></select>
+          <div class="config-help">Checks counts and triggers a full run on meaningful change.</div>
+        </div>
+      </div>
+      <div class="config-actions">
+        <button class="secondary" id="cfg-reset">Reset to defaults</button>
+        <button id="cfg-save">Save changes</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="accounts-modal" class="modal">
+    <div class="modal-card wide">
+      <div class="row" style="justify-content: space-between; align-items: center;">
+        <div>
+          <h3 style="margin: 0;">Account manager</h3>
+          <p class="muted" style="margin: 2px 0 0;">Add, reset, or remove collector logins.</p>
+        </div>
+        <div class="row" style="gap: 8px;">
+          <button class="secondary" id="accounts-refresh">Refresh</button>
+          <button class="secondary" id="close-accounts">Close</button>
+        </div>
+      </div>
+      <div class="divider"></div>
+      <div class="accounts-grid">
+        <div class="card">
+          <div class="panel-header">
+            <div>
+              <h3>Accounts</h3>
+              <p class="muted">Session state + source (env or file).</p>
+            </div>
+          </div>
+          <div class="rail-sessions" id="accounts-list"></div>
+          <div class="config-help">Deleting an env-based login hides it from the UI. Re-add to restore.</div>
+        </div>
+        <div class="card">
+          <div class="panel-header">
+            <div>
+              <h3>Add account</h3>
+              <p class="muted">Passwords are scrubbed once a session is saved.</p>
+            </div>
+          </div>
+          <label for="acct-new-login-username">Username</label>
+          <input id="acct-new-login-username" placeholder="instagram_username">
+          <label for="acct-new-login-password">Password</label>
+          <input id="acct-new-login-password" type="password" placeholder="password">
+          <label for="acct-new-login-cookie">Cookie filename (optional)</label>
+          <input id="acct-new-login-cookie" placeholder="cookies_<username>.txt">
+          <div class="row" style="gap: 8px; margin-top: 8px;">
+            <button class="secondary" id="acct-add-login">Add / update account</button>
+          </div>
+          <div class="config-help">Use this to add new accounts or reauthorize after a reset.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="floating-log" id="log-panel">
+    <div class="row" style="justify-content: space-between; align-items: center;">
+      <strong>Activity log</strong>
+      <button class="secondary" id="close-log">Close</button>
+    </div>
+    <div class="log" id="log"></div>
+  </div>
+  <div class="toast neutral" id="toast"></div>
+  <datalist id="targets-list"></datalist>
+
+  <script>
+    const API_BASE = '/api';
+    const logEl = document.getElementById('log');
+    let configCache = { ui_timezone: 'America/New_York' };
+    let configDefaults = {};
+    let loginsList = [];
+    let primaryLogin = '';
+    let targetsCache = [];
+    let schedulesCache = [];
+    let summaryCache = {};
+    let statusCache = null;
+    let lastStatusCache = null;
+    let unfollowCache = null;
+    let activeFilter = 'all';
+    let focusLogin = '';
+    let toastTimer;
+    let statusTimer;
+
+    function log(msg) {
+      const ts = new Date().toISOString();
+      logEl.textContent = `[${ts}] ${msg}\n` + logEl.textContent;
+    }
+    function showToast(msg, tone='neutral') {
+      const el = document.getElementById('toast');
+      el.className = `toast ${tone}`;
+      el.textContent = msg;
+      el.style.display = 'block';
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { el.style.display = 'none'; }, 3200);
+    }
+
+    const logPanel = document.getElementById('log-panel');
+    document.getElementById('toggle-log').onclick = () => logPanel.style.display = 'block';
+    document.getElementById('close-log').onclick = () => logPanel.style.display = 'none';
+
+    async function fetchJSON(path, opts={}) {
+      const url = path.startsWith('http') ? path : `${API_BASE}${path.startsWith('/') ? '' : '/'}${path}`;
+      const res = await fetch(url, Object.assign({headers: {'Content-Type': 'application/json'}}, opts));
+      const text = await res.text();
+      let data = null;
+      if (text) {
+        try { data = JSON.parse(text); } catch { data = null; }
+      }
+      if (!res.ok) {
+        const msg = (data && (data.error || data.message)) ? (data.error || data.message) : (text || `HTTP ${res.status}`);
+        const err = new Error(msg);
+        err.status = res.status;
+        err.payload = data;
+        throw err;
+      }
+      return data ?? {};
+    }
+
+    function getConfigValue(key, fallback) {
+      if (configCache && Object.prototype.hasOwnProperty.call(configCache, key)) {
+        return configCache[key];
+      }
+      if (configDefaults && Object.prototype.hasOwnProperty.call(configDefaults, key)) {
+        return configDefaults[key];
+      }
+      return fallback;
+    }
+    function getTimeZone() {
+      return getConfigValue('ui_timezone', 'America/New_York');
+    }
+
+    function parseTs(tstr){
+      if (!tstr) return null;
+      const m = tstr.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/);
+      if (m) {
+        const [_, Y, M, D, h, mi, s] = m;
+        return new Date(+Y, +M - 1, +D, +h, +mi, +s);
+      }
+      const d = new Date(tstr);
+      return isNaN(d) ? null : d;
+    }
+    function timeAgo(tstr) {
+      const dt = parseTs(tstr);
+      if (!dt) return '';
+      const diffMs = Date.now() - dt.getTime();
+      const mins = Math.max(0, Math.floor(diffMs / 60000));
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      if (h === 0 && m === 0) return 'just now';
+      if (h === 0) return `${m}m ago`;
+      if (h < 24) return `${h}h ${m}m ago`;
+      const d = Math.floor(h / 24);
+      return `${d}d ago`;
+    }
+    function renderTime(tstr) {
+      const dt = parseTs(tstr);
+      if (!dt) return tstr || '';
+      const fmt = new Intl.DateTimeFormat('en-US', { timeZone: getTimeZone(), hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric', timeZoneName: 'short' });
+      return fmt.format(dt);
+    }
+    function diffFromNow(tstr) {
+      if (!tstr) return '';
+      const target = new Date(tstr);
+      const now = new Date();
+      const diffMs = target - now;
+      const mins = Math.abs(Math.floor(diffMs / 60000));
+      const h = Math.floor(mins / 60), m = mins % 60;
+      if (h === 0 && m === 0) return '';
+      return `${diffMs >= 0 ? 'in ' : ''}${h}h ${m}m${diffMs < 0 ? ' ago' : ''}`;
+    }
+    function formatElapsed(seconds) {
+      if (seconds === null || seconds === undefined) return '';
+      const s = Math.max(0, Number(seconds) || 0);
+      const hh = String(Math.floor(s / 3600)).padStart(2, '0');
+      const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+      const ss = String(s % 60).padStart(2, '0');
+      return `${hh}:${mm}:${ss}`;
+    }
+    function elapsedSince(ts) {
+      const dt = parseTs(ts) || new Date(ts);
+      if (!dt || isNaN(dt)) return '';
+      const diff = Math.max(0, Math.floor((Date.now() - dt.getTime()) / 1000));
+      return formatElapsed(diff);
+    }
+    function setRunStatus(chips) {
+      const el = document.getElementById('run-status');
+      if (!el) return;
+      if (!chips || !chips.length) { el.innerHTML = ''; return; }
+      el.innerHTML = chips.map(c => `<span class="chip ${c.tone || 'neutral'}">${c.text}</span>`).join('');
+    }
+    function renderRunSummary() {
+      const active = statusCache?.active_jobs || (statusCache?.job ? [statusCache.job] : []);
+      const queued = statusCache?.queued_jobs || statusCache?.jobs || [];
+      const chips = [];
+      if (active.length) {
+        chips.push({text: `Active ${active.length}`, tone: 'good'});
+        active.slice(0, 2).forEach(j => {
+          chips.push({text: `@${j.target_username} via ${j.login_username}`, tone: 'neutral'});
+        });
+        if (active.length > 2) chips.push({text: `+${active.length - 2} more`, tone: 'neutral'});
+      }
+      if (queued.length) chips.push({text: `Queued ${queued.length}`, tone: 'warn'});
+      if (!active.length && !queued.length && lastStatusCache) {
+        const ago = timeAgo(lastStatusCache.timestamp) || renderTime(lastStatusCache.timestamp);
+        chips.push({text: `Last run @${lastStatusCache.target_username}`, tone: 'neutral'});
+        if (ago) chips.push({text: ago, tone: 'good'});
+      }
+      if (!chips.length) chips.push({text: 'No runs yet', tone: 'neutral'});
+      setRunStatus(chips);
+    }
+
+    function updateKpiStatus() {
+      const active = statusCache?.active_jobs || [];
+      const queued = statusCache?.queued_jobs || statusCache?.jobs || [];
+      const activeEl = document.getElementById('kpi-active-runs');
+      const queuedEl = document.getElementById('kpi-queued-runs');
+      if (activeEl) activeEl.textContent = active.length;
+      if (queuedEl) queuedEl.textContent = queued.length;
+    }
+
+    function updateSignalBoard() {
+      const active = statusCache?.active_jobs || [];
+      const queued = statusCache?.queued_jobs || statusCache?.jobs || [];
+      const queuePressureEl = document.getElementById('kpi-queue-pressure');
+      const backlogEtaEl = document.getElementById('kpi-backlog-eta');
+      const stalenessEl = document.getElementById('kpi-staleness');
+      const momentumEl = document.getElementById('kpi-momentum');
+      const nfbRiskEl = document.getElementById('kpi-nfb-risk');
+      const pressure = active.length ? (queued.length / Math.max(1, active.length)) : (queued.length ? queued.length : 0);
+      if (queuePressureEl) {
+        queuePressureEl.textContent = active.length ? `${pressure.toFixed(1)}x` : (queued.length ? `${queued.length} queued` : '0.0x');
+      }
+      if (backlogEtaEl) {
+        const avg = summaryCache?.avg_duration_seconds || null;
+        if (avg && queued.length) {
+          const concurrency = Math.max(1, active.length || 1);
+          backlogEtaEl.textContent = formatElapsed((queued.length / concurrency) * avg);
+        } else {
+          backlogEtaEl.textContent = '—';
+        }
+      }
+      if (stalenessEl) {
+        stalenessEl.textContent = lastStatusCache?.timestamp ? timeAgo(lastStatusCache.timestamp) : '—';
+      }
+      if (momentumEl && Array.isArray(targetsCache)) {
+        const net = targetsCache.reduce((acc, r) => {
+          const w = r.week || {};
+          return acc + ((w.followers_added || 0) - (w.followers_removed || 0));
+        }, 0);
+        momentumEl.textContent = formatDeltaNet(net);
+      }
+      if (nfbRiskEl && Array.isArray(targetsCache)) {
+        const ratios = targetsCache.map(r => {
+          const latest = r.latest || {};
+          if (!latest.followees_count) return null;
+          return latest.non_followbacks_count != null ? (latest.non_followbacks_count / latest.followees_count) : null;
+        }).filter(r => r !== null);
+        if (ratios.length) {
+          const avg = Math.round((ratios.reduce((a,b)=>a+b,0) / ratios.length) * 100);
+          nfbRiskEl.textContent = `${avg}%`;
+        } else {
+          nfbRiskEl.textContent = '—';
+        }
+      }
+    }
+
+    async function loadSummary() {
+      try {
+        const data = await fetchJSON('/summary');
+        summaryCache = data || {};
+        const totalRunsEl = document.getElementById('kpi-total-runs');
+        const totalTargetsEl = document.getElementById('kpi-total-targets');
+        const avgEl = document.getElementById('kpi-avg-duration');
+        const lastEl = document.getElementById('kpi-last-run');
+        if (totalRunsEl) totalRunsEl.textContent = data.total_runs ?? '—';
+        if (totalTargetsEl) totalTargetsEl.textContent = data.total_targets ?? '—';
+        if (avgEl) avgEl.textContent = data.avg_duration_seconds ? formatElapsed(data.avg_duration_seconds) : '—';
+        if (lastEl) {
+          const last = data.last_run ? renderTime(data.last_run) : 'Last run —';
+          lastEl.textContent = data.last_run ? `Last run ${last}` : 'Last run —';
+        }
+        updateSignalBoard();
+      } catch (e) {
+        log('Summary error: ' + e.message);
+      }
+    }
+
+    function setActiveHistoryTab(tab) {
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tab);
+      });
+      document.querySelectorAll('.tab-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.dataset.panel === tab);
+      });
+    }
+
+    function renderMiniNow() {
+      const panel = document.getElementById('mini-now');
+      const list = document.getElementById('mini-now-list');
+      if (!panel || !list) return;
+      const active = statusCache?.active_jobs || [];
+      const filtered = focusLogin ? active.filter(j => j.login_username === focusLogin) : active;
+      if (!filtered.length) {
+        panel.classList.add('hidden');
+        list.innerHTML = '';
+        return;
+      }
+      panel.classList.remove('hidden');
+      const rows = filtered.slice(0, 3).map(j => {
+        const pct = progressPercentCombinedForJob(j);
+        const pctLabel = formatPct(pct);
+        const tone = j.phase === 'following' ? 'warn' : '';
+        const phase = renderPhase(j.phase);
+        const elapsed = formatElapsed(j.elapsed_seconds || 0);
+        const sub = `${phase} · ${elapsed}`;
+        return `
+          <div class="mini-item">
+            <div class="mini-head">
+              <span>@${j.target_username}</span>
+              <span>${pctLabel}</span>
+            </div>
+            <div class="mini-sub">via ${j.login_username} · ${sub}</div>
+            <div class="mini-bar ${tone}"><span style="width:${progressBarWidth(pct)}%"></span></div>
+          </div>
+        `;
+      });
+      if (filtered.length > 3) {
+        rows.push(`<div class="mini-sub muted">+${filtered.length - 3} more running</div>`);
+      }
+      list.innerHTML = rows.join('');
+    }
+
+    function updateRailStatus() {
+      const pill = document.getElementById('rail-status');
+      if (!pill) return;
+      const state = statusCache?.state || 'idle';
+      pill.classList.remove('running', 'queued', 'idle');
+      if (state === 'running') pill.classList.add('running');
+      else if (state === 'queued') pill.classList.add('queued');
+      else pill.classList.add('idle');
+      pill.textContent = state.charAt(0).toUpperCase() + state.slice(1);
+    }
+
+    function applyTargetFilters(rows) {
+      if (!rows) return [];
+      const activeTargets = new Set((statusCache?.active_jobs || []).map(j => j.target_username));
+      const scheduledTargets = new Set((schedulesCache || []).map(s => s.target_username));
+      return rows.filter(r => {
+        const latest = r.latest || {};
+        if (focusLogin && latest.login_username && latest.login_username !== focusLogin) return false;
+        if (activeFilter === 'active') return activeTargets.has(r.target_username);
+        if (activeFilter === 'needs') return (latest.non_followbacks_count || 0) > 0;
+        if (activeFilter === 'scheduled') return scheduledTargets.has(r.target_username);
+        if (activeFilter === 'none') return !latest.timestamp;
+        return true;
+      });
+    }
+
+    function setActiveFilter(filter) {
+      activeFilter = filter;
+      document.querySelectorAll('.rail-filters .filter').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.filter === filter);
+      });
+      renderTargetsOverview();
+    }
+
+    function setFocusLogin(login) {
+      focusLogin = login || '';
+      const railSel = document.getElementById('rail-login');
+      if (railSel && railSel.value !== focusLogin) railSel.value = focusLogin;
+      const runSel = document.getElementById('run-login');
+      const schSel = document.getElementById('sch-login');
+      if (runSel && focusLogin) runSel.value = focusLogin;
+      if (schSel && focusLogin) schSel.value = focusLogin;
+      updateRailSessionStatus();
+      updateRunLockForSelected();
+      renderTargetsOverview();
+      renderTimeline();
+      renderMiniNow();
+    }
+    function formatDeltaNet(val) {
+      if (val === null || val === undefined) return '—';
+      return val >= 0 ? `+${val}` : `${val}`;
+    }
+    function formatProgress(label, current, total) {
+      if (current === null || current === undefined) return `${label}: —`;
+      if (total !== null && total !== undefined) return `${label}: ${current}/${total}`;
+      return `${label}: ${current}`;
+    }
+    function progressPercent(current, total) {
+      if (current === null || current === undefined) return null;
+      if (total === null || total === undefined || Number(total) <= 0) return null;
+      const raw = (Number(current) / Number(total)) * 100;
+      if (!Number.isFinite(raw)) return null;
+      if (raw <= 0) return 0;
+      if (raw < 1) return Math.round(raw * 10) / 10;
+      return Math.round(raw);
+    }
+    function formatPct(pct) {
+      if (pct === null || pct === undefined) return '—';
+      if (pct > 0 && pct < 1) return `${pct.toFixed(1)}%`;
+      return `${Math.round(pct)}%`;
+    }
+    function progressBarWidth(pct) {
+      if (pct === null || pct === undefined) return 0;
+      if (pct > 0 && pct < 1) return 1;
+      return Math.max(0, Math.min(100, pct));
+    }
+    function progressPercentCombinedForJob(job) {
+      if (!job) return null;
+      const fTotal = Number(job.followers_total || 0);
+      const feTotal = Number(job.following_total || 0);
+      const fCur = Number(job.followers_progress || 0);
+      const feCur = Number(job.following_progress || 0);
+      if (fTotal > 0 && feTotal > 0) {
+        return progressPercent(fCur + feCur, fTotal + feTotal);
+      }
+      if (job.phase === 'followers' && fTotal > 0) return progressPercent(fCur, fTotal);
+      if (job.phase === 'following' && feTotal > 0) return progressPercent(feCur, feTotal);
+      return null;
+    }
+    function weeklySignal(netFollowers, netFollowing) {
+      const score = (netFollowers || 0) + Math.round((netFollowing || 0) * 0.25);
+      if (score >= 5) return {label: 'Growing', tone: 'good'};
+      if (score <= -5) return {label: 'Slipping', tone: 'warn'};
+      return {label: 'Steady', tone: 'neutral'};
+    }
+    function weeklyInsight(weekNetFollowers, weekNetFollowees, nfbRate) {
+      const parts = [];
+      if (weekNetFollowers > 0) parts.push(`up ${weekNetFollowers} followers net`);
+      if (weekNetFollowers < 0) parts.push(`down ${Math.abs(weekNetFollowers)} followers net`);
+      if (weekNetFollowers === 0) parts.push('flat followers');
+      if (weekNetFollowees > 0) parts.push(`following +${weekNetFollowees}`);
+      if (weekNetFollowees < 0) parts.push(`following ${weekNetFollowees}`);
+      if (weekNetFollowees === 0) parts.push('following steady');
+      if (nfbRate != null && nfbRate >= 70) parts.push('high no‑follow‑back rate');
+      if (nfbRate != null && nfbRate <= 30) parts.push('healthy follow‑back');
+      return parts.length ? parts.join(' · ') : 'No activity this week.';
+    }
+    function runInsight(netFollowers, netFollowing) {
+      const f = formatDeltaNet(netFollowers);
+      const fe = formatDeltaNet(netFollowing);
+      if (netFollowers === 0 && netFollowing === 0) return 'No major change this snapshot.';
+      if (netFollowers !== 0 && netFollowing === 0) return `Net ${f} followers, following steady.`;
+      if (netFollowers === 0 && netFollowing !== 0) return `Followers flat, net ${fe} following.`;
+      return `Net ${f} followers, net ${fe} following.`;
+    }
+    function renderPhase(phase) {
+      if (!phase) return 'Running';
+      if (phase === 'followers') return 'Collecting followers';
+      if (phase === 'following') return 'Collecting following';
+      if (phase === 'done') return 'Finalizing';
+      return phase;
+    }
+    function sparkline(values) {
+      if (!values || !values.length) return '';
+      const v = values.slice(-30);
+      if (v.length === 1) v.push(v[0]);
+      const width = 180, height = 40;
+      const min = Math.min(...v), max = Math.max(...v);
+      const span = Math.max(max - min, 1);
+      const step = width / (v.length - 1);
+      const pts = v.map((val, i) => {
+        const x = i * step;
+        const y = height - ((val - min) / span) * (height - 6) - 3;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(' ');
+      return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="40" preserveAspectRatio="none"><polyline fill="none" stroke="#2563eb" stroke-width="2" points="${pts}" /></svg>`;
+    }
+
+    function renderTimeline() {
+      const list = document.getElementById('timeline-list');
+      if (!list) return;
+      const items = [];
+      const active = statusCache?.active_jobs || [];
+      const activeFiltered = focusLogin ? active.filter(j => j.login_username === focusLogin) : active;
+      activeFiltered.forEach(j => {
+        items.push({
+          type: 'running',
+          time: `Now`,
+          title: `@${j.target_username}`,
+          sub: `via ${j.login_username}`,
+          meta: `${formatElapsed(j.elapsed_seconds || 0)} elapsed${j.eta_seconds != null ? ` · ETA ${formatElapsed(j.eta_seconds)}` : ''}`,
+        });
+      });
+
+      const upcoming = (schedulesCache || [])
+        .filter(r => r.next_run)
+        .filter(r => !focusLogin || r.login_username === focusLogin)
+        .map(r => ({...r, _ts: parseTs(r.next_run)}))
+        .filter(r => r._ts)
+        .sort((a,b) => a._ts - b._ts)
+        .slice(0, 3);
+      upcoming.forEach(r => {
+        items.push({
+          type: 'scheduled',
+          time: renderTime(r.next_run),
+          title: `@${r.target_username}`,
+          sub: `via ${r.login_username}`,
+          meta: diffFromNow(r.next_run) || 'Scheduled',
+        });
+      });
+
+      if (lastStatusCache && (!focusLogin || lastStatusCache.login_username === focusLogin)) {
+        items.push({
+          type: 'done',
+          time: renderTime(lastStatusCache.timestamp),
+          title: `Last run @${lastStatusCache.target_username}`,
+          sub: `via ${lastStatusCache.login_username || '—'}`,
+          meta: timeAgo(lastStatusCache.timestamp) || 'Recently',
+        });
+      }
+
+      if (!items.length) {
+        list.innerHTML = '<div class="muted">No timeline activity yet.</div>';
+        return;
+      }
+
+      list.innerHTML = items.map(item => `
+        <div class="timeline-item">
+          <div class="timeline-time">${item.time}</div>
+          <div>
+            <div class="timeline-title">${item.title}</div>
+            <div class="timeline-sub">${item.sub}</div>
+            <div class="timeline-sub">${item.meta}</div>
+          </div>
+          <span class="timeline-pill ${item.type}">${item.type === 'running' ? 'Running' : item.type === 'scheduled' ? 'Scheduled' : 'Completed'}</span>
+        </div>
+      `).join('');
+    }
+
+    async function loadConfig() {
+      try {
+        const data = await fetchJSON('/config');
+        configCache = data.config || {};
+        configDefaults = data.defaults || {};
+        applyConfigToUI();
+      } catch (e) {
+        log('Config error: ' + e.message);
+      }
+    }
+
+    function applyConfigToUI() {
+      const tzChip = document.getElementById('timezone-chip');
+      const tz = getTimeZone();
+      if (tzChip) tzChip.textContent = `Timezone: ${tz}`;
+
+      const ufMax = document.getElementById('uf-max');
+      const ufDelayMin = document.getElementById('uf-delay-min');
+      const ufDelayMax = document.getElementById('uf-delay-max');
+      const ufDry = document.getElementById('uf-dry');
+      if (ufMax) ufMax.value = getConfigValue('unfollow_max_per_run', 25);
+      if (ufDelayMin) ufDelayMin.value = getConfigValue('unfollow_delay_min', 25);
+      if (ufDelayMax) ufDelayMax.value = getConfigValue('unfollow_delay_max', 45);
+      if (ufDry) ufDry.value = getConfigValue('unfollow_dry_run_default', false) ? 'true' : 'false';
+
+      const freq = getConfigValue('schedule_default_frequency', 'once_daily');
+      const t1 = getConfigValue('schedule_default_time1', '09:00');
+      const t2 = getConfigValue('schedule_default_time2', '21:00');
+      const dow = getConfigValue('schedule_default_weekday', 1);
+      const schFreq = document.getElementById('sch-frequency');
+      const schTime1 = document.getElementById('sch-time1');
+      const schTime2 = document.getElementById('sch-time2');
+      const schWeekday = document.getElementById('sch-weekday');
+      if (schFreq) schFreq.value = freq;
+      if (schTime1) schTime1.value = t1;
+      if (schTime2) schTime2.value = t2;
+      if (schWeekday) schWeekday.value = dow;
+      toggleFrequencyUI();
+    }
+
+    function fillConfigForm(fromDefaults=false) {
+      const src = fromDefaults ? configDefaults : configCache;
+      if (!src) return;
+      document.getElementById('cfg-run-stall').value = src.run_stall_seconds ?? 1200;
+      document.getElementById('cfg-run-max').value = src.run_max_seconds ?? 10800;
+      document.getElementById('cfg-run-request').value = src.run_request_timeout ?? 600;
+      document.getElementById('cfg-run-delay-min').value = src.run_item_delay_min ?? 0.25;
+      document.getElementById('cfg-run-delay-max').value = src.run_item_delay_max ?? 0.75;
+      document.getElementById('cfg-unfollow-max').value = src.unfollow_max_per_run ?? 25;
+      document.getElementById('cfg-unfollow-delay-min').value = src.unfollow_delay_min ?? 25;
+      document.getElementById('cfg-unfollow-delay-max').value = src.unfollow_delay_max ?? 45;
+      document.getElementById('cfg-unfollow-dry').value = (src.unfollow_dry_run_default ?? false) ? 'true' : 'false';
+      document.getElementById('cfg-sch-frequency').value = src.schedule_default_frequency ?? 'once_daily';
+      document.getElementById('cfg-sch-time1').value = src.schedule_default_time1 ?? '09:00';
+      document.getElementById('cfg-sch-time2').value = src.schedule_default_time2 ?? '21:00';
+      document.getElementById('cfg-sch-weekday').value = String(src.schedule_default_weekday ?? 1);
+      document.getElementById('cfg-ui-timezone').value = src.ui_timezone ?? 'America/New_York';
+      const monEnabled = (src.monitor_enabled ?? true) ? 'true' : 'false';
+      document.getElementById('cfg-monitor-enabled').value = monEnabled;
+      document.getElementById('cfg-monitor-interval').value = src.monitor_interval_minutes ?? 120;
+      document.getElementById('cfg-monitor-threshold').value = src.monitor_threshold_delta ?? 4;
+      document.getElementById('cfg-monitor-gap').value = src.monitor_min_gap_minutes ?? 180;
+      if (src.monitor_login_username) {
+        const monSel = document.getElementById('cfg-monitor-login');
+        if (monSel) monSel.value = src.monitor_login_username;
+      }
+    }
+
+    function openConfigModal() {
+      const modal = document.getElementById('config-modal');
+      if (!modal) return;
+      modal.style.display = 'flex';
+      fillConfigForm(false);
+    }
+
+    function closeConfigModal() {
+      const modal = document.getElementById('config-modal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    function openAccountsModal() {
+      const modal = document.getElementById('accounts-modal');
+      if (!modal) return;
+      modal.style.display = 'flex';
+      renderLoginManager();
+    }
+
+    function closeAccountsModal() {
+      const modal = document.getElementById('accounts-modal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    async function saveConfig() {
+      const payload = {
+        run_stall_seconds: Number(document.getElementById('cfg-run-stall').value || 0),
+        run_max_seconds: Number(document.getElementById('cfg-run-max').value || 0),
+        run_request_timeout: Number(document.getElementById('cfg-run-request').value || 0),
+        run_item_delay_min: Number(document.getElementById('cfg-run-delay-min').value || 0),
+        run_item_delay_max: Number(document.getElementById('cfg-run-delay-max').value || 0),
+        unfollow_max_per_run: Number(document.getElementById('cfg-unfollow-max').value || 0),
+        unfollow_delay_min: Number(document.getElementById('cfg-unfollow-delay-min').value || 0),
+        unfollow_delay_max: Number(document.getElementById('cfg-unfollow-delay-max').value || 0),
+        unfollow_dry_run_default: document.getElementById('cfg-unfollow-dry').value === 'true',
+        schedule_default_frequency: document.getElementById('cfg-sch-frequency').value,
+        schedule_default_time1: document.getElementById('cfg-sch-time1').value,
+        schedule_default_time2: document.getElementById('cfg-sch-time2').value,
+        schedule_default_weekday: Number(document.getElementById('cfg-sch-weekday').value || 0),
+        ui_timezone: document.getElementById('cfg-ui-timezone').value.trim() || 'America/New_York',
+        monitor_enabled: document.getElementById('cfg-monitor-enabled').value === 'true',
+        monitor_interval_minutes: Number(document.getElementById('cfg-monitor-interval').value || 0),
+        monitor_threshold_delta: Number(document.getElementById('cfg-monitor-threshold').value || 0),
+        monitor_min_gap_minutes: Number(document.getElementById('cfg-monitor-gap').value || 0),
+        monitor_login_username: document.getElementById('cfg-monitor-login').value || '',
+      };
+      try {
+        const res = await fetchJSON('/config', {method: 'PUT', body: JSON.stringify(payload)});
+        configCache = res.config || configCache;
+        applyConfigToUI();
+        loadSchedules();
+        loadTargetsOverview();
+        loadLastStatus();
+        showToast('Configuration saved', 'good');
+      } catch (e) {
+        showToast('Save failed: ' + e.message, 'bad');
+      }
+    }
+
+    async function loadLogins() {
+      const data = await fetchJSON('/logins');
+      loginsList = data;
+      primaryLogin = data && data.length ? data[0].login_username : '';
+      [document.getElementById('run-login'), document.getElementById('sch-login')].forEach(sel => {
+        sel.innerHTML = '';
+        data.forEach(item => {
+          const opt = document.createElement('option');
+          opt.value = item.login_username;
+          const sessionTag = item.session_exists ? 'session saved' : '2FA likely';
+          opt.textContent = `${item.login_username} • ${sessionTag}`;
+          sel.appendChild(opt);
+        });
+      });
+      const railSel = document.getElementById('rail-login');
+      if (railSel) {
+        railSel.innerHTML = '';
+        const allOpt = document.createElement('option');
+        allOpt.value = '';
+        allOpt.textContent = 'All logins';
+        railSel.appendChild(allOpt);
+        data.forEach(item => {
+          const opt = document.createElement('option');
+          opt.value = item.login_username;
+          opt.textContent = item.login_username;
+          railSel.appendChild(opt);
+        });
+        railSel.value = focusLogin || '';
+      }
+      const railSessions = document.getElementById('rail-sessions');
+      if (railSessions) {
+        railSessions.innerHTML = '';
+        const allRow = document.createElement('button');
+        allRow.type = 'button';
+        allRow.className = `rail-session${!focusLogin ? ' active' : ''}`;
+        allRow.dataset.login = '';
+        allRow.innerHTML = `
+          <div>
+            <div>All logins</div>
+            <div class="meta">Show every target</div>
+          </div>
+          <span class="chip neutral">All</span>
+        `;
+        allRow.onclick = () => setFocusLogin('');
+        railSessions.appendChild(allRow);
+        data.forEach(item => {
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.className = `rail-session${item.login_username === focusLogin ? ' active' : ''}`;
+          row.dataset.login = item.login_username;
+          row.innerHTML = `
+            <div>
+              <div>@${item.login_username}</div>
+              <div class="meta">${item.session_exists ? 'Session saved' : '2FA likely'}</div>
+            </div>
+            <span class="chip ${item.session_exists ? 'good' : 'warn'}">${item.session_exists ? 'Ready' : '2FA'}</span>
+          `;
+          row.onclick = () => setFocusLogin(item.login_username);
+          railSessions.appendChild(row);
+        });
+      }
+      setFocusLogin(focusLogin || '');
+      if (targetsCache.length) updateHeroFromTargets(targetsCache);
+      updateAuthConfigUI();
+      updateMonitorConfigUI();
+      renderLoginManager();
+      updateRailSessionStatus();
+    }
+
+    async function addLoginFromConfig() {
+      const userEl = document.getElementById('acct-new-login-username');
+      const passEl = document.getElementById('acct-new-login-password');
+      const cookieEl = document.getElementById('acct-new-login-cookie');
+      if (!userEl || !passEl) return;
+      const login_username = (userEl.value || '').trim();
+      const login_password = (passEl.value || '').trim();
+      const cookie_file = (cookieEl?.value || '').trim();
+      if (!login_username || (!login_password && !cookie_file)) {
+        showToast('Username + (password or cookie file) required', 'bad');
+        return;
+      }
+      try {
+        await fetchJSON('/logins/add', {method: 'POST', body: JSON.stringify({login_username, login_password, cookie_file})});
+        showToast(`Added @${login_username}. Run once to create a session.`, 'good');
+        userEl.value = '';
+        passEl.value = '';
+        if (cookieEl) cookieEl.value = '';
+        await loadLogins();
+      } catch (e) {
+        showToast('Add login failed: ' + e.message, 'bad');
+      }
+    }
+
+    function renderLoginManager() {
+      const listEl = document.getElementById('accounts-list');
+      if (!listEl) return;
+      listEl.innerHTML = '';
+      (loginsList || []).forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'account-row';
+        const status = item.session_exists ? 'Session saved' : 'No session';
+        const chipTone = item.session_exists ? 'good' : 'warn';
+        row.innerHTML = `
+          <div>
+            <div>@${item.login_username}</div>
+            <div class="meta">${status} • ${item.source === 'env' ? 'env' : 'file'}</div>
+          </div>
+          <span class="chip ${chipTone}">${item.session_exists ? 'Ready' : '2FA'}</span>
+          <div class="account-actions">
+            ${item.session_exists ? '' : `<button class="secondary" data-action="reauth" data-login="${item.login_username}">Reauth</button>`}
+            <button class="secondary" data-action="reset" data-login="${item.login_username}">Reset</button>
+            <button class="secondary" data-action="delete" data-login="${item.login_username}">Delete</button>
+          </div>
+        `;
+        listEl.appendChild(row);
+      });
+      listEl.querySelectorAll('button[data-action="reset"]').forEach(btn => {
+        btn.onclick = async () => {
+          const login = btn.dataset.login;
+          if (!login) return;
+          if (isLoginBusy(login)) {
+            showToast('Login is busy. Try again after the run finishes.', 'bad');
+            return;
+          }
+          try {
+            await fetchJSON('/logins/reset', {method: 'POST', body: JSON.stringify({login_username: login})});
+            showToast(`Session reset for @${login}.`, 'good');
+            await loadLogins();
+          } catch (e) {
+            showToast('Reset failed: ' + e.message, 'bad');
+          }
+        };
+      });
+      listEl.querySelectorAll('button[data-action="reauth"]').forEach(btn => {
+        btn.onclick = () => {
+          const login = btn.dataset.login || '';
+          const userEl = document.getElementById('acct-new-login-username');
+          const passEl = document.getElementById('acct-new-login-password');
+          if (userEl) userEl.value = login;
+          if (passEl) passEl.value = '';
+          if (passEl) passEl.focus();
+          showToast(`Enter password to reauthorize @${login}, then click Add / update account.`, 'neutral');
+        };
+      });
+      listEl.querySelectorAll('button[data-action="delete"]').forEach(btn => {
+        btn.onclick = async () => {
+          const login = btn.dataset.login;
+          if (!login) return;
+          if (isLoginBusy(login)) {
+            showToast('Login is busy. Try again after the run finishes.', 'bad');
+            return;
+          }
+          const info = getLoginInfo(login);
+          const isEnv = info && info.source === 'env';
+          const warning = isEnv
+            ? `Delete @${login}? This hides the env-based login from the UI and removes any saved session.`
+            : `Delete @${login}? This removes it from the login list and deletes any saved session.`;
+          if (!confirm(warning)) {
+            return;
+          }
+          try {
+            await fetchJSON('/logins/delete', {method: 'POST', body: JSON.stringify({login_username: login, delete_session: true})});
+            showToast(`Deleted @${login}.`, 'good');
+            await loadLogins();
+          } catch (e) {
+            showToast('Delete failed: ' + e.message, 'bad');
+          }
+        };
+      });
+    }
+
+
+    function updateAuthConfigUI() {
+      const sel = document.getElementById('cfg-auth-login');
+      const statusEl = document.getElementById('cfg-auth-status');
+      if (!sel || !statusEl) return;
+      const current = sel.value;
+      sel.innerHTML = '';
+      (loginsList || []).forEach(item => {
+        const opt = document.createElement('option');
+        opt.value = item.login_username;
+        opt.textContent = item.login_username;
+        sel.appendChild(opt);
+      });
+      if (current) sel.value = current;
+      if (!sel.value && loginsList && loginsList.length) sel.value = loginsList[0].login_username;
+      const info = getLoginInfo(sel.value);
+      statusEl.textContent = info
+        ? `Session status: ${info.session_exists ? 'Session saved' : 'No session saved (2FA likely)'}`
+        : 'Session status: —';
+    }
+
+    function updateMonitorConfigUI() {
+      const sel = document.getElementById('cfg-monitor-login');
+      if (!sel) return;
+      const current = sel.value;
+      sel.innerHTML = '';
+      (loginsList || []).forEach(item => {
+        const opt = document.createElement('option');
+        opt.value = item.login_username;
+        opt.textContent = item.login_username;
+        sel.appendChild(opt);
+      });
+      if (current) sel.value = current;
+      if (!sel.value && loginsList && loginsList.length) sel.value = loginsList[0].login_username;
+    }
+
+    function updateRailSessionStatus() {
+      const statusEl = document.getElementById('rail-session-status');
+      if (!statusEl) return;
+      const login = focusLogin || (document.getElementById('rail-login')?.value || '');
+      const info = getLoginInfo(login || (loginsList?.[0]?.login_username || ''));
+      statusEl.textContent = info
+        ? `Session status: ${info.session_exists ? 'Session saved' : 'No session saved (2FA likely)'}`
+        : 'Session status: —';
+    }
+
+    function resolveLogin(fallbackLogin) {
+      if (fallbackLogin) return fallbackLogin;
+      if (loginsList && loginsList.length) return loginsList[0].login_username;
+      return '';
+    }
+
+    function resolveUnfollowLogin() {
+      return resolveLogin(focusLogin || primaryLogin || '');
+    }
+
+    function getLoginInfo(login) {
+      if (!login) return null;
+      return (loginsList || []).find(l => l.login_username === login) || null;
+    }
+
+    function updateHeroFromTargets(rows) {
+      if (!rows || !rows.length) return;
+      const heroTitle = document.getElementById('hero-title');
+      const heroSub = document.getElementById('hero-sub');
+      const heroFollowers = document.getElementById('hero-followers');
+      const heroFollowing = document.getElementById('hero-following');
+      const heroNfb = document.getElementById('hero-nfb');
+      const heroFollowersDelta = document.getElementById('hero-followers-delta');
+      const heroFollowingDelta = document.getElementById('hero-following-delta');
+      const heroChanges = document.getElementById('hero-changes');
+      const heroRatio = document.getElementById('hero-ratio');
+      const heroNfbSub = document.getElementById('hero-nfb-sub');
+      const heroInsight = document.getElementById('hero-insight');
+
+      const login = focusLogin || primaryLogin || resolveLogin('');
+      let row = rows.find(r => r.target_username === login);
+      if (!row) row = rows.find(r => r.latest && r.latest.login_username === login);
+      if (!row) row = rows[0];
+
+      const latest = row.latest || {};
+      heroTitle.textContent = `@${row.target_username}`;
+      const lastAgo = latest.timestamp ? timeAgo(latest.timestamp) : '';
+      heroSub.textContent = latest.timestamp
+        ? `Tracked account snapshot · last run ${lastAgo || renderTime(latest.timestamp)} · collected via @${latest.login_username || '—'}`
+        : 'No runs yet';
+
+      heroFollowers.textContent = latest.followers_count ?? '—';
+      heroFollowing.textContent = latest.followees_count ?? '—';
+      heroNfb.textContent = latest.non_followbacks_count ?? '—';
+      heroNfbSub.textContent = latest.timestamp ? 'latest' : 'n/a';
+
+      heroFollowersDelta.textContent = formatDeltaNet(row.delta_followers);
+      heroFollowingDelta.textContent = formatDeltaNet(row.delta_followees);
+
+      const fAdd = latest.followers_added ?? null;
+      const fRem = latest.followers_removed ?? null;
+      const feAdd = latest.followees_added ?? null;
+      const feRem = latest.followees_removed ?? null;
+      const chips = [];
+      if (fAdd !== null && fRem !== null) chips.push({text: `New followers +${fAdd} / Lost ${fRem}`, tone: (fAdd - fRem) >= 0 ? 'good' : 'warn'});
+      if (feAdd !== null && feRem !== null) chips.push({text: `New following +${feAdd} / Unfollowed ${feRem}`, tone: (feAdd - feRem) >= 0 ? 'good' : 'warn'});
+      heroChanges.innerHTML = chips.length
+        ? chips.map(c => `<span class="chip ${c.tone}">${c.text}</span>`).join('')
+        : '<span class="chip neutral">No change data yet</span>';
+
+      if (heroRatio) {
+        const ratio = (latest.non_followbacks_count != null && latest.followees_count)
+          ? Math.min(100, Math.round((latest.non_followbacks_count / latest.followees_count) * 100))
+          : null;
+        heroRatio.innerHTML = ratio !== null
+          ? `<span>No-follow-back rate ${ratio}%</span><div class="ratio-bar"><span style="width:${ratio}%"></span></div>`
+          : '<span>No-follow-back rate n/a</span>';
+      }
+      if (heroInsight) {
+        const week = row.week || {};
+        const weekFollowers = (week.followers_added || 0) - (week.followers_removed || 0);
+        const weekFollowing = (week.followees_added || 0) - (week.followees_removed || 0);
+        const ratio = (latest.non_followbacks_count != null && latest.followees_count)
+          ? Math.min(100, Math.round((latest.non_followbacks_count / latest.followees_count) * 100))
+          : null;
+        heroInsight.textContent = weeklyInsight(weekFollowers, weekFollowing, ratio);
+      }
+    }
+
+    let runLocked = false;
+    let runLockReason = '';
+    let busyLogins = new Set();
+    let unfollowRunning = false;
+    let unfollowBusyLogin = null;
+    let cancelHoldTimer = null;
+    let cancelHoldEnabled = false;
+    let twoFaPending = null;
+
+    function setRunLock(locked, reason) {
+      runLocked = locked;
+      runLockReason = reason || '';
+      const pill = document.getElementById('run-panel-pill');
+      const runBtn = document.getElementById('run-btn');
+      if (locked) {
+        runBtn.disabled = true;
+        pill.textContent = reason || 'Locked';
+        pill.classList.remove('idle', 'running', 'queued');
+        pill.classList.add('queued');
+      } else {
+        runBtn.disabled = false;
+        pill.textContent = 'Ready';
+        pill.classList.remove('queued', 'running');
+        pill.classList.add('idle');
+      }
+    }
+
+    function isLoginBusy(login) {
+      if (!login) return false;
+      if (unfollowRunning && login === unfollowBusyLogin) return true;
+      return busyLogins.has(login);
+    }
+
+    function updateRunLockForSelected() {
+      const selected = resolveLogin(document.getElementById('run-login').value);
+      let reason = '';
+      if (isLoginBusy(selected)) {
+        reason = (unfollowRunning && selected === unfollowBusyLogin) ? 'Unfollow job running' : 'Capture in progress';
+      }
+      setRunLock(!!reason, reason);
+    }
+
+    function getTwoFactorCode() {
+      const el = document.getElementById('run-2fa');
+      return el ? (el.value || '').trim() : '';
+    }
+
+    function isTwoFactorError(msg) {
+      return !!(msg && msg.toLowerCase().includes('2fa required'));
+    }
+
+    function openTwoFactorModal(opts) {
+      twoFaPending = opts || null;
+      const modal = document.getElementById('twofa-modal');
+      if (!modal) return;
+      const loginEl = document.getElementById('twofa-login');
+      if (loginEl) loginEl.textContent = opts?.login ? `@${opts.login}` : 'this login';
+      const subtext = document.getElementById('twofa-subtext');
+      const skipBtn = document.getElementById('twofa-skip');
+      if (opts?.preflight) {
+        if (subtext) subtext.textContent = `No saved session detected for ${opts?.login ? '@' + opts.login : 'this login'}. If this account uses 2FA, enter the code now.`;
+        if (skipBtn) skipBtn.style.display = 'inline-flex';
+      } else {
+        if (subtext) subtext.textContent = `Enter the 6-digit code for ${opts?.login ? '@' + opts.login : 'this login'} to continue the run.`;
+        if (skipBtn) skipBtn.style.display = 'none';
+      }
+      const input = document.getElementById('twofa-code');
+      if (input) {
+        input.value = '';
+        setTimeout(() => input.focus(), 50);
+      }
+      modal.style.display = 'flex';
+    }
+
+    function closeTwoFactorModal() {
+      const modal = document.getElementById('twofa-modal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    async function submitTwoFactor() {
+      const input = document.getElementById('twofa-code');
+      const code = input ? input.value.trim() : '';
+      if (!code) { showToast('Enter the 2FA code first.', 'neutral'); return; }
+      const pending = twoFaPending;
+      if (!pending?.login || !pending?.target) {
+        showToast('Missing run context; please retry.', 'bad');
+        return;
+      }
+      await triggerRun(pending.login, pending.target, pending.btn, pending.statusEl, code, {fromModal: true, suppressTwofaPrompt: true});
+    }
+
+    async function triggerRun(login, target, btn, statusEl, twoFactorCode, opts = {}) {
+      const suppressTwofaPrompt = !!opts.suppressTwofaPrompt;
+      const fromModal = !!opts.fromModal;
+      const loginInfo = getLoginInfo(login);
+      if (!twoFactorCode && !fromModal && !suppressTwofaPrompt && loginInfo && loginInfo.session_exists === false) {
+        openTwoFactorModal({login, target, btn, statusEl, preflight: true});
+        return false;
+      }
+      if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; btn.dataset.inflight = 'true'; }
+      if (statusEl) statusEl.innerHTML = `<span class="status-dot dot-running"></span>Submitting...`;
+      setRunStatus([{text: `Submitting @${target}`, tone: 'neutral'}]);
+      try {
+        const payload = {login_username: login, target_username: target};
+        if (twoFactorCode) payload.two_factor_code = twoFactorCode;
+        const {job_id, error} = await fetchJSON('/run', {method:'POST', body: JSON.stringify(payload)});
+        if (error) throw new Error(error);
+        if (twoFactorCode && fromModal) closeTwoFactorModal();
+        showToast(`@${target} queued`, 'neutral');
+        setRunStatus([{text: `Queued @${target}`, tone: 'warn'}]);
+        pollJob(job_id, target, btn);
+        fetchSystemStatus();
+        return true;
+      } catch (e) {
+        const msg = e.message || 'Unknown error';
+        if (isTwoFactorError(msg)) {
+          if (btn) { btn.disabled = false; btn.textContent = 'Run now'; btn.dataset.inflight = 'false'; }
+          if (statusEl) statusEl.textContent = '2FA required';
+          setRunStatus([{text: '2FA required', tone: 'warn'}]);
+          openTwoFactorModal({login, target, btn, statusEl, preflight: false});
+          return false;
+        }
+        setRunStatus([{text: `Error: ${msg}`, tone: 'bad'}]);
+        showToast(msg, 'bad');
+        log('Run error: ' + msg);
+        if (btn) { btn.disabled = false; btn.textContent = 'Run now'; btn.dataset.inflight = 'false'; }
+        if (statusEl) statusEl.textContent = 'Error';
+        return false;
+      }
+    }
+
+    function applyBusyStates() {
+      const buttons = document.querySelectorAll('[data-runbtn], button[data-run]');
+      buttons.forEach(btn => {
+        const login = btn.dataset.login;
+        if (!login) return;
+        if (btn.dataset.inflight === 'true') return;
+        const busy = isLoginBusy(login);
+        const base = btn.dataset.label || btn.textContent;
+        if (!btn.dataset.label) btn.dataset.label = base;
+        if (busy) {
+          btn.disabled = true;
+          btn.textContent = 'Busy';
+          btn.title = 'Runner is busy for this login';
+        } else {
+          btn.disabled = false;
+          btn.textContent = btn.dataset.label;
+          btn.title = '';
+        }
+      });
+    }
+
+    async function runOneOff() {
+      if (runLocked) {
+        showToast(runLockReason ? `Cannot start: ${runLockReason}` : 'Runner is busy.', 'neutral');
+        return;
+      }
+      const btn = document.getElementById('run-btn');
+      const login = resolveLogin(document.getElementById('run-login').value);
+      const target = document.getElementById('run-target').value.trim();
+      if (!target) { alert('Tracked account username required'); return; }
+      const twoFactor = getTwoFactorCode();
+      if (twoFactor) { const el = document.getElementById('run-2fa'); if (el) el.value = ''; }
+      await triggerRun(login, target, btn, null, twoFactor);
+    }
+
+    function renderProgress(meta, payload) {
+      if (!meta) return '';
+      const t = meta.target_username || '';
+      const l = meta.login_username || '';
+      const submitted = meta.submitted_at ? ` · ${renderTime(meta.submitted_at)}` : '';
+      const finished = payload && payload.finished_at ? ` · ${renderTime(payload.finished_at)}` : '';
+      return `@${t} via ${l}${submitted}${finished}`;
+    }
+
+    async function pollJob(job_id, targetForDash, btnToReset) {
+      const res = await fetchJSON(`/run/${job_id}`);
+      if (!res.done) {
+        const statusEl = targetForDash ? document.querySelector(`[data-status-target="${targetForDash}"]`) : null;
+        if (statusEl) statusEl.innerHTML = `<span class="status-dot dot-running"></span>Running...`;
+        if (btnToReset) {
+          btnToReset.textContent = 'Cancel';
+          btnToReset.onclick = () => cancelRun(res.meta?.login_username, res.meta?.target_username, btnToReset, statusEl, job_id);
+        }
+        setTimeout(() => pollJob(job_id, targetForDash, btnToReset), 1500);
+      } else {
+        if (res.payload.status === 'success') {
+          log(`Run success (${job_id}) target=${targetForDash || ''}`);
+          const statusEl = targetForDash ? document.querySelector(`[data-status-target="${targetForDash}"]`) : null;
+          if (statusEl) statusEl.innerHTML = `<span class="status-dot dot-done"></span>Done`;
+          showToast(`@${targetForDash} finished`, 'good');
+          loadTargetsOverview(); loadLastStatus(); loadHistoryRuns();
+          renderTimeline();
+        } else {
+          log(`Run failed (${job_id}): ${res.payload.error}`);
+          const statusEl = targetForDash ? document.querySelector(`[data-status-target="${targetForDash}"]`) : null;
+          if (statusEl) statusEl.innerHTML = `<span class="status-dot dot-error"></span>Failed`;
+          showToast(`@${targetForDash} failed: ${res.payload.error}`, 'bad');
+        }
+        if (btnToReset) { btnToReset.disabled = false; btnToReset.textContent = 'Run now'; btnToReset.dataset.inflight = 'false'; btnToReset.onclick = (ev)=>runOneOffFromSchedule(ev.target, res.meta?.login_username, res.meta?.target_username); }
+        fetchSystemStatus();
+      }
+    }
+
+    function toggleFrequencyUI() {
+      const freq = document.getElementById('sch-frequency').value;
+      document.getElementById('time2-wrap').style.display = freq === 'twice_daily' ? 'block' : 'none';
+      document.getElementById('weekday-wrap').style.display = freq === 'weekly' ? 'block' : 'none';
+    }
+    function buildCron() {
+      const freq = document.getElementById('sch-frequency').value;
+      const t1 = document.getElementById('sch-time1').value || '09:00';
+      const [h1,m1] = t1.split(':').map(Number);
+      if (Number.isNaN(h1)||Number.isNaN(m1)) return '';
+      if (freq === 'once_daily') return `${m1} ${h1} * * *`;
+      if (freq === 'twice_daily') {
+        const t2 = document.getElementById('sch-time2').value || '21:00';
+        const [h2,m2] = t2.split(':').map(Number);
+        if (Number.isNaN(h2)||Number.isNaN(m2)) return '';
+        return `${m1},${m2} ${h1},${h2} * * *`;
+      }
+      if (freq === 'every_other_day') return `${m1} ${h1} */2 * *`;
+      if (freq === 'weekly') {
+        const dow = document.getElementById('sch-weekday').value || '1';
+        return `${m1} ${h1} * * ${dow}`;
+      }
+      return '';
+    }
+    function friendlySchedule(cron) {
+      if (!cron) return '';
+      const parts = cron.trim().split(/\s+/); if (parts.length!==5) return cron;
+      const [m,h,dom,mon,dow] = parts; const fmt=(hh,mm)=>`${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')} ET`;
+      if (dom==="*"&&dow==="*"&&!m.includes(",")&&!h.includes(",")) return `Daily at ${fmt(h,m)}`;
+      if (dom==="*"&&dow==="*"&&m.includes(",")&&h.includes(",")) {const ms=m.split(","),hs=h.split(","); if(ms.length===2&&hs.length===2)return `Twice daily at ${fmt(hs[0],ms[0])} & ${fmt(hs[1],ms[1])}`;}
+      if (dom==="*/2") return `Every other day at ${fmt(h,m)}`;
+      if (dow!=="*"&&dom==="*"){const days=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"]; const name=/^\d+$/.test(dow)&&Number(dow)<7?days[Number(dow)]:dow; return `${name} at ${fmt(h,m)}`;}
+      return cron;
+    }
+    function parseCron(cron) {
+      const parts = cron.trim().split(/\s+/); if (parts.length!==5) return null;
+      const [m,h,dom,mon,dow]=parts;
+      if (dom==="*/2") return {freq:'every_other_day', time1:`${h}:${m}`};
+      if (dow!=="*"&&dom==="*") return {freq:'weekly', weekday:dow, time1:`${h}:${m}`};
+      if (m.includes(",")&&h.includes(",")){const ms=m.split(","),hs=h.split(","); if(ms.length===2&&hs.length===2) return {freq:'twice_daily', time1:`${hs[0]}:${ms[0]}`, time2:`${hs[1]}:${ms[1]}`};}
+      if (dom==="*"&&dow==="*"&&!m.includes(",")&&!h.includes(",")) return {freq:'once_daily', time1:`${h}:${m}`};
+      return null;
+    }
+    function setBuilderFromCron(cron, target, login, id) {
+      const parsed = parseCron(cron);
+      const {freq,time1,time2,weekday} = parsed || {};
+      document.getElementById('sch-frequency').value = freq || 'once_daily';
+      document.getElementById('sch-time1').value = time1 || '09:00';
+      document.getElementById('sch-time2').value = time2 || '21:00';
+      document.getElementById('sch-weekday').value = weekday ?? '1';
+      toggleFrequencyUI();
+      document.getElementById('sch-target').value = target;
+      document.getElementById('sch-login').value = login;
+      document.getElementById('sch-edit-id').value = id || '';
+      document.getElementById('sch-title').textContent = id ? 'Edit schedule' : 'Add schedule';
+      document.getElementById('sch-btn').textContent = id ? 'Update' : 'Create';
+      document.getElementById('sch-reset').style.display = id ? 'inline-block' : 'none';
+    }
+    function resetBuilder() {
+      document.getElementById('sch-edit-id').value = '';
+      document.getElementById('sch-title').textContent = 'Add schedule';
+      document.getElementById('sch-btn').textContent = 'Create';
+      document.getElementById('sch-reset').style.display = 'none';
+      document.getElementById('sch-frequency').value = getConfigValue('schedule_default_frequency', 'once_daily');
+      document.getElementById('sch-time1').value = getConfigValue('schedule_default_time1', '09:00');
+      document.getElementById('sch-time2').value = getConfigValue('schedule_default_time2', '21:00');
+      document.getElementById('sch-weekday').value = String(getConfigValue('schedule_default_weekday', 1));
+      toggleFrequencyUI();
+    }
+    function openScheduleModal(target, login, opts = {}) {
+      const modal = document.getElementById('schedule-modal');
+      if (!modal) return;
+      modal.style.display = 'flex';
+      if (opts.reset !== false) resetBuilder();
+      const resolved = login || resolveLogin('');
+      if (resolved) document.getElementById('sch-login').value = resolved;
+      if (target) {
+        document.getElementById('sch-target').value = target;
+        const sel = document.getElementById('sch-target-select');
+        if (sel) sel.value = target;
+      }
+      document.getElementById('sch-status').textContent = '';
+      loadSchedules();
+    }
+    function closeScheduleModal() {
+      const modal = document.getElementById('schedule-modal');
+      if (modal) modal.style.display = 'none';
+    }
+    function openView(view) {
+      document.querySelectorAll('.app-view').forEach(section => {
+        section.classList.toggle('active', section.id === `view-${view}`);
+      });
+      document.querySelectorAll('.view-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.view === view);
+      });
+    }
+    function openExplorer(target) {
+      openView('explorer');
+      clearHistoryDetail();
+      if (target) {
+        document.getElementById('hist-target').value = target;
+      }
+      loadHistoryRuns();
+      document.getElementById('explorer')?.scrollIntoView({behavior: 'smooth', block: 'start'});
+    }
+    function openHistoryModal(target) {
+      openExplorer(target);
+    }
+    async function createSchedule() {
+      const login = document.getElementById('sch-login').value;
+      const target = document.getElementById('sch-target').value.trim();
+      const cron = buildCron();
+      if (!target) { alert('Tracked account username required'); return; }
+      if (!cron) { alert('Please set a valid schedule'); return; }
+      const editId = document.getElementById('sch-edit-id').value;
+      document.getElementById('sch-status').textContent = editId ? 'Updating...' : 'Creating...';
+      try {
+        if (editId) {
+          await fetchJSON(`/schedules/${editId}`, {method:'PUT', body: JSON.stringify({target_username: target, interval: cron})});
+          document.getElementById('sch-status').textContent = 'Updated';
+        } else {
+          await fetchJSON('/schedules', {method:'POST', body: JSON.stringify({login_username: login, target_username: target, interval: cron})});
+          document.getElementById('sch-status').textContent = 'Created';
+        }
+        loadSchedules(); resetBuilder();
+      } catch (e) {
+        document.getElementById('sch-status').textContent = 'Error: ' + e.message;
+        log('Schedule error: ' + e.message);
+      }
+    }
+    async function deleteSchedule(id) {
+      await fetchJSON(`/schedules/${id}`, {method:'DELETE'});
+      loadSchedules();
+    }
+    async function editSchedule(id, login, target, interval) {
+      openScheduleModal(target, login, {reset: false});
+      setBuilderFromCron(interval, target, login, id);
+    }
+    async function loadSchedules() {
+      const wrap = document.getElementById('schedules-list');
+      wrap.innerHTML = '<div class="muted">Loading...</div>';
+      try {
+        const rows = await fetchJSON('/schedules');
+        schedulesCache = rows;
+        renderTimeline();
+        if (activeFilter === 'scheduled') renderTargetsOverview();
+        if (!rows.length) { wrap.innerHTML = '<div class="muted">No schedules yet.</div>'; return; }
+        wrap.innerHTML = '';
+        const frag = document.createDocumentFragment();
+        rows.forEach(r => {
+          const summary = friendlySchedule(r.interval);
+          const next = renderTime(r.next_run);
+          const nextDiff = diffFromNow(r.next_run);
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.innerHTML = `
+            <div class="panel-header">
+              <div>
+                <h4 style="margin:0;">@${r.target_username}</h4>
+                <p class="muted" style="margin:2px 0 0;">${summary}</p>
+                <p class="muted" style="margin:2px 0 0;">Collected via @${r.login_username}</p>
+              </div>
+              <div style="text-align:right;">
+                <p class="muted" style="margin:0;">Next</p>
+                <p style="margin:2px 0 0;font-weight:600;">${next || 'n/a'}</p>
+                ${nextDiff ? `<p class="muted" style="margin:0;">${nextDiff}</p>` : ''}
+              </div>
+            </div>
+            <div class="row" style="margin-top:10px;">
+              <button class="secondary" data-edit="${r.id}" data-login="${r.login_username}" data-target="${r.target_username}" data-interval="${r.interval}">Edit</button>
+              <button class="secondary" data-del="${r.id}">Delete</button>
+              <button class="ghost-btn" data-run="${r.id}" data-login="${r.login_username}" data-target="${r.target_username}">Run now</button>
+            </div>
+          `;
+          frag.appendChild(card);
+        });
+        wrap.appendChild(frag);
+        wrap.querySelectorAll('button[data-del]').forEach(btn => btn.onclick = () => deleteSchedule(btn.dataset.del));
+        wrap.querySelectorAll('button[data-edit]').forEach(btn => btn.onclick = () => editSchedule(btn.dataset.edit, btn.dataset.login, btn.dataset.target, btn.dataset.interval));
+        wrap.querySelectorAll('button[data-run]').forEach(btn => btn.onclick = () => runOneOffFromSchedule(btn, btn.dataset.login, btn.dataset.target));
+        applyBusyStates();
+      } catch (e) {
+        wrap.innerHTML = `<div class="muted">Error: ${e.message}</div>`;
+        log('Load schedules error: ' + e.message);
+        schedulesCache = [];
+        renderTimeline();
+      }
+    }
+
+    function renderList(el, items) {
+      el.innerHTML = '';
+      if (!items || !items.length) { el.innerHTML = '<li class="muted">None</li>'; return; }
+      const frag = document.createDocumentFragment();
+      items.forEach(u => { const li = document.createElement('li'); li.textContent = u; frag.appendChild(li); });
+      el.appendChild(frag);
+    }
+    function downloadCSVArr(filename, arr) {
+      if (!arr || !arr.length) { alert('No data'); return; }
+      const csv = 'username\n' + arr.join('\n');
+      const blob = new Blob([csv], {type:'text/csv'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url);
+    }
+
+    let currentRunDetail = null;
+    function bindDetailDownloads(target) {
+      document.getElementById('dl-followers').onclick = () => downloadCSVArr(`${target}-followers.csv`, currentRunDetail?.followers || []);
+      document.getElementById('dl-followees').onclick = () => downloadCSVArr(`${target}-following.csv`, currentRunDetail?.followees || []);
+      document.getElementById('dl-nfb').onclick = () => downloadCSVArr(`${target}-no-follow-back.csv`, currentRunDetail?.non_followbacks || []);
+    }
+    function clearHistoryDetail() {
+      currentRunDetail = null;
+      const focus = document.getElementById('history-focus');
+      if (focus) focus.classList.add('empty');
+      const title = document.getElementById('detail-title');
+      const meta = document.getElementById('detail-meta');
+      if (title) title.textContent = 'Run detail';
+      if (meta) meta.textContent = '';
+      const countIds = ['detail-fadd-count', 'detail-frem-count', 'detail-feadd-count', 'detail-ferem-count', 'detail-nfb-count'];
+      countIds.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = id === 'detail-nfb-count' ? '0' : '0';
+      });
+      const highlightIds = ['detail-highlight-followers', 'detail-highlight-following', 'detail-highlight-nfb'];
+      highlightIds.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = '—';
+      });
+      ['detail-fadd-toggle','detail-frem-toggle','detail-followers-toggle','detail-feadd-toggle','detail-ferem-toggle','detail-followees-toggle','detail-nfb-toggle'].forEach(id => {
+        const summary = document.querySelector(`#${id} summary`);
+        if (summary) summary.textContent = 'Show list';
+      });
+      const detailExpand = document.getElementById('detail-expand');
+      if (detailExpand) detailExpand.removeAttribute('open');
+      document.querySelectorAll('.run-pill').forEach(item => item.classList.remove('active'));
+      currentHistoryTarget = null;
+      resetCohortUI();
+    }
+
+    let currentHistoryTarget = null;
+
+    function cohortLabels(kind) {
+      const isFollowers = kind === 'followers';
+      return {
+        active: isFollowers ? 'still following' : 'still followed',
+        churned: isFollowers ? 'unfollowed' : 'target unfollowed',
+      };
+    }
+
+    function resetCohortUI() {
+      const kindSel = document.getElementById('detail-cohort-kind');
+      const labels = cohortLabels(kindSel?.value || 'followers');
+      const activeEl = document.getElementById('detail-cohort-active');
+      const churnEl = document.getElementById('detail-cohort-churned');
+      const listEl = document.getElementById('detail-cohort-list');
+      const toggle = document.querySelector('#detail-cohort-toggle summary');
+      if (activeEl) activeEl.textContent = `0 ${labels.active}`;
+      if (churnEl) churnEl.textContent = `0 ${labels.churned}`;
+      if (listEl) listEl.innerHTML = '<li class="muted">No data yet.</li>';
+      if (toggle) toggle.textContent = 'Show list';
+    }
+
+    async function loadCohortInsights(target) {
+      currentHistoryTarget = target || currentHistoryTarget;
+      const kindSel = document.getElementById('detail-cohort-kind');
+      const windowSel = document.getElementById('detail-cohort-window');
+      const activeEl = document.getElementById('detail-cohort-active');
+      const churnEl = document.getElementById('detail-cohort-churned');
+      const listEl = document.getElementById('detail-cohort-list');
+      const toggle = document.querySelector('#detail-cohort-toggle summary');
+      if (!currentHistoryTarget || !kindSel || !windowSel || !listEl) return;
+      const kind = kindSel.value || 'followers';
+      const labels = cohortLabels(kind);
+      const days = windowSel.value || '7';
+      try {
+        const res = await fetchJSON(`/insights/followers?target=${encodeURIComponent(currentHistoryTarget)}&days=${days}&kind=${kind}`);
+        if (activeEl) activeEl.textContent = `${res.active_count || 0} ${labels.active}`;
+        if (churnEl) churnEl.textContent = `${res.churned_count || 0} ${labels.churned}`;
+        const rows = [];
+        const fmt = (item, status) => {
+          const daysLabel = item.days_followed != null ? `${item.days_followed}d` : '—';
+          const statusLabel = status === 'active' ? labels.active : labels.churned;
+          const tone = status === 'active' ? 'good' : 'warn';
+          return `<li class="row" style="justify-content: space-between;">
+            <span>@${item.username}</span>
+            <span class="chip ${tone}">${daysLabel} · ${statusLabel}</span>
+          </li>`;
+        };
+        (res.active || []).slice(0, 15).forEach(item => rows.push(fmt(item, 'active')));
+        (res.churned || []).slice(0, 10).forEach(item => rows.push(fmt(item, 'churned')));
+        if (!rows.length) rows.push('<li class="muted">No follow changes in this window.</li>');
+        listEl.innerHTML = rows.join('');
+        if (toggle) toggle.textContent = `Show list (${(res.active_count || 0) + (res.churned_count || 0)})`;
+      } catch (e) {
+        if (listEl) listEl.innerHTML = `<li class="muted">Insights unavailable: ${e.message}</li>`;
+      }
+    }
+    async function loadRunDetail(runId, target) {
+      try {
+        const r = await fetchJSON(`/run/${runId}`);
+        currentRunDetail = r;
+        document.querySelectorAll('.run-pill').forEach(item => {
+          item.classList.toggle('active', item.dataset.run === String(runId));
+        });
+        const focus = document.getElementById('history-focus');
+        if (focus) focus.classList.remove('empty');
+        document.getElementById('detail-title').textContent = `Run ${r.id} · @${r.target_username}`;
+        document.getElementById('detail-meta').textContent = `${renderTime(r.timestamp)} · collected via @${r.login_username} · followers ${r.followers_count} · following ${r.followees_count}`;
+        const count = (arr) => Array.isArray(arr) ? arr.length : 0;
+        const faddCount = count(r.followers_added_list);
+        const fremCount = count(r.followers_removed_list);
+        const feaddCount = count(r.followees_added_list);
+        const feremCount = count(r.followees_removed_list);
+        const nfbCount = count(r.non_followbacks);
+        const faddEl = document.getElementById('detail-fadd-count');
+        const fremEl = document.getElementById('detail-frem-count');
+        const feaddEl = document.getElementById('detail-feadd-count');
+        const feremEl = document.getElementById('detail-ferem-count');
+        const nfbEl = document.getElementById('detail-nfb-count');
+        if (faddEl) faddEl.textContent = `+${faddCount}`;
+        if (fremEl) fremEl.textContent = `-${fremCount}`;
+        if (feaddEl) feaddEl.textContent = `+${feaddCount}`;
+        if (feremEl) feremEl.textContent = `-${feremCount}`;
+        if (nfbEl) nfbEl.textContent = `${nfbCount}`;
+        const setSummary = (id, count) => {
+          const summary = document.querySelector(`#${id} summary`);
+          if (summary) summary.textContent = `Show list (${count})`;
+        };
+        setSummary('detail-fadd-toggle', faddCount);
+        setSummary('detail-frem-toggle', fremCount);
+        setSummary('detail-followers-toggle', count(r.followers));
+        setSummary('detail-feadd-toggle', feaddCount);
+        setSummary('detail-ferem-toggle', feremCount);
+        setSummary('detail-followees-toggle', count(r.followees));
+        setSummary('detail-nfb-toggle', nfbCount);
+        const netFollowers = (r.followers_added || 0) - (r.followers_removed || 0);
+        const netFollowees = (r.followees_added || 0) - (r.followees_removed || 0);
+        const kFollowers = document.getElementById('detail-kpi-followers');
+        const kFollowing = document.getElementById('detail-kpi-following');
+        const kNfb = document.getElementById('detail-kpi-nfb');
+        const kNetFollowers = document.getElementById('detail-kpi-netfollowers');
+        const kNetFollowing = document.getElementById('detail-kpi-netfollowing');
+        if (kFollowers) kFollowers.textContent = r.followers_count ?? '—';
+        if (kFollowing) kFollowing.textContent = r.followees_count ?? '—';
+        if (kNfb) kNfb.textContent = nfbCount;
+        if (kNetFollowers) kNetFollowers.textContent = formatDeltaNet(netFollowers);
+        if (kNetFollowing) kNetFollowing.textContent = formatDeltaNet(netFollowees);
+        const insight = document.getElementById('detail-insight');
+        if (insight) {
+          let msg = runInsight(netFollowers, netFollowees);
+          const rate = (r.non_followbacks_count != null && r.followees_count)
+            ? Math.min(100, Math.round((r.non_followbacks_count / r.followees_count) * 100))
+            : null;
+          if (rate != null) {
+            const tag = rate >= 70 ? 'high' : rate <= 30 ? 'healthy' : 'moderate';
+            msg = `${msg} No follow-back rate ${rate}% (${tag}).`;
+          }
+          insight.textContent = msg;
+        }
+        const hFollowers = document.getElementById('detail-highlight-followers');
+        const hFollowing = document.getElementById('detail-highlight-following');
+        const hNfb = document.getElementById('detail-highlight-nfb');
+        if (hFollowers) hFollowers.textContent = `+${faddCount} / -${fremCount}`;
+        if (hFollowing) hFollowing.textContent = `+${feaddCount} / -${feremCount}`;
+        if (hNfb) hNfb.textContent = nfbCount;
+        const delBtn = document.getElementById('detail-delete');
+        if (delBtn) delBtn.dataset.run = runId;
+        setActiveHistoryTab('summary');
+        const detailExpand = document.getElementById('detail-expand');
+        if (detailExpand) detailExpand.setAttribute('open', 'open');
+        const perf = document.getElementById('detail-performance');
+        const dur = r.duration_seconds ? formatElapsed(r.duration_seconds) : 'n/a';
+        const fsec = r.followers_fetch_seconds ?? 'n/a';
+        const fesec = r.followees_fetch_seconds ?? 'n/a';
+        const frate = r.followers_rate ? `${r.followers_rate}/s` : 'n/a';
+        const ferate = r.followees_rate ? `${r.followees_rate}/s` : 'n/a';
+        perf.innerHTML = `
+          <div class="metric"><span>Duration</span><strong>${dur}</strong><small class="muted">snapshot</small></div>
+          <div class="metric"><span>Followers fetch</span><strong>${fsec}s</strong><small class="muted">${frate}</small></div>
+          <div class="metric"><span>Following fetch</span><strong>${fesec}s</strong><small class="muted">${ferate}</small></div>
+        `;
+        renderList(document.getElementById('detail-nfb'), r.non_followbacks);
+        renderList(document.getElementById('detail-followers'), r.followers);
+        renderList(document.getElementById('detail-followees'), r.followees);
+        renderList(document.getElementById('detail-fadd'), r.followers_added_list);
+        renderList(document.getElementById('detail-frem'), r.followers_removed_list);
+        renderList(document.getElementById('detail-feadd'), r.followees_added_list);
+        renderList(document.getElementById('detail-ferem'), r.followees_removed_list);
+        bindDetailDownloads(target);
+        loadCohortInsights(target);
+      } catch (e) {
+        log('Run detail error: ' + e.message);
+      }
+    }
+
+    async function loadHistoryRuns() {
+      const target = document.getElementById('hist-target').value;
+      const limit = document.getElementById('hist-limit').value || 20;
+      const listEl = document.getElementById('hist-list');
+      const summary = document.getElementById('history-summary');
+      const trend = document.getElementById('history-trend');
+      const title = document.getElementById('history-title');
+      const sub = document.getElementById('history-sub');
+      if (listEl) listEl.innerHTML = '<div class="muted">Loading...</div>';
+      if (summary) summary.innerHTML = '';
+      if (trend) trend.innerHTML = '';
+      if (title) title.textContent = target ? `Run Explorer · @${target}` : 'Run Explorer';
+      if (sub) sub.textContent = target ? 'Snapshots for this tracked account (collected via your login).' : 'Select a tracked account to view history.';
+      clearHistoryDetail();
+      if (!target) { if (listEl) listEl.innerHTML = '<div class="muted">Select a tracked account.</div>'; return; }
+      try {
+        const rows = await fetchJSON(`/runs?target=${encodeURIComponent(target)}&limit=${limit}`);
+        if (!rows.length) { if (listEl) listEl.innerHTML = '<div class="muted">No runs yet.</div>'; return; }
+        if (listEl) listEl.innerHTML = '';
+        const sparkValues = rows.slice().reverse().map(r => r.followers_count);
+        const sparkSvg = sparkline(sparkValues);
+        const last = rows[0];
+        const avgF = Math.round(rows.reduce((acc, r) => acc + (r.followers_added - r.followers_removed), 0) / rows.length);
+        const avgFe = Math.round(rows.reduce((acc, r) => acc + (r.followees_added - r.followees_removed), 0) / rows.length);
+        if (summary) {
+          summary.innerHTML = `
+            <span class="chip neutral">${rows.length} runs</span>
+            <span class="chip good">Last run ${timeAgo(last.timestamp) || renderTime(last.timestamp)}</span>
+            <span class="chip neutral">Avg Δ followers ${formatDeltaNet(avgF)}</span>
+            <span class="chip neutral">Avg Δ following ${formatDeltaNet(avgFe)}</span>
+          `;
+        }
+        if (trend) {
+          trend.innerHTML = sparkSvg ? `<div class="muted" style="margin-bottom:4px;">Followers trend</div>${sparkSvg}` : '<span class="muted">No trend data yet.</span>';
+        }
+        rows.forEach(r => {
+          const friendly = renderTime(r.timestamp);
+          const netFollowers = (r.followers_added || 0) - (r.followers_removed || 0);
+          const netFollowees = (r.followees_added || 0) - (r.followees_removed || 0);
+          const dur = r.duration_seconds ? `${formatElapsed(r.duration_seconds)} snapshot` : 'snapshot';
+          const item = document.createElement('div');
+          item.className = 'run-pill';
+          item.dataset.run = r.id;
+          item.innerHTML = `
+            <div class="run-pill-head">
+              <div>
+                <div class="run-pill-title">Run #${r.id} · ${friendly}</div>
+                <div class="run-pill-sub">Collected via @${r.login_username || '—'} · ${dur}</div>
+              </div>
+              <div class="chip-row">
+                <span class="chip neutral">Followers ${r.followers_count}</span>
+                <span class="chip neutral">Following ${r.followees_count}</span>
+              </div>
+            </div>
+            <div class="run-pill-summary">
+              ${runInsight(netFollowers, netFollowees)} · No follow-back ${r.non_followbacks_count ?? 0}.
+            </div>
+          `;
+          item.onclick = () => loadRunDetail(r.id, target);
+          listEl.appendChild(item);
+        });
+        listEl.querySelectorAll('.run-pill').forEach(btn => {
+          btn.onclick = (e) => { e.stopPropagation(); loadRunDetail(btn.dataset.run, target); };
+        });
+      } catch (e) {
+        if (listEl) listEl.innerHTML = `<div class="muted">Error: ${e.message}</div>`;
+        log('History load error: ' + e.message);
+      }
+    }
+
+    async function deleteRun(runId, target) {
+      if (!confirm(`Delete run ${runId} for @${target}? You can undo within 10 minutes.`)) return;
+      const y = window.scrollY;
+      try {
+        const res = await fetchJSON(`/run/${runId}`, {method: 'DELETE'});
+        log(`Deleted run ${runId}`);
+        await loadHistoryRuns();
+        loadTargetsOverview();
+        loadLastStatus();
+        renderTimeline();
+      } catch (e) {
+        alert('Delete failed: ' + e.message);
+        log('Delete run error: ' + e.message);
+      } finally {
+        window.scrollTo(0, y);
+      }
+    }
+
+    async function runOneOffFromSchedule(btn, login, target) {
+      const loginResolved = resolveLogin(login);
+      if (isLoginBusy(loginResolved)) {
+        const reason = (unfollowRunning && loginResolved === unfollowBusyLogin) ? 'Unfollow job running' : 'Capture in progress';
+        showToast(`Cannot start: ${reason}`, 'neutral');
+        return;
+      }
+      const statusEl = document.querySelector(`[data-status-target="${target}"]`);
+      const twoFactor = getTwoFactorCode();
+      if (twoFactor) { const el = document.getElementById('run-2fa'); if (el) el.value = ''; }
+      await triggerRun(loginResolved, target, btn, statusEl, twoFactor);
+    }
+
+    async function cancelRun(login, target, btn, statusEl, jobId) {
+      if (!login || !target) {
+        if (!jobId) { showToast('Cancel failed: missing job info', 'bad'); return; }
+      }
+      const payload = {};
+      if (login) payload.login_username = login;
+      if (target) payload.target_username = target;
+      if (jobId) payload.job_id = jobId;
+      const btnLabel = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
+      try {
+        await fetchJSON('/run/cancel', {method:'POST', body: JSON.stringify(payload)});
+        showToast(`Cancel requested for @${target}`, 'neutral');
+        if (statusEl) statusEl.innerHTML = '<span class="status-dot dot-error"></span>Cancel requested';
+        if (btn) {
+          btn.textContent = 'Cancel requested';
+          btn.disabled = true;
+          btn.dataset.inflight = 'false';
+        }
+        fetchSystemStatus();
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = btnLabel || 'Cancel'; }
+        showToast('Cancel failed: ' + e.message, 'bad');
+      }
+    }
+
+    function renderTargetsOverview() {
+      const wrap = document.getElementById('targets-grid');
+      if (!wrap) return;
+      const rows = targetsCache || [];
+      const filtered = applyTargetFilters(rows);
+      if (!rows.length) {
+        wrap.innerHTML = '<div class="muted">No targets yet.</div>';
+        return;
+      }
+      if (!filtered.length && (activeFilter !== 'all' || focusLogin)) {
+        updateHeroFromTargets(rows);
+        wrap.innerHTML = '<div class="muted">No targets match the current filters.</div>';
+        return;
+      }
+      const renderRows = filtered.length ? filtered : rows;
+      const activeJobs = statusCache?.active_jobs || [];
+      const activeByTarget = new Map(activeJobs.map(j => [j.target_username, j]));
+      const queuedJobs = statusCache?.queued_jobs || [];
+      const queuedByTarget = new Map(queuedJobs.map(j => [j?.meta?.target_username, j]));
+      updateHeroFromTargets(renderRows);
+      wrap.innerHTML = '';
+
+      const table = document.createElement('div');
+      table.className = 'roster-table-inner';
+      table.innerHTML = `
+        <div class="roster-header">
+          <div>Status</div>
+          <div>Target</div>
+          <div>Last run</div>
+          <div>Δ Followers</div>
+          <div>Δ Following</div>
+          <div>NFB</div>
+          <div>Week</div>
+          <div>Actions</div>
+        </div>
+        <div class="roster-body" id="roster-body"></div>
+      `;
+      wrap.appendChild(table);
+      const body = table.querySelector('#roster-body');
+
+      const sorted = renderRows.slice().sort((a, b) => {
+        const aActive = activeByTarget.has(a.target_username) ? 1 : 0;
+        const bActive = activeByTarget.has(b.target_username) ? 1 : 0;
+        if (aActive !== bActive) return bActive - aActive;
+        const aQueued = queuedByTarget.has(a.target_username) ? 1 : 0;
+        const bQueued = queuedByTarget.has(b.target_username) ? 1 : 0;
+        if (aQueued !== bQueued) return bQueued - aQueued;
+        const at = a.latest?.timestamp || '';
+        const bt = b.latest?.timestamp || '';
+        return bt.localeCompare(at);
+      });
+
+      sorted.forEach(r => {
+        const latest = r.latest || {};
+        const activeJob = activeByTarget.get(r.target_username);
+        const queuedJob = queuedByTarget.get(r.target_username);
+        const status = activeJob ? 'running' : queuedJob ? 'queued' : 'idle';
+        const lastAgo = latest.timestamp ? timeAgo(latest.timestamp) : '—';
+        const deltaF = r.delta_followers ?? 0;
+        const deltaFe = r.delta_followees ?? 0;
+        const nfb = latest.non_followbacks_count ?? '—';
+        const ratio = (latest.non_followbacks_count != null && latest.followees_count)
+          ? Math.min(100, Math.round((latest.non_followbacks_count / latest.followees_count) * 100))
+          : null;
+        const week = r.week || {};
+        const weekNet = (week.followers_added || 0) - (week.followers_removed || 0);
+        const row = document.createElement('div');
+        row.className = 'roster-row';
+        row.innerHTML = `
+          <div class="roster-cell">
+            <span class="roster-dot ${status}"></span>
+            <span class="roster-status">${status}</span>
+          </div>
+          <div class="roster-cell roster-target">@${r.target_username}</div>
+          <div class="roster-cell muted">${lastAgo}</div>
+          <div class="roster-cell ${deltaF >= 0 ? 'roster-pos' : 'roster-neg'}">${formatDeltaNet(deltaF)}</div>
+          <div class="roster-cell ${deltaFe >= 0 ? 'roster-pos' : 'roster-neg'}">${formatDeltaNet(deltaFe)}</div>
+          <div class="roster-cell">${nfb}${ratio !== null ? ` <span class="roster-sub">${ratio}%</span>` : ''}</div>
+          <div class="roster-cell ${weekNet >= 0 ? 'roster-pos' : 'roster-neg'}">${formatDeltaNet(weekNet)}</div>
+          <div class="roster-cell roster-actions">
+            <button class="secondary" data-runbtn="${r.target_username}" data-login="${latest.login_username}" onclick="runOneOffFromSchedule(this,'${latest.login_username}', '${r.target_username}')">Run</button>
+            <button class="ghost-btn" onclick="openScheduleModal('${r.target_username}','${latest.login_username || ''}')">Schedule</button>
+            <button class="ghost-btn" onclick="openExplorer('${r.target_username}')">View</button>
+          </div>
+        `;
+        body.appendChild(row);
+      });
+      applyBusyStates();
+      updateSignalBoard();
+    }
+
+    async function loadTargetsOverview() {
+      const wrap = document.getElementById('targets-grid');
+      wrap.innerHTML = '<div class="muted">Loading targets...</div>';
+      try {
+        const rows = await fetchJSON('/targets_summary');
+        targetsCache = rows;
+        renderTargetsOverview();
+        updateSignalBoard();
+      } catch (e) {
+        wrap.innerHTML = `<div class="muted">Error: ${e.message}</div>`;
+        log('Targets overview error: ' + e.message);
+      }
+    }
+
+    async function loadTargetsForHistory() {
+      const sel = document.getElementById('hist-target');
+      const current = sel.value;
+      sel.innerHTML = '<option value="">Select tracked account</option>';
+      try {
+        const rows = await fetchJSON('/targets_summary');
+        const list = document.getElementById('targets-list');
+        const selExisting = document.getElementById('sch-target-select');
+        list.innerHTML = '';
+        selExisting.innerHTML = '<option value="">Pick previous</option>';
+        if (!rows.length) { sel.innerHTML = '<option value="">No targets yet</option>'; return; }
+        rows.forEach(r => {
+          const opt = document.createElement('option');
+          opt.value = r.target_username;
+          opt.textContent = r.target_username;
+          sel.appendChild(opt);
+          const opt2 = document.createElement('option');
+          opt2.value = r.target_username;
+          list.appendChild(opt2);
+          const opt3 = document.createElement('option');
+          opt3.value = r.target_username;
+          opt3.textContent = r.target_username;
+          selExisting.appendChild(opt3);
+        });
+        sel.value = (current && rows.some(r => r.target_username === current)) ? current : '';
+        if (sel.value) await loadHistoryRuns();
+      } catch (e) {
+        sel.innerHTML = '<option value="">Error loading targets</option>';
+        log('History target load error: ' + e.message);
+      }
+    }
+
+    async function loadLastStatus() {
+      try {
+        const res = await fetchJSON('/last_status');
+        const latest = res.overall || (res.targets && res.targets[0]);
+        lastStatusCache = latest || null;
+        renderRunSummary();
+        renderTimeline();
+        updateSignalBoard();
+      } catch (e) {
+        log('Last status error: ' + e.message);
+      }
+    }
+
+    function renderSystemStatus(data){
+      const card = document.getElementById('sys-status');
+      const pill = document.getElementById('system-state-pill');
+      if (!data) { card.textContent = 'Unavailable'; return; }
+      pill.classList.remove('running', 'queued', 'idle');
+      const active = data.active_jobs || (data.job ? [data.job] : []);
+      const queued = data.queued_jobs || data.jobs || [];
+
+      const activeHtml = active.length ? active.map(j => {
+        const elapsed = formatElapsed(j.elapsed_seconds || 0);
+        const eta = j.eta_seconds !== null && j.eta_seconds !== undefined ? formatElapsed(j.eta_seconds) : null;
+        const followers = formatProgress('Followers', j.followers_progress, j.followers_total);
+        const following = formatProgress('Following', j.following_progress, j.following_total);
+        const overallPct = progressPercentCombinedForJob(j);
+        const loginSafe = JSON.stringify(j.login_username || '');
+        const targetSafe = JSON.stringify(j.target_username || '');
+        const jobSafe = JSON.stringify(j.job_id || '');
+        return `
+          <div class="run-card">
+            <div class="run-meta">
+              <div>
+                <div class="run-title">@${j.target_username}</div>
+                <div class="run-sub">via ${j.login_username} • ${renderPhase(j.phase)}</div>
+              </div>
+              <div class="run-sub">${elapsed}${eta ? ` · ETA ${eta}` : ''}</div>
+            </div>
+            <div class="run-kpis">
+              <span class="chip neutral">${followers}</span>
+              <span class="chip neutral">${following}</span>
+            </div>
+            <div class="run-progress">
+              ${overallPct !== null ? `<div>Overall ${formatPct(overallPct)}</div><div class="progress-bar"><span style="width:${progressBarWidth(overallPct)}%"></span></div>` : ''}
+            </div>
+            <div class="run-actions">
+              <button class="ghost-btn" onclick="cancelRun(${loginSafe}, ${targetSafe}, this, null, ${jobSafe})">Cancel</button>
+            </div>
+          </div>
+        `;
+      }).join('') : '<div class="muted">No active runs. Start one from Quick capture or Tracked accounts.</div>';
+
+      const queuedHtml = queued && queued.length ? queued.map(j => {
+        const meta = j.meta || {};
+        return `
+          <div class="queue-item">
+            <div>
+              <strong>@${meta.target_username || ''}</strong>
+              <div class="meta">via ${meta.login_username || ''}</div>
+            </div>
+            <span class="chip neutral">Queued</span>
+          </div>
+        `;
+      }).join('') : '<div class="muted">Queue empty. Scheduled runs appear here.</div>';
+
+      if (active.length) {
+        pill.textContent = active.length > 1 ? `Running (${active.length})` : 'Running';
+        pill.classList.add('running');
+      } else if (queued && queued.length) {
+        pill.textContent = 'Queued';
+        pill.classList.add('queued');
+      } else {
+        pill.textContent = 'Idle';
+        pill.classList.add('idle');
+      }
+
+      card.innerHTML = `
+        <div class="run-lane">
+          <div class="lane-col">
+            <div class="lane-header">Active runs <span class="chip ${active.length ? 'good' : 'neutral'}">${active.length}</span></div>
+            <div class="lane-list">${activeHtml}</div>
+          </div>
+          <div class="lane-col">
+            <div class="lane-header">Queue <span class="chip ${queued.length ? 'warn' : 'neutral'}">${queued.length}</span></div>
+            <div class="lane-list">${queuedHtml}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function setTicker(text, tone = 'neutral') {
+      const el = document.getElementById('status-ticker');
+      const textEl = document.getElementById('ticker-text');
+      const cloneEl = document.getElementById('ticker-text-clone');
+      if (!el) return;
+      if (!text) {
+        el.classList.add('hidden');
+        if (textEl) textEl.textContent = '';
+        if (cloneEl) cloneEl.textContent = '';
+        return;
+      }
+      const rendered = `${text} \u2022 ${text} \u2022 `;
+      if (textEl) textEl.textContent = rendered;
+      if (cloneEl) cloneEl.textContent = rendered;
+      el.classList.remove('hidden', 'running', 'warn', 'bad', 'good');
+      if (tone && tone !== 'neutral') el.classList.add(tone);
+    }
+
+    function renderTicker() {
+      const active = statusCache?.active_jobs || [];
+      if (active.length) {
+        if (active.length === 1) {
+          const j = active[0];
+          const elapsed = formatElapsed(j.elapsed_seconds || 0);
+          const followers = formatProgress('Followers', j.followers_progress, j.followers_total);
+          const following = formatProgress('Following', j.following_progress, j.following_total);
+          setTicker(`Running: @${j.target_username} via ${j.login_username} • ${elapsed} • ${followers} • ${following}`, 'running');
+        } else {
+          const list = active.slice(0, 3).map(j => {
+            const pct = progressPercentCombinedForJob(j);
+            const pctLabel = formatPct(pct);
+            return `@${j.target_username} via ${j.login_username} (${pctLabel})`;
+          }).join(' • ');
+          const extra = active.length > 3 ? ` • +${active.length - 3} more` : '';
+          setTicker(`Running ${active.length} jobs: ${list}${extra}`, 'running');
+        }
+        return;
+      }
+      const uf = unfollowCache?.job;
+      if (uf && uf.state) {
+        if (uf.state === 'running' || uf.state === 'cancelling') {
+          const elapsed = formatElapsed(uf.elapsed_seconds || 0);
+          setTicker(`Cleanup running: ${uf.processed || 0}/${uf.total || 0} • ${elapsed} • last ${uf.last_user || '—'}`, 'running');
+          return;
+        }
+        if (uf.state === 'error') {
+          const msg = (uf.message || '').toString();
+          const label = msg.includes('feedback_required') ? 'Instagram blocked this session (Try Again Later)' : `Cleanup error: ${msg || 'unknown'}`;
+          setTicker(label, 'bad');
+          return;
+        }
+        if (uf.state === 'cancelled') {
+          setTicker('Cleanup cancelled', 'warn');
+          return;
+        }
+        if (uf.state === 'done' && uf.processed) {
+          setTicker(`Cleanup completed: ${uf.processed} actions`, 'good');
+          return;
+        }
+      }
+      setTicker('');
+    }
+    async function fetchSystemStatus() {
+      try {
+        const data = await fetchJSON('/status');
+        statusCache = data;
+        renderSystemStatus(data);
+        renderTicker();
+        busyLogins = new Set([...(data.active_logins || []), ...(data.queued_logins || [])].filter(Boolean));
+        unfollowRunning = data?.unfollow?.state === 'running';
+        unfollowBusyLogin = data?.unfollow?.login_username || '';
+        updateRunLockForSelected();
+        applyBusyStates();
+        renderTimeline();
+        renderRunSummary();
+        updateRailStatus();
+        renderMiniNow();
+        updateKpiStatus();
+        updateSignalBoard();
+        if (targetsCache) renderTargetsOverview();
+      } catch (e) {
+        log('Status error: ' + e.message);
+      }
+    }
+
+    async function fetchUnfollowStatus() {
+      try {
+        const login = resolveUnfollowLogin();
+        const data = await fetchJSON(`/unfollow/status?login_username=${encodeURIComponent(login)}`);
+        unfollowCache = data;
+        renderTicker();
+        const state = data.job?.state || 'idle';
+        const isRunning = state === 'running' || state === 'cancelling';
+        const isCancelled = state === 'cancelled';
+        const isDone = state === 'done';
+        const isError = state === 'error';
+        const ufState = document.getElementById('uf-state');
+        if (ufState) {
+          ufState.textContent = state;
+          ufState.classList.remove('running', 'queued', 'idle');
+          ufState.classList.add(isRunning ? 'running' : 'idle');
+        }
+        const heroCleanupPill = document.getElementById('hero-cleanup-pill');
+        const heroCleanupMeta = document.getElementById('hero-cleanup-meta');
+        const heroCleanupBtn = document.getElementById('hero-cleanup-btn');
+        const heroInitBtn = document.getElementById('hero-init-btn');
+        const heroCleanupAlert = document.getElementById('hero-cleanup-alert');
+        if (heroInitBtn) {
+          heroInitBtn.style.display = data.auth_ready ? 'none' : 'inline-flex';
+        }
+
+        const elapsed = formatElapsed(data.job?.elapsed_seconds);
+        const total = data.job?.total ?? data.non_followbacks_count ?? 0;
+        const processed = data.job?.processed ?? 0;
+        const latest = data.latest_run ? `Last cleanup ${timeAgo(data.latest_run.timestamp) || renderTime(data.latest_run.timestamp)}` : 'No cleanup runs yet';
+
+        if (heroCleanupPill) {
+          heroCleanupPill.classList.remove('running', 'queued', 'idle');
+          if (isRunning) {
+            heroCleanupPill.textContent = state === 'cancelling' ? 'Stopping' : 'Running';
+            heroCleanupPill.classList.add('running');
+          } else if (isCancelled) {
+            heroCleanupPill.textContent = 'Cancelled';
+            heroCleanupPill.classList.add('idle');
+          } else if (isError) {
+            heroCleanupPill.textContent = 'Error';
+            heroCleanupPill.classList.add('idle');
+          } else if (isDone) {
+            heroCleanupPill.textContent = 'Completed';
+            heroCleanupPill.classList.add('idle');
+          } else {
+            heroCleanupPill.textContent = 'Idle';
+            heroCleanupPill.classList.add('idle');
+          }
+        }
+        if (heroCleanupMeta) {
+          if (isRunning || isCancelled || isDone) {
+            heroCleanupMeta.textContent = `${processed}/${total}${elapsed ? ` · ${elapsed}` : ''}`;
+          } else {
+            heroCleanupMeta.textContent = '';
+          }
+        }
+        if (heroCleanupAlert) {
+          const msg = (data.job?.message || '').toString();
+          if (isError && msg) {
+            const lowered = msg.toLowerCase();
+            if (lowered.includes('feedback_required') || lowered.includes('try again later')) {
+              heroCleanupAlert.textContent = 'Instagram blocked this device session (Try Again Later). Re‑login with a real browser session, then retry.';
+            } else {
+              heroCleanupAlert.textContent = `Cleanup error: ${msg}`;
+            }
+            heroCleanupAlert.classList.remove('hidden');
+          } else {
+            heroCleanupAlert.classList.add('hidden');
+            heroCleanupAlert.textContent = '';
+          }
+        }
+        if (heroCleanupBtn) {
+          cancelHoldEnabled = isRunning;
+          bindCancelHold(heroCleanupBtn);
+          if (isRunning) {
+            heroCleanupBtn.textContent = 'Cancel cleanup';
+            heroCleanupBtn.disabled = state === 'cancelling';
+            heroCleanupBtn.onclick = null;
+          } else {
+            heroCleanupBtn.textContent = 'Clean no-follow-back';
+            heroCleanupBtn.disabled = false;
+            heroCleanupBtn.onclick = startUnfollow;
+          }
+        }
+        if (heroInitBtn) {
+          heroInitBtn.onclick = initUnfollowLogin;
+        }
+        const ufStatus = document.getElementById('uf-status');
+        if (ufStatus) {
+          const stateLabel = isRunning ? 'Running' : isCancelled ? 'Cancelled' : isError ? 'Error' : isDone ? 'Completed' : 'Idle';
+          ufStatus.textContent = `${latest}${elapsed ? ` · Elapsed ${elapsed}` : ''} · ${stateLabel}`;
+        }
+        const ufLog = document.getElementById('uf-log');
+        if (ufLog) {
+          ufLog.innerHTML = (data.log || []).map(l=>`${l}`).join('<br>');
+        }
+        const ufMax = document.getElementById('uf-max');
+        if (ufMax && (state === 'idle' || state === 'done')) {
+          const configuredMax = Number(getConfigValue('unfollow_max_per_run', 0));
+          if (configuredMax > 0) {
+            ufMax.value = configuredMax;
+          } else if (data.suggested_max != null) {
+            ufMax.value = data.suggested_max;
+          }
+        }
+      } catch (e) {
+        const heroCleanupPill = document.getElementById('hero-cleanup-pill');
+        const heroCleanupMeta = document.getElementById('hero-cleanup-meta');
+        if (heroCleanupPill) {
+          heroCleanupPill.textContent = 'Error';
+          heroCleanupPill.classList.remove('running', 'queued');
+          heroCleanupPill.classList.add('idle');
+        }
+        if (heroCleanupMeta) heroCleanupMeta.textContent = 'Cleanup status error';
+      }
+    }
+    async function previewUnfollow() {
+      try {
+        const login = resolveUnfollowLogin();
+        const data = await fetchJSON(`/unfollow/preview?login_username=${encodeURIComponent(login)}`);
+        const sample = data.sample || [];
+        document.getElementById('uf-preview').textContent = sample.length
+          ? `Sample (${sample.length}) · Eligible: ${data.count} · Already unfollowed: ${data.already_unfollowed_count || 0} · Suggested max: ${data.suggested_max ?? 'n/a'}: ${sample.join(', ')}`
+          : 'No eligible no-follow-back accounts found.';
+      } catch (e) {
+        document.getElementById('uf-preview').textContent = 'Preview error: ' + e.message;
+      }
+    }
+    async function startUnfollow() {
+      const maxVal = document.getElementById('uf-max').value;
+      const fallbackMax = Number(getConfigValue('unfollow_max_per_run', 25));
+      const login = resolveUnfollowLogin();
+      const payload = {
+        login_username: login,
+        dry_run: document.getElementById('uf-dry').value === 'true',
+        max_actions: maxVal === '' ? fallbackMax : Number(maxVal),
+        delay_min: Number(document.getElementById('uf-delay-min').value || getConfigValue('unfollow_delay_min', 25)),
+        delay_max: Number(document.getElementById('uf-delay-max').value || getConfigValue('unfollow_delay_max', 45)),
+      };
+      try {
+        await fetchJSON('/unfollow/start', {method:'POST', body: JSON.stringify(payload)});
+        showToast('Unfollow job started', 'neutral');
+        fetchUnfollowStatus();
+      } catch (e) {
+        showToast('Start failed: ' + e.message, 'bad');
+      }
+    }
+    async function cancelUnfollow() {
+      try {
+        await fetchJSON('/unfollow/cancel', {method:'POST', body: JSON.stringify({})});
+        showToast('Cancel requested', 'neutral');
+        fetchUnfollowStatus();
+      } catch (e) {
+        showToast('Cancel failed: ' + e.message, 'bad');
+      }
+    }
+
+    function bindCancelHold(btn) {
+      if (!btn || btn.dataset.cancelHoldBound === '1') return;
+      btn.dataset.cancelHoldBound = '1';
+      const clearHold = () => {
+        if (cancelHoldTimer) {
+          clearTimeout(cancelHoldTimer);
+          cancelHoldTimer = null;
+        }
+        btn.classList.remove('holding');
+        if (cancelHoldEnabled) {
+          btn.textContent = 'Cancel cleanup';
+        }
+      };
+      const startHold = () => {
+        if (!cancelHoldEnabled || btn.disabled) return;
+        btn.classList.add('holding');
+        btn.textContent = 'Hold to cancel…';
+        if (cancelHoldTimer) clearTimeout(cancelHoldTimer);
+        cancelHoldTimer = setTimeout(() => {
+          cancelHoldTimer = null;
+          btn.classList.remove('holding');
+          cancelUnfollow();
+        }, 1400);
+      };
+      btn.addEventListener('pointerdown', startHold);
+      btn.addEventListener('pointerup', clearHold);
+      btn.addEventListener('pointerleave', clearHold);
+      btn.addEventListener('pointercancel', clearHold);
+    }
+    async function initUnfollowLogin() {
+      try {
+        await fetchJSON('/unfollow/init', {method:'POST', body: JSON.stringify({})});
+        showToast('Login window opened on server', 'neutral');
+      } catch (e) {
+        showToast('Init login failed: ' + e.message, 'bad');
+      }
+    }
+
+    document.getElementById('run-btn').onclick = runOneOff;
+    document.getElementById('run-login').onchange = () => {
+      updateRunLockForSelected();
+      applyBusyStates();
+    };
+    const railLoginSel = document.getElementById('rail-login');
+    if (railLoginSel) railLoginSel.onchange = () => {
+      setFocusLogin(railLoginSel.value);
+      updateRailSessionStatus();
+    };
+    document.querySelectorAll('.rail-filters .filter').forEach(btn => {
+      btn.onclick = () => setActiveFilter(btn.dataset.filter || 'all');
+    });
+    document.querySelectorAll('.view-tab').forEach(btn => {
+      btn.onclick = () => openView(btn.dataset.view || 'overview');
+    });
+    document.querySelectorAll('.nav-chip[data-view]').forEach(link => {
+      link.onclick = (e) => {
+        e.preventDefault();
+        const view = link.dataset.view || 'overview';
+        openView(view);
+        const href = link.getAttribute('href');
+        if (href && href.startsWith('#')) {
+          document.querySelector(href)?.scrollIntoView({behavior: 'smooth', block: 'start'});
+        }
+      };
+    });
+    document.getElementById('sch-btn').onclick = createSchedule;
+    document.getElementById('sch-reset').onclick = resetBuilder;
+    document.getElementById('hist-load').onclick = loadHistoryRuns;
+    document.getElementById('sch-frequency').onchange = toggleFrequencyUI;
+    document.getElementById('sch-target-select').onchange = (e) => {
+      if (e.target.value) document.getElementById('sch-target').value = e.target.value;
+    };
+    const heroCleanupBtn = document.getElementById('hero-cleanup-btn');
+    if (heroCleanupBtn) heroCleanupBtn.onclick = startUnfollow;
+    const heroInitBtn = document.getElementById('hero-init-btn');
+    if (heroInitBtn) heroInitBtn.onclick = initUnfollowLogin;
+    const heroExplorerBtn = document.getElementById('hero-explorer-btn');
+    if (heroExplorerBtn) {
+      heroExplorerBtn.onclick = () => {
+        const heroTitle = document.getElementById('hero-title');
+        const heroTarget = heroTitle?.textContent?.replace('@', '').trim();
+        openExplorer(heroTarget);
+      };
+    }
+    const closeScheduleBtn = document.getElementById('close-schedule');
+    if (closeScheduleBtn) closeScheduleBtn.onclick = closeScheduleModal;
+    const scheduleModal = document.getElementById('schedule-modal');
+    if (scheduleModal) {
+      scheduleModal.addEventListener('click', (e) => {
+        if (e.target.id === 'schedule-modal') closeScheduleModal();
+      });
+    }
+
+    const twoFaModal = document.getElementById('twofa-modal');
+    if (twoFaModal) {
+      twoFaModal.addEventListener('click', (e) => {
+        if (e.target.id === 'twofa-modal') closeTwoFactorModal();
+      });
+    }
+    const closeTwoFa = document.getElementById('close-2fa');
+    if (closeTwoFa) closeTwoFa.onclick = closeTwoFactorModal;
+    const twoFaSubmit = document.getElementById('twofa-submit');
+    if (twoFaSubmit) twoFaSubmit.onclick = submitTwoFactor;
+    const twoFaSkip = document.getElementById('twofa-skip');
+    if (twoFaSkip) {
+      twoFaSkip.onclick = async () => {
+        const pending = twoFaPending;
+        closeTwoFactorModal();
+        if (pending?.login && pending?.target) {
+          await triggerRun(pending.login, pending.target, pending.btn, pending.statusEl, null, {suppressTwofaPrompt: true});
+        }
+      };
+    }
+    const twoFaInput = document.getElementById('twofa-code');
+    if (twoFaInput) {
+      twoFaInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submitTwoFactor();
+      });
+    }
+    const backHistoryBtn = document.getElementById('back-history');
+    if (backHistoryBtn) backHistoryBtn.onclick = clearHistoryDetail;
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.onclick = () => setActiveHistoryTab(btn.dataset.tab || 'summary');
+    });
+    const detailDeleteBtn = document.getElementById('detail-delete');
+    if (detailDeleteBtn) {
+      detailDeleteBtn.onclick = async () => {
+        const runId = detailDeleteBtn.dataset.run;
+        const target = document.getElementById('hist-target').value;
+        if (!runId || !target) return;
+        await deleteRun(runId, target);
+        clearHistoryDetail();
+      };
+    }
+    const openConfigBtn = document.getElementById('open-config');
+    if (openConfigBtn) openConfigBtn.onclick = openConfigModal;
+    const openAccountsBtn = document.getElementById('open-accounts');
+    if (openAccountsBtn) openAccountsBtn.onclick = openAccountsModal;
+    const closeConfigBtn = document.getElementById('close-config');
+    if (closeConfigBtn) closeConfigBtn.onclick = closeConfigModal;
+    const closeAccountsBtn = document.getElementById('close-accounts');
+    if (closeAccountsBtn) closeAccountsBtn.onclick = closeAccountsModal;
+    const accountsRefreshBtn = document.getElementById('accounts-refresh');
+    if (accountsRefreshBtn) accountsRefreshBtn.onclick = loadLogins;
+    const cfgSaveBtn = document.getElementById('cfg-save');
+    if (cfgSaveBtn) cfgSaveBtn.onclick = saveConfig;
+    const cfgResetBtn = document.getElementById('cfg-reset');
+    if (cfgResetBtn) cfgResetBtn.onclick = () => fillConfigForm(true);
+    const acctAddLoginBtn = document.getElementById('acct-add-login');
+    if (acctAddLoginBtn) acctAddLoginBtn.onclick = addLoginFromConfig;
+    const configModal = document.getElementById('config-modal');
+    if (configModal) {
+      configModal.addEventListener('click', (e) => {
+        if (e.target.id === 'config-modal') closeConfigModal();
+      });
+    }
+    const accountsModal = document.getElementById('accounts-modal');
+    if (accountsModal) {
+      accountsModal.addEventListener('click', (e) => {
+        if (e.target.id === 'accounts-modal') closeAccountsModal();
+      });
+    }
+    const cohortKindSel = document.getElementById('detail-cohort-kind');
+    if (cohortKindSel) cohortKindSel.onchange = () => loadCohortInsights(currentHistoryTarget);
+    const cohortWindowSel = document.getElementById('detail-cohort-window');
+    if (cohortWindowSel) cohortWindowSel.onchange = () => loadCohortInsights(currentHistoryTarget);
+
+    (async function init(){
+      try {
+        openView('overview');
+        await loadConfig();
+        await loadLogins();
+        await Promise.all([loadSchedules(), loadTargetsOverview(), loadTargetsForHistory(), loadLastStatus(), loadSummary()]);
+        toggleFrequencyUI();
+        fetchSystemStatus();
+        statusTimer = setInterval(fetchSystemStatus, 4000);
+        fetchUnfollowStatus();
+        setInterval(fetchUnfollowStatus, 6000);
+      } catch (e) {
+        log('Init error: ' + e.message);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "instalab-ui",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "tailwindcss -c tailwind.config.js -i ./ui_src/ui.css -o ./django_app/static/ui.css --minify",
+    "dev": "tailwindcss -c tailwind.config.js -i ./ui_src/ui.css -o ./django_app/static/ui.css --watch"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.39",
+    "tailwindcss": "^3.4.17"
+  }
+}
