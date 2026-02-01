@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 import psycopg2
+from psycopg2 import sql
 
 
 def _env(key, default=None):
@@ -111,26 +112,38 @@ def migrate(sqlite_path: str):
                 for stmt in DDL:
                     cur.execute(stmt)
 
-        tables = ["config", "runs", "run_followers", "run_followees", "schedules", "unfollow_actions"]
-        for table in tables:
+        # Whitelist valid table names to prevent SQL injection
+        VALID_TABLES = ["config", "runs", "run_followers", "run_followees", "schedules", "unfollow_actions"]
+        for table in VALID_TABLES:
+            # Table name is validated against whitelist, safe to use in SQL
             rows = sconn.execute(f"SELECT * FROM {table}").fetchall()
             if not rows:
                 continue
             cols = rows[0].keys()
-            col_list = ", ".join(cols)
-            placeholders = ", ".join(["%s"] * len(cols))
-            insert_sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) ON CONFLICT DO NOTHING"
+            # Use psycopg2.sql.Identifier for safe table/column name quoting
+            col_identifiers = [sql.Identifier(c) for c in cols]
+            col_list = sql.SQL(", ").join(col_identifiers)
+            placeholders = sql.SQL(", ").join([sql.Placeholder()] * len(cols))
+            insert_sql = sql.SQL("INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING").format(
+                sql.Identifier(table),
+                col_list,
+                placeholders
+            )
             with pconn:
                 with pconn.cursor() as cur:
                     cur.executemany(insert_sql, [tuple(r) for r in rows])
 
-        # Fix sequences for serial IDs
+        # Fix sequences for serial IDs - using validated table names
+        TABLES_WITH_SEQUENCES = ["runs", "schedules", "unfollow_actions"]
         with pconn:
             with pconn.cursor() as cur:
-                for table in ("runs", "schedules", "unfollow_actions"):
+                for table in TABLES_WITH_SEQUENCES:
+                    # Use psycopg2.sql for safe identifier quoting
                     cur.execute(
-                        f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
-                        f"COALESCE((SELECT MAX(id) FROM {table}), 1), true);"
+                        sql.SQL(
+                            "SELECT setval(pg_get_serial_sequence({}, 'id'), "
+                            "COALESCE((SELECT MAX(id) FROM {}), 1), true);"
+                        ).format(sql.Literal(table), sql.Identifier(table))
                     )
     finally:
         sconn.close()

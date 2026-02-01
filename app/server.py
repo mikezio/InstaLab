@@ -44,8 +44,9 @@ os.environ.setdefault("HOME", "/home/stremio")
 os.environ.setdefault("TZ", "America/New_York")
 try:
     time.tzset()
-except Exception:
-    pass
+except (AttributeError, OSError) as e:
+    # tzset() may not be available on all platforms
+    print(f"Warning: Could not set timezone: {e}", file=sys.stderr)
 LOCAL_TZ = ZoneInfo("America/New_York")
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -192,7 +193,8 @@ def _read_login_file():
         return []
     try:
         data = json.loads(path.read_text())
-    except Exception:
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"Warning: Failed to read login file {path}: {e}", file=sys.stderr)
         return []
     if isinstance(data, dict):
         entries = data.get("logins") or []
@@ -229,8 +231,8 @@ def _write_login_file(logins):
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
     try:
         os.chmod(path, 0o660)
-    except Exception:
-        pass
+    except (OSError, PermissionError) as e:
+        print(f"Warning: Could not set permissions on {path}: {e}", file=sys.stderr)
 
 
 def _load_login_profiles(force: bool = False):
@@ -291,8 +293,8 @@ def _load_login_profiles(force: bool = False):
     if changed:
         try:
             _write_login_file(scrubbed_entries)
-        except Exception:
-            pass
+        except (IOError, OSError) as e:
+            print(f"Warning: Could not write login file: {e}", file=sys.stderr)
     LOGIN_CACHE["profiles"] = profiles
     LOGIN_CACHE["lookup"] = {p["login_username"]: p for p in profiles}
     LOGIN_CACHE["ts"] = time.time()
@@ -339,8 +341,8 @@ def _get_db():
     if not is_postgres():
         try:
             conn.execute("PRAGMA busy_timeout=30000")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: Could not set busy_timeout: {e}", file=sys.stderr)
     try:
         cols = get_columns(conn, "runs")
         if "duration_seconds" not in cols:
@@ -358,7 +360,9 @@ def _get_db():
         if "confidence_flag" not in cols:
             conn.execute("ALTER TABLE runs ADD COLUMN confidence_flag TEXT")
         conn.commit()
-    except Exception:
+    except Exception as e:
+        # Schema migration errors are logged but non-fatal
+        print(f"Warning: Schema migration failed: {e}", file=sys.stderr)
         try:
             conn.rollback()
         except Exception:
@@ -379,7 +383,8 @@ def _list_tables(conn) -> set[str]:
             return {row[0] for row in cur.fetchall()}
         cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         return {row[0] for row in cur.fetchall()}
-    except Exception:
+    except Exception as e:
+        print(f"Warning: Could not list tables: {e}", file=sys.stderr)
         return set()
 
 

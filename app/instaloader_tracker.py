@@ -53,8 +53,8 @@ def _cookies_login(loader, cookie_file, login_username=None, login_password=None
                 print("Refreshing session with password login...")
                 _password_login(loader, login_username, login_password)
             return True
-    except Exception:
-        pass
+    except (ConnectionError, RuntimeError) as e:
+        print(f"Cookie authentication failed: {e}")
     if login_username and login_password:
         print("Cookies not authenticated, falling back to password login...")
         _password_login(loader, login_username, login_password)
