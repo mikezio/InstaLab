@@ -720,6 +720,11 @@
           <input id="cfg-proxy-password" type="password" placeholder="not set">
           <label for="cfg-proxy-api-key">API key (optional)</label>
           <input id="cfg-proxy-api-key" type="password" placeholder="optional">
+          <label for="cfg-proxy-sticky">Sticky session</label>
+          <select id="cfg-proxy-sticky">
+            <option value="true">Per run (recommended)</option>
+            <option value="false">Rotate per request</option>
+          </select>
           <div class="config-help">Native proxying needs the zone username + password. API key is for Bright Data API access.</div>
           <div class="proxy-actions">
             <button class="secondary" id="cfg-proxy-test">Test proxy</button>
@@ -1335,6 +1340,7 @@
       document.getElementById('cfg-proxy-host').value = src.proxy_host ?? 'brd.superproxy.io';
       document.getElementById('cfg-proxy-port').value = src.proxy_port ?? 33335;
       document.getElementById('cfg-proxy-username').value = src.proxy_username ?? '';
+      document.getElementById('cfg-proxy-sticky').value = (src.proxy_sticky_enabled ?? true) ? 'true' : 'false';
       const proxyPass = document.getElementById('cfg-proxy-password');
       const proxyKey = document.getElementById('cfg-proxy-api-key');
       if (proxyPass) proxyPass.value = '';
@@ -1394,6 +1400,7 @@
         proxy_host: document.getElementById('cfg-proxy-host').value.trim(),
         proxy_port: Number(document.getElementById('cfg-proxy-port').value || 0),
         proxy_username: document.getElementById('cfg-proxy-username').value.trim(),
+        proxy_sticky_enabled: document.getElementById('cfg-proxy-sticky').value === 'true',
       };
       const proxyPass = document.getElementById('cfg-proxy-password')?.value.trim();
       const proxyKey = document.getElementById('cfg-proxy-api-key')?.value.trim();

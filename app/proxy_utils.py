@@ -36,6 +36,10 @@ def load_proxy_from_env() -> Optional[dict]:
     username = (os.getenv("INSTALAB_PROXY_USERNAME") or "").strip()
     password = (os.getenv("INSTALAB_PROXY_PASSWORD") or "").strip()
     provider = (os.getenv("INSTALAB_PROXY_PROVIDER") or "brightdata").strip().lower()
+    sticky = _truthy(os.getenv("INSTALAB_PROXY_STICKY"))
+    session_id = (os.getenv("INSTALAB_PROXY_SESSION") or "").strip()
+    if sticky and session_id and provider == "brightdata" and username and "session-" not in username:
+        username = f"{username}-session-{session_id}"
     return {
         "enabled": True,
         "provider": provider,

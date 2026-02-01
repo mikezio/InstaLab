@@ -25,6 +25,7 @@ import time
 import threading
 import urllib.request
 import ssl
+import secrets
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -133,6 +134,7 @@ CONFIG_DEFAULTS = {
     "proxy_username": os.getenv("INSTALAB_PROXY_USERNAME", ""),
     "proxy_password": os.getenv("INSTALAB_PROXY_PASSWORD", ""),
     "proxy_api_key": os.getenv("INSTALAB_PROXY_API_KEY", ""),
+    "proxy_sticky_enabled": os.getenv("INSTALAB_PROXY_STICKY", "true").lower() in {"1", "true", "yes", "on"},
     "unfollow_max_per_run": 25,
     "unfollow_delay_min": 25,
     "unfollow_delay_max": 45,
@@ -161,6 +163,7 @@ CONFIG_SCHEMA = {
     "proxy_username": {"type": "str"},
     "proxy_password": {"type": "str"},
     "proxy_api_key": {"type": "str"},
+    "proxy_sticky_enabled": {"type": "bool"},
     "unfollow_max_per_run": {"type": "int", "min": 1, "max": 500},
     "unfollow_delay_min": {"type": "int", "min": 1, "max": 600},
     "unfollow_delay_max": {"type": "int", "min": 1, "max": 900},
@@ -853,30 +856,39 @@ def _build_proxy_server(host: str, port: int) -> str:
     return f"http://{host}:{int(port)}"
 
 
-def _get_proxy_config():
+def _get_proxy_config(session_id: str | None = None):
     enabled = _parse_bool(_get_config_value("proxy_enabled", False))
     provider = str(_get_config_value("proxy_provider", "brightdata") or "brightdata").strip().lower()
     host = str(_get_config_value("proxy_host", "") or "").strip().rstrip("/")
     port = int(_get_config_value("proxy_port", 33335) or 33335)
     username = str(_get_config_value("proxy_username", "") or "").strip()
     password = str(_get_config_value("proxy_password", "") or "").strip()
+    sticky = _parse_bool(_get_config_value("proxy_sticky_enabled", True))
     if not enabled:
         return {"enabled": False}
     if not host or not port:
         return {"enabled": False}
+    if sticky and session_id and provider == "brightdata" and username and "session-" not in username:
+        username = f"{username}-session-{session_id}"
     return {
         "enabled": True,
         "provider": provider,
         "host": host,
         "port": port,
+        "sticky": sticky,
         "username": username,
         "password": password,
         "server": _build_proxy_server(host, port),
     }
 
 
-def _apply_proxy_env(env: dict):
-    proxy = _get_proxy_config()
+def _generate_proxy_session_id(length: int = 16) -> str:
+    # Bright Data sticky session ids must be alphanumeric (no hyphens).
+    return secrets.token_hex(max(4, int(length) // 2))
+
+
+def _apply_proxy_env(env: dict, *, session_id: str | None = None):
+    proxy = _get_proxy_config(session_id=session_id)
     if not proxy.get("enabled"):
         env["INSTALAB_PROXY_ENABLED"] = "false"
         return
@@ -884,6 +896,9 @@ def _apply_proxy_env(env: dict):
     env["INSTALAB_PROXY_PROVIDER"] = proxy.get("provider", "brightdata")
     env["INSTALAB_PROXY_HOST"] = proxy.get("host", "")
     env["INSTALAB_PROXY_PORT"] = str(proxy.get("port", 33335))
+    env["INSTALAB_PROXY_STICKY"] = "true" if proxy.get("sticky") else "false"
+    if session_id:
+        env["INSTALAB_PROXY_SESSION"] = session_id
     if proxy.get("username"):
         env["INSTALAB_PROXY_USERNAME"] = proxy.get("username")
     if proxy.get("password"):
@@ -1213,7 +1228,8 @@ def _unfollow_worker(usernames, login_username, target_username, dry_run, max_ac
         return UNFOLLOW_CANCEL.is_set()
 
     try:
-        proxy = _get_proxy_config()
+        session_id = _generate_proxy_session_id()
+        proxy = _get_proxy_config(session_id=session_id)
         result = unfollow_users(
             usernames,
             UNFOLLOW_STORAGE,
@@ -1505,7 +1521,8 @@ def _run_count_check(login_username, target_username):
 
     env = os.environ.copy()
     env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
-    _apply_proxy_env(env)
+    session_id = _generate_proxy_session_id()
+    _apply_proxy_env(env, session_id=session_id)
 
     cmd = [
         sys.executable,
@@ -1846,7 +1863,8 @@ def run_snapshot(login_username, target_username, rebuild_dashboard=True, job_id
 
     env = os.environ.copy()
     env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
-    _apply_proxy_env(env)
+    session_id = _generate_proxy_session_id()
+    _apply_proxy_env(env, session_id=session_id)
     if two_factor_code:
         env["RUN_2FA_CODE"] = str(two_factor_code).strip()
     else:
@@ -3270,7 +3288,7 @@ def api_unfollow_init():
     if UNFOLLOW_LOCK.locked():
         return jsonify({"error": "unfollow job running"}), 409
     # Launch interactive login in background (requires display on server)
-    proxy = _get_proxy_config()
+    proxy = _get_proxy_config(session_id=_generate_proxy_session_id())
     executor.submit(
         init_login,
         UNFOLLOW_STORAGE,
@@ -3283,7 +3301,7 @@ def api_unfollow_init():
 
 @app.route("/api/proxy/test", methods=["POST", "GET"])
 def api_proxy_test():
-    proxy = _get_proxy_config()
+    proxy = _get_proxy_config(session_id=_generate_proxy_session_id())
     if not proxy.get("enabled"):
         return jsonify({"ok": False, "error": "proxy disabled"}), 400
     if not proxy.get("host") or not proxy.get("port") or not proxy.get("username") or not proxy.get("password"):
