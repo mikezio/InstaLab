@@ -32,7 +32,9 @@ If you prefer Postgres instead of SQLite:
 
 ## Environment and secrets
 - Secrets are not committed. Use `.env.example` as a template.
+- **Required for production:** Set `DJANGO_SECRET_KEY`, `DJANGO_DEBUG=False`, and `DJANGO_ALLOWED_HOSTS`
 - Runtime data (DB, cookies, job artifacts) should live outside the repo.
+- See [SECURITY.md](SECURITY.md) for security best practices and deployment guidelines.
 
 ## UI build (Tailwind)
 - Source: `app/ui_src/ui.css`
@@ -54,3 +56,11 @@ If you prefer Postgres instead of SQLite:
 - Sanity check a run end-to-end in dev
 - Merge `dev` -> `main`
 - Tag release (`git tag vX.Y.Z && git push --tags`)
+
+## Documentation
+- [API.md](API.md) - Complete API endpoint documentation
+- [SECURITY.md](SECURITY.md) - Security considerations and deployment best practices
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Guidelines for contributing to the project
+
+## License
+See LICENSE file for license information.
