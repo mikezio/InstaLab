@@ -51,13 +51,15 @@ LOCAL_TZ = ZoneInfo("America/New_York")
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH_DEFAULT = BASE_DIR / "instaloader.db"
 ENV_PATH = Path(os.getenv("INSTALAB_ENV", "/srv/secrets/instalab.env"))
-COOKIE_DIR = Path(os.getenv("INSTALAB_COOKIE_DIR", "/data/instalab/cookies"))
 
 # Load environment (credentials live here)
 if ENV_PATH.exists():
     load_dotenv(ENV_PATH)
 else:
     load_dotenv(BASE_DIR / ".env")
+
+# Initialize COOKIE_DIR after loading environment
+COOKIE_DIR = Path(os.getenv("INSTALAB_COOKIE_DIR", "/data/instalab/cookies"))
 
 JOB_TMP_DIR = BASE_DIR / "job_runs"
 
@@ -79,14 +81,23 @@ def _ensure_job_tmp_dir():
 _ensure_job_tmp_dir()
 
 def _ensure_cookie_dir():
+    global COOKIE_DIR
     try:
         COOKIE_DIR.mkdir(parents=True, exist_ok=True)
         try:
             COOKIE_DIR.chmod(0o2770)
         except PermissionError:
             pass
-    except Exception as exc:
+    except (PermissionError, OSError) as exc:
+        # If we can't create the configured directory (e.g., /data/instalab/cookies),
+        # fall back to using a local directory in the app folder
         print(f"[init] cookie dir not writable: {exc}", file=sys.stderr)
+        print(f"[init] Falling back to local cookie directory", file=sys.stderr)
+        COOKIE_DIR = BASE_DIR / "cookies"
+        try:
+            COOKIE_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"[init] Failed to create fallback cookie dir: {e}", file=sys.stderr)
 
 
 _ensure_cookie_dir()

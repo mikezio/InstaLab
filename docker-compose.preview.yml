@@ -35,8 +35,7 @@ services:
       context: /srv/apps/instalab
     container_name: instalab-ui-preview
     user: "1001:1003"
-    command: python manage.py runserver 0.0.0.0:8000
-    working_dir: /app/django_app
+    command: /app/scripts/start_ui_dev.sh
     env_file:
       - /srv/secrets/instalab.env
     environment:

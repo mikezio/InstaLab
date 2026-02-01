@@ -29,7 +29,7 @@ services:
   instalab-ui:
     build: .
     container_name: instalab-ui
-    command: gunicorn controlpanel.wsgi:application --chdir /app/django_app --bind 0.0.0.0:8000 --workers 3 --timeout 120
+    command: /app/scripts/start_ui.sh
     environment:
       INSTALAB_ENV: /app/.env
       INSTALAB_API_BASE: http://instalab-api:5000/

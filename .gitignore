@@ -6,10 +6,14 @@
 # Runtime data
 /data/
 /job_runs/
+/cookies/
 /.playwright/
 *.db
 *.sqlite
 *.sqlite3
+
+# Django static files
+staticfiles/
 
 # Python
 __pycache__/
