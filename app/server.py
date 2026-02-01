@@ -26,6 +26,8 @@ import threading
 import urllib.request
 import ssl
 import secrets
+import shlex
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -190,6 +192,16 @@ CONFIG_CACHE_TTL = 5.0
 LOGIN_FILE_PATH = os.getenv("INSTALAB_LOGINS_FILE", "/srv/secrets/instalab-logins.json")
 LOGIN_CACHE = {"profiles": [], "lookup": {}, "ts": 0.0}
 LOGIN_CACHE_TTL = 5.0
+LOGIN_LAUNCH = {
+    "active": False,
+    "login_username": "",
+    "cookie_file": "",
+    "cookie_path": "",
+    "pipe_path": "",
+    "pid": None,
+    "started_at": None,
+    "status": "idle",
+}
 
 # Cache backend availability check (since imports are expensive in health checks)
 _BACKEND_HEALTH_CACHE = {"backend": None, "status": None, "ts": 0.0}
@@ -1818,6 +1830,81 @@ def _get_credentials(login_username):
         "db_path": profile.get("db_path", str(DB_PATH_DEFAULT)),
     }
 
+
+def _sanitize_login_username(value: str) -> str:
+    username = (value or "").strip()
+    if not username:
+        return ""
+    if not re.match(r"^[A-Za-z0-9._]+$", username):
+        return ""
+    return username
+
+
+def _cookie_filename_for(login_username: str) -> str:
+    return f"cookies_{login_username}.txt"
+
+
+def _launch_login_flow(login_username: str):
+    cookie_dir = Path(os.getenv("INSTALAB_COOKIE_DIR", "/data/instalab/cookies"))
+    cookie_dir.mkdir(parents=True, exist_ok=True)
+    cookie_file = _cookie_filename_for(login_username)
+    cookie_path = str(cookie_dir / cookie_file)
+    pipe_path = f"/tmp/instalab_login_pipe_{login_username}"
+    log_path = f"/tmp/selenium_login_{login_username}.out"
+    cmd = (
+        f"mkfifo -m 666 {shlex.quote(pipe_path)} || true; "
+        f"(tail -f {shlex.quote(pipe_path)} | DISPLAY=:1 python3 /app/scripts/selenium_login.py "
+        f"--login {shlex.quote(login_username)} --cookie-out {shlex.quote(cookie_path)}) "
+        f"> {shlex.quote(log_path)} 2>&1"
+    )
+    proc = subprocess.Popen(["bash", "-lc", cmd], env=os.environ.copy())
+    LOGIN_LAUNCH.update(
+        {
+            "active": True,
+            "login_username": login_username,
+            "cookie_file": cookie_file,
+            "cookie_path": cookie_path,
+            "pipe_path": pipe_path,
+            "pid": proc.pid,
+            "started_at": datetime.now(LOCAL_TZ).isoformat(),
+            "status": "waiting",
+        }
+    )
+    return cookie_file
+
+
+def _finalize_login_flow():
+    pipe_path = LOGIN_LAUNCH.get("pipe_path")
+    if not pipe_path:
+        return False, "login session not initialized"
+    try:
+        with open(pipe_path, "w", encoding="utf-8") as fh:
+            fh.write("\n")
+    except Exception as exc:
+        return False, f"failed to signal login: {exc}"
+    return True, ""
+
+
+def _record_login_cookie(login_username: str, cookie_file: str):
+    logins = _read_login_file()
+    updated = False
+    for entry in logins:
+        if (entry.get("login_username") or "") == login_username:
+            entry["cookie_file"] = cookie_file
+            entry["disabled"] = False
+            updated = True
+    if not updated:
+        logins.append(
+            {
+                "login_username": login_username,
+                "login_password": None,
+                "cookie_file": cookie_file,
+                "db_path": str(DB_PATH_DEFAULT),
+            }
+        )
+    _write_login_file(logins)
+    _clear_login_cache()
+
 def _read_json_file(path: Path):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -2173,6 +2260,9 @@ def api_logins():
             {
                 "login_username": p["login_username"],
                 "cookie_file": p.get("cookie_file"),
+                "cookie_exists": bool(
+                    (cf := _resolve_cookie_file(p.get("cookie_file"))) and os.path.exists(cf)
+                ),
                 "db_path": p.get("db_path"),
                 "source": p.get("source", "env"),
                 "session_exists": (info := _session_info(p["login_username"]))[0],
@@ -2355,6 +2445,45 @@ def api_logins_delete():
             except Exception:
                 pass
     return jsonify({"deleted": login_username, "session_removed": removed_session})
+
+
+@app.route("/api/logins/launch", methods=["POST"])
+def api_logins_launch():
+    data = request.get_json(silent=True) or {}
+    login_username = _sanitize_login_username(data.get("login_username") or "")
+    if not login_username:
+        return jsonify({"error": "login_username is required (letters, numbers, dot, underscore)"}), 400
+    if _is_blocked_login(login_username):
+        return jsonify({"error": "login_username is blocked"}), 400
+    if LOGIN_LAUNCH.get("active"):
+        return jsonify({"error": "login session already active"}), 409
+    cookie_file = _launch_login_flow(login_username)
+    return jsonify({"started": True, "login_username": login_username, "cookie_file": cookie_file})
+
+
+@app.route("/api/logins/launch/status", methods=["GET"])
+def api_logins_launch_status():
+    return jsonify(LOGIN_LAUNCH)
+
+
+@app.route("/api/logins/launch/finish", methods=["POST"])
+def api_logins_launch_finish():
+    if not LOGIN_LAUNCH.get("active"):
+        return jsonify({"error": "no active login session"}), 400
+    ok, msg = _finalize_login_flow()
+    if not ok:
+        return jsonify({"error": msg}), 500
+    login_username = LOGIN_LAUNCH.get("login_username") or ""
+    cookie_file = LOGIN_LAUNCH.get("cookie_file") or _cookie_filename_for(login_username)
+    cookie_path = Path(LOGIN_LAUNCH.get("cookie_path") or "")
+    if not cookie_path.exists():
+        return jsonify({"error": "cookie file not created yet"}), 409
+    try:
+        _record_login_cookie(login_username, cookie_file)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to save login: {exc}"}), 500
+    LOGIN_LAUNCH.update({"active": False, "status": "done"})
+    return jsonify({"ok": True, "login_username": login_username, "cookie_file": cookie_file})
 
 
 @app.route("/api/targets", methods=["GET"])

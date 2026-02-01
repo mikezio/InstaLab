@@ -189,6 +189,16 @@
   .proxy-chip.idle { background: #fffbeb; color: #92400e; border-color: #fcd34d; }
   .proxy-chip.ok { background: #ecfdf3; color: #047857; border-color: #bbf7d0; }
   .proxy-chip.warn { background: #fff1f2; color: #be123c; border-color: #fecdd3; }
+  .login-launch { @apply relative overflow-hidden; background: linear-gradient(140deg, #f8fafc 0%, #ffffff 65%); }
+  .login-launch::after { content: ""; position: absolute; inset: -40% auto auto -20%; width: 140px; height: 140px; border-radius: 999px; background: radial-gradient(circle at 30% 30%, rgba(59, 130, 246, 0.15), transparent 70%); pointer-events: none; }
+  .login-launch-grid { @apply grid gap-3; }
+  .login-launch-grid label { @apply text-xs uppercase tracking-wide font-semibold text-gray-500; }
+  .login-launch-grid input { @apply w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-gray-700; }
+  .launch-actions { @apply flex flex-wrap gap-2; }
+  .login-launch-status { @apply text-xs text-gray-500; }
+  .login-launch-status.active { @apply text-amber-700; }
+  .login-launch-status.ok { @apply text-emerald-700; }
+  .login-launch-status.fail { @apply text-rose-600; }
 
   .explorer-grid { @apply grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]; }
   .explorer-rail { @apply space-y-4; }

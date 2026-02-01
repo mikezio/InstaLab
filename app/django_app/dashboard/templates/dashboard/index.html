@@ -783,6 +783,24 @@
           </form>
           <div class="config-help">Use this to add new accounts or reauthorize after a reset.</div>
         </div>
+        <div class="card login-launch">
+          <div class="panel-header">
+            <div>
+              <h3>Browser login</h3>
+              <p class="muted">Launch VNC login and capture cookies automatically.</p>
+            </div>
+          </div>
+          <div class="login-launch-grid">
+            <label for="launch-login-username">Instagram username</label>
+            <input id="launch-login-username" type="text" placeholder="chasingthecolor">
+            <div class="launch-actions">
+              <button type="button" class="secondary" id="launch-login-btn">Launch VNC login</button>
+              <button type="button" class="secondary" id="finish-login-btn">I finished login</button>
+            </div>
+            <div class="login-launch-status" id="launch-login-status">No login session running.</div>
+            <div class="config-help">Open <span class="mono">http://192.168.4.30:7900/</span> in your browser to complete the login.</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -806,6 +824,7 @@
     let configCache = { ui_timezone: 'America/New_York' };
     let configDefaults = {};
     let proxyTestState = { status: 'idle', message: 'No proxy test yet.', last: null };
+    let loginLaunchState = { active: false };
     let loginsList = [];
     let primaryLogin = '';
     let targetsCache = [];
@@ -1429,7 +1448,7 @@
         data.forEach(item => {
           const opt = document.createElement('option');
           opt.value = item.login_username;
-          const sessionTag = item.session_exists ? 'session saved' : '2FA likely';
+          const sessionTag = getLoginStatus(item).tag;
           opt.textContent = `${item.login_username} • ${sessionTag}`;
           sel.appendChild(opt);
         });
@@ -1466,6 +1485,7 @@
         allRow.onclick = () => setFocusLogin('');
         railSessions.appendChild(allRow);
         data.forEach(item => {
+          const status = getLoginStatus(item);
           const row = document.createElement('button');
           row.type = 'button';
           row.className = `rail-session${item.login_username === focusLogin ? ' active' : ''}`;
@@ -1473,9 +1493,9 @@
           row.innerHTML = `
             <div>
               <div>@${item.login_username}</div>
-              <div class="meta">${item.session_exists ? 'Session saved' : '2FA likely'}</div>
+              <div class="meta">${status.tag}</div>
             </div>
-            <span class="chip ${item.session_exists ? 'good' : 'warn'}">${item.session_exists ? 'Ready' : '2FA'}</span>
+            <span class="chip ${status.chip}">${(item.session_exists || item.cookie_exists) ? 'Ready' : '2FA'}</span>
           `;
           row.onclick = () => setFocusLogin(item.login_username);
           railSessions.appendChild(row);
@@ -1487,6 +1507,7 @@
       updateMonitorConfigUI();
       renderLoginManager();
       updateRailSessionStatus();
+      refreshLoginLaunchStatus();
     }
 
     async function addLoginFromConfig() {
@@ -1513,6 +1534,56 @@
       }
     }
 
+    async function refreshLoginLaunchStatus() {
+      try {
+        loginLaunchState = await fetchJSON('/logins/launch/status');
+      } catch (e) {
+        loginLaunchState = { active: false, error: e.message };
+      }
+      const statusEl = document.getElementById('launch-login-status');
+      if (!statusEl) return;
+      if (loginLaunchState && loginLaunchState.active) {
+        statusEl.textContent = `Login open for @${loginLaunchState.login_username}. Complete login in VNC, then click “I finished login.”`;
+        statusEl.className = 'login-launch-status active';
+      } else if (loginLaunchState && loginLaunchState.status === 'done') {
+        statusEl.textContent = 'Login captured and cookies saved.';
+        statusEl.className = 'login-launch-status ok';
+      } else if (loginLaunchState && loginLaunchState.error) {
+        statusEl.textContent = `Login status error: ${loginLaunchState.error}`;
+        statusEl.className = 'login-launch-status fail';
+      } else {
+        statusEl.textContent = 'No login session running.';
+        statusEl.className = 'login-launch-status';
+      }
+    }
+
+    async function launchLoginFlow() {
+      const userEl = document.getElementById('launch-login-username');
+      const username = (userEl?.value || '').trim();
+      if (!username) {
+        showToast('Username required to launch login', 'bad');
+        return;
+      }
+      try {
+        await fetchJSON('/logins/launch', {method: 'POST', body: JSON.stringify({login_username: username})});
+        showToast(`Login launched for @${username}.`, 'good');
+        await refreshLoginLaunchStatus();
+      } catch (e) {
+        showToast(`Launch failed: ${e.message}`, 'bad');
+      }
+    }
+
+    async function finishLoginFlow() {
+      try {
+        const res = await fetchJSON('/logins/launch/finish', {method: 'POST', body: JSON.stringify({})});
+        showToast(`Cookies saved for @${res.login_username}.`, 'good');
+        await loadLogins();
+        await refreshLoginLaunchStatus();
+      } catch (e) {
+        showToast(`Finish failed: ${e.message}`, 'bad');
+      }
+    }
+
     function renderLoginManager() {
       const listEl = document.getElementById('accounts-list');
       if (!listEl) return;
@@ -1520,18 +1591,18 @@
       (loginsList || []).forEach(item => {
         const row = document.createElement('div');
         row.className = 'account-row';
-        const status = item.session_exists ? 'Session saved' : 'No session';
-        const chipTone = item.session_exists ? 'good' : 'warn';
+        const status = item.session_exists ? 'Session saved' : item.cookie_exists ? 'Cookie saved' : 'No session';
+        const chipTone = (item.session_exists || item.cookie_exists) ? 'good' : 'warn';
         row.innerHTML = `
           <div>
             <div>@${item.login_username}</div>
             <div class="meta">${status} • ${item.source === 'env' ? 'env' : 'file'}</div>
           </div>
-          <span class="chip ${chipTone}">${item.session_exists ? 'Ready' : '2FA'}</span>
+          <span class="chip ${chipTone}">${(item.session_exists || item.cookie_exists) ? 'Ready' : '2FA'}</span>
           <div class="account-actions">
-            ${item.session_exists ? '' : `<button class="secondary" data-action="reauth" data-login="${item.login_username}">Reauth</button>`}
-            <button class="secondary" data-action="reset" data-login="${item.login_username}">Reset</button>
-            <button class="secondary" data-action="delete" data-login="${item.login_username}">Delete</button>
+            ${item.session_exists ? '' : `<button class="secondary" data-action="reauth" data-login="${item.login_username}">Reauth (password)</button>`}
+            <button class="secondary" data-action="reset" data-login="${item.login_username}">Clear session</button>
+            <button class="secondary" data-action="delete" data-login="${item.login_username}">Remove login</button>
           </div>
         `;
         listEl.appendChild(row);
@@ -1546,7 +1617,7 @@
           }
           try {
             await fetchJSON('/logins/reset', {method: 'POST', body: JSON.stringify({login_username: login})});
-            showToast(`Session reset for @${login}.`, 'good');
+            showToast(`Session cleared for @${login}.`, 'good');
             await loadLogins();
           } catch (e) {
             showToast('Reset failed: ' + e.message, 'bad');
@@ -1575,8 +1646,8 @@
           const info = getLoginInfo(login);
           const isEnv = info && info.source === 'env';
           const warning = isEnv
-            ? `Delete @${login}? This hides the env-based login from the UI and removes any saved session.`
-            : `Delete @${login}? This removes it from the login list and deletes any saved session.`;
+            ? `Remove @${login}? This hides the env-based login from the UI and removes any saved session.`
+            : `Remove @${login}? This removes it from the login list and deletes any saved session.`;
           if (!confirm(warning)) {
             return;
           }
@@ -1607,9 +1678,7 @@
       if (current) sel.value = current;
       if (!sel.value && loginsList && loginsList.length) sel.value = loginsList[0].login_username;
       const info = getLoginInfo(sel.value);
-      statusEl.textContent = info
-        ? `Session status: ${info.session_exists ? 'Session saved' : 'No session saved (2FA likely)'}`
-        : 'Session status: —';
+      statusEl.textContent = getLoginStatus(info).text;
     }
 
     function updateMonitorConfigUI() {
@@ -1694,9 +1763,7 @@
       if (!statusEl) return;
       const login = focusLogin || (document.getElementById('rail-login')?.value || '');
       const info = getLoginInfo(login || (loginsList?.[0]?.login_username || ''));
-      statusEl.textContent = info
-        ? `Session status: ${info.session_exists ? 'Session saved' : 'No session saved (2FA likely)'}`
-        : 'Session status: —';
+      statusEl.textContent = getLoginStatus(info).text;
     }
 
     function resolveLogin(fallbackLogin) {
@@ -1712,6 +1779,17 @@
     function getLoginInfo(login) {
       if (!login) return null;
       return (loginsList || []).find(l => l.login_username === login) || null;
+    }
+
+    function getLoginStatus(info) {
+      if (!info) return {text: 'Session status: —', chip: 'warn', tag: 'No session'};
+      if (info.session_exists) {
+        return {text: 'Session status: Session saved', chip: 'good', tag: 'session saved'};
+      }
+      if (info.cookie_exists) {
+        return {text: 'Session status: Cookie saved', chip: 'good', tag: 'cookie saved'};
+      }
+      return {text: 'Session status: No session saved (2FA likely)', chip: 'warn', tag: '2FA likely'};
     }
 
     function updateHeroFromTargets(rows) {
@@ -3119,6 +3197,10 @@
     if (closeAccountsBtn) closeAccountsBtn.onclick = closeAccountsModal;
     const accountsRefreshBtn = document.getElementById('accounts-refresh');
     if (accountsRefreshBtn) accountsRefreshBtn.onclick = loadLogins;
+    const launchLoginBtn = document.getElementById('launch-login-btn');
+    if (launchLoginBtn) launchLoginBtn.onclick = launchLoginFlow;
+    const finishLoginBtn = document.getElementById('finish-login-btn');
+    if (finishLoginBtn) finishLoginBtn.onclick = finishLoginFlow;
     const cfgSaveBtn = document.getElementById('cfg-save');
     if (cfgSaveBtn) cfgSaveBtn.onclick = saveConfig;
     const cfgProxyTestBtn = document.getElementById('cfg-proxy-test');
