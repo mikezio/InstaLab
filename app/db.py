@@ -95,9 +95,10 @@ def get_db():
                     user = os.getenv("INSTALAB_DB_USER", "instalab")
                     password = os.getenv("INSTALAB_DB_PASS", "")
                     
-                    # Create a connection pool (min 2, max 10 connections)
+                    # Create a threaded connection pool (min 2, max 10 connections)
+                    # ThreadedConnectionPool is thread-safe for Flask multi-threaded apps
                     try:
-                        _pg_pool = pool.SimpleConnectionPool(
+                        _pg_pool = pool.ThreadedConnectionPool(
                             minconn=2,
                             maxconn=10,
                             host=host,

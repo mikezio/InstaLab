@@ -2401,15 +2401,25 @@ def api_targets_summary():
         placeholders = ",".join(["?"] * len(targets))
         
         # Get latest 2 runs per target for delta calculation
+        # Filter by rn <= 2 in the subquery to reduce data transfer
         latest_query = f"""
         SELECT 
             target_username,
             id, timestamp, followers_count, followees_count, non_followbacks_count,
             followers_added, followers_removed, followees_added, followees_removed, 
             login_username, duration_seconds, confidence_score, confidence_flag,
-            ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp DESC, id DESC) as rn
-        FROM runs
-        WHERE target_username IN ({placeholders})
+            rn
+        FROM (
+            SELECT 
+                target_username,
+                id, timestamp, followers_count, followees_count, non_followbacks_count,
+                followers_added, followers_removed, followees_added, followees_removed, 
+                login_username, duration_seconds, confidence_score, confidence_flag,
+                ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp DESC, id DESC) as rn
+            FROM runs
+            WHERE target_username IN ({placeholders})
+        ) ranked
+        WHERE rn <= 2
         """
         
         if is_postgres():
@@ -2418,13 +2428,14 @@ def api_targets_summary():
         cur = conn.execute(latest_query, tuple(targets))
         rows_by_target = {}
         for row in cur.fetchall():
-            target = row[0]  # target_username
+            row_dict = dict(row)
+            target = row_dict["target_username"]
             if target not in rows_by_target:
                 rows_by_target[target] = []
-            if len(rows_by_target[target]) < 2:  # Only keep first 2
-                rows_by_target[target].append(dict(row))
+            rows_by_target[target].append(row_dict)
         
         # Get history data (first 30 runs ordered by timestamp)
+        # Filter by rn <= 30 in the WHERE clause for efficiency
         history_query = f"""
         SELECT target_username, followers_count
         FROM (
@@ -2433,7 +2444,7 @@ def api_targets_summary():
                 ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp ASC) as rn
             FROM runs
             WHERE target_username IN ({placeholders})
-        ) sub
+        ) ranked
         WHERE rn <= 30
         ORDER BY target_username, rn
         """
@@ -2444,10 +2455,11 @@ def api_targets_summary():
         hist_cur = conn.execute(history_query, tuple(targets))
         history_by_target = {}
         for row in hist_cur.fetchall():
-            target = row[0]
+            row_dict = dict(row)
+            target = row_dict["target_username"]
             if target not in history_by_target:
                 history_by_target[target] = []
-            history_by_target[target].append(row[1])  # followers_count
+            history_by_target[target].append(row_dict["followers_count"])
         
         # Get week aggregates
         week_query = f"""
@@ -2468,7 +2480,10 @@ def api_targets_summary():
             week_query = week_query.replace("?", "%s")
         
         week_cur = conn.execute(week_query, tuple(targets) + (cutoff_str,))
-        week_by_target = {row[0]: dict(row) for row in week_cur.fetchall()}
+        week_by_target = {}
+        for row in week_cur.fetchall():
+            row_dict = dict(row)
+            week_by_target[row_dict["target_username"]] = row_dict
         
         # Build output
         out = []
