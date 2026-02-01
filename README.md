@@ -44,6 +44,7 @@ If you prefer Postgres instead of SQLite:
 
 ## Operational notes
 - This repo contains code and compose; environment-specific ops runbooks live outside the repo.
+- In production behind nginx, ensure `/static/` serves Django's `STATIC_ROOT` (default: `app/django_app/staticfiles` after `collectstatic`). Pointing nginx at `app/django_app/static` will 404 hashed assets and the UI will render unstyled.
 
 ## Branching
 - `dev`: active development
