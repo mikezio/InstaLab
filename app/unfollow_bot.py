@@ -142,6 +142,9 @@ def unfollow_users(
     log: Optional[Callable[[str], None]] = None,
     progress: Optional[Callable[[dict], None]] = None,
     record: Optional[Callable[[str, str, Optional[str]], None]] = None,
+    proxy_server: Optional[str] = None,
+    proxy_username: Optional[str] = None,
+    proxy_password: Optional[str] = None,
 ) -> dict:
     if not ensure_auth_state(storage_path):
         raise AuthRequiredError("missing Instagram login storage_state")
@@ -158,12 +161,19 @@ def unfollow_users(
     fatal_error = None
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=[
+        launch_args = {
+            "headless": headless,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
             ],
-        )
+        }
+        if proxy_server:
+            launch_args["proxy"] = {
+                "server": proxy_server,
+                "username": proxy_username or "",
+                "password": proxy_password or "",
+            }
+        browser = p.chromium.launch(**launch_args)
         context = browser.new_context(
             storage_state=storage_path,
             user_agent=DEFAULT_UA,
@@ -341,10 +351,22 @@ def unfollow_users(
     }
 
 
-def init_login(storage_path: str):
+def init_login(
+    storage_path: str,
+    proxy_server: Optional[str] = None,
+    proxy_username: Optional[str] = None,
+    proxy_password: Optional[str] = None,
+):
     os.makedirs(os.path.dirname(storage_path), exist_ok=True)
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        launch_args = {"headless": False}
+        if proxy_server:
+            launch_args["proxy"] = {
+                "server": proxy_server,
+                "username": proxy_username or "",
+                "password": proxy_password or "",
+            }
+        browser = p.chromium.launch(**launch_args)
         context = browser.new_context()
         page = context.new_page()
         page.goto("https://www.instagram.com/accounts/login/")

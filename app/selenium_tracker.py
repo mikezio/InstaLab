@@ -16,6 +16,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from proxy_utils import load_proxy_from_env
 
 from instaloader_tracker import write_run_metadata
 
@@ -359,6 +360,9 @@ def _driver(request_timeout=60.0):
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1200,900")
+    proxy = load_proxy_from_env()
+    if proxy:
+        options.add_argument(f"--proxy-server={proxy['url']}")
     
     # Track temp directory for cleanup if we create one
     temp_home = None

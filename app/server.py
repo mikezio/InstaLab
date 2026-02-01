@@ -22,6 +22,12 @@ import subprocess
 import sys
 import time
 import threading
+import urllib.request
+import ssl
+import secrets
+import shlex
+import re
+from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -125,6 +131,14 @@ CONFIG_DEFAULTS = {
     "run_request_timeout": float(os.getenv("RUN_REQUEST_TIMEOUT", "600")),
     "run_item_delay_min": float(os.getenv("RUN_ITEM_DELAY_MIN", "0.25")),
     "run_item_delay_max": float(os.getenv("RUN_ITEM_DELAY_MAX", "0.75")),
+    "proxy_enabled": os.getenv("INSTALAB_PROXY_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+    "proxy_provider": os.getenv("INSTALAB_PROXY_PROVIDER", "brightdata"),
+    "proxy_host": os.getenv("INSTALAB_PROXY_HOST", "brd.superproxy.io"),
+    "proxy_port": int(os.getenv("INSTALAB_PROXY_PORT", "33335")),
+    "proxy_username": os.getenv("INSTALAB_PROXY_USERNAME", ""),
+    "proxy_password": os.getenv("INSTALAB_PROXY_PASSWORD", ""),
+    "proxy_api_key": os.getenv("INSTALAB_PROXY_API_KEY", ""),
+    "proxy_sticky_enabled": os.getenv("INSTALAB_PROXY_STICKY", "true").lower() in {"1", "true", "yes", "on"},
     "unfollow_max_per_run": 25,
     "unfollow_delay_min": 25,
     "unfollow_delay_max": 45,
@@ -146,6 +160,14 @@ CONFIG_SCHEMA = {
     "run_request_timeout": {"type": "float", "min": 10, "max": 3600},
     "run_item_delay_min": {"type": "float", "min": 0.0, "max": 5.0},
     "run_item_delay_max": {"type": "float", "min": 0.0, "max": 5.0},
+    "proxy_enabled": {"type": "bool"},
+    "proxy_provider": {"type": "str"},
+    "proxy_host": {"type": "str"},
+    "proxy_port": {"type": "int", "min": 1, "max": 65535},
+    "proxy_username": {"type": "str"},
+    "proxy_password": {"type": "str"},
+    "proxy_api_key": {"type": "str"},
+    "proxy_sticky_enabled": {"type": "bool"},
     "unfollow_max_per_run": {"type": "int", "min": 1, "max": 500},
     "unfollow_delay_min": {"type": "int", "min": 1, "max": 600},
     "unfollow_delay_max": {"type": "int", "min": 1, "max": 900},
@@ -164,6 +186,7 @@ CONFIG_SCHEMA = {
     "monitor_min_gap_minutes": {"type": "int", "min": 60, "max": 1440},
     "monitor_login_username": {"type": "str"},
 }
+SENSITIVE_CONFIG_KEYS = {"proxy_password", "proxy_api_key"}
 CONFIG_CACHE = {"data": {}, "ts": 0.0}
 CONFIG_CACHE_TTL = 5.0
 
@@ -171,6 +194,16 @@ CONFIG_CACHE_TTL = 5.0
 LOGIN_FILE_PATH = os.getenv("INSTALAB_LOGINS_FILE", "/srv/secrets/instalab-logins.json")
 LOGIN_CACHE = {"profiles": [], "lookup": {}, "ts": 0.0}
 LOGIN_CACHE_TTL = 5.0
+LOGIN_LAUNCH = {
+    "active": False,
+    "login_username": "",
+    "cookie_file": "",
+    "cookie_path": "",
+    "pipe_path": "",
+    "pid": None,
+    "started_at": None,
+    "status": "idle",
+}
 
 # Cache backend availability check (since imports are expensive in health checks)
 _BACKEND_HEALTH_CACHE = {"backend": None, "status": None, "ts": 0.0}
@@ -788,6 +821,15 @@ def _get_config(force=False):
     return merged
 
 
+def _mask_config_for_api(cfg: dict) -> dict:
+    safe = dict(cfg)
+    for key in SENSITIVE_CONFIG_KEYS:
+        if key in safe:
+            safe.pop(key, None)
+            safe[f"{key}_set"] = bool(cfg.get(key))
+    return safe
+
+
 def _get_config_value(key, fallback=None):
     cfg = _get_config()
     if key in cfg:
@@ -822,6 +864,65 @@ def _set_config_values(updates: dict):
         conn.close()
     CONFIG_CACHE["ts"] = 0.0
     return cleaned
+
+
+def _build_proxy_server(host: str, port: int) -> str:
+    return f"http://{host}:{int(port)}"
+
+
+def _get_proxy_config(session_id: str | None = None):
+    enabled = _parse_bool(_get_config_value("proxy_enabled", False))
+    provider = str(_get_config_value("proxy_provider", "brightdata") or "brightdata").strip().lower()
+    host = str(_get_config_value("proxy_host", "") or "").strip().rstrip("/")
+    port = int(_get_config_value("proxy_port", 33335) or 33335)
+    username = str(_get_config_value("proxy_username", "") or "").strip()
+    password = str(_get_config_value("proxy_password", "") or "").strip()
+    sticky = _parse_bool(_get_config_value("proxy_sticky_enabled", True))
+    if not enabled:
+        return {"enabled": False}
+    if not host or not port:
+        return {"enabled": False}
+    if sticky and session_id and provider == "brightdata" and username and "session-" not in username:
+        username = f"{username}-session-{session_id}"
+    return {
+        "enabled": True,
+        "provider": provider,
+        "host": host,
+        "port": port,
+        "sticky": sticky,
+        "username": username,
+        "password": password,
+        "server": _build_proxy_server(host, port),
+    }
+
+
+def _generate_proxy_session_id(length: int = 16) -> str:
+    # Bright Data sticky session ids must be alphanumeric (no hyphens).
+    return secrets.token_hex(max(4, int(length) // 2))
+
+
+def _apply_proxy_env(env: dict, *, session_id: str | None = None):
+    proxy = _get_proxy_config(session_id=session_id)
+    if not proxy.get("enabled"):
+        env["INSTALAB_PROXY_ENABLED"] = "false"
+        return
+    env["INSTALAB_PROXY_ENABLED"] = "true"
+    env["INSTALAB_PROXY_PROVIDER"] = proxy.get("provider", "brightdata")
+    env["INSTALAB_PROXY_HOST"] = proxy.get("host", "")
+    env["INSTALAB_PROXY_PORT"] = str(proxy.get("port", 33335))
+    env["INSTALAB_PROXY_STICKY"] = "true" if proxy.get("sticky") else "false"
+    if session_id:
+        env["INSTALAB_PROXY_SESSION"] = session_id
+    if proxy.get("username"):
+        env["INSTALAB_PROXY_USERNAME"] = proxy.get("username")
+    if proxy.get("password"):
+        env["INSTALAB_PROXY_PASSWORD"] = proxy.get("password")
+
+
+def _proxy_test_url(provider: str) -> str:
+    if provider == "brightdata":
+        return "https://geo.brdtest.com/welcome.txt?product=resi&method=native"
+    return "https://geo.brdtest.com/welcome.txt?product=resi&method=native"
 
 def _init_unfollow_table():
     conn = _get_db()
@@ -1141,6 +1242,8 @@ def _unfollow_worker(usernames, login_username, target_username, dry_run, max_ac
         return UNFOLLOW_CANCEL.is_set()
 
     try:
+        session_id = _generate_proxy_session_id()
+        proxy = _get_proxy_config(session_id=session_id)
         result = unfollow_users(
             usernames,
             UNFOLLOW_STORAGE,
@@ -1152,6 +1255,9 @@ def _unfollow_worker(usernames, login_username, target_username, dry_run, max_ac
             log=_log_unfollow,
             progress=_progress,
             record=_record,
+            proxy_server=proxy.get("server") if proxy.get("enabled") else None,
+            proxy_username=proxy.get("username"),
+            proxy_password=proxy.get("password"),
         )
         cancelled = bool(result.get("cancelled")) or UNFOLLOW_CANCEL.is_set()
         fatal_error = result.get("fatal_error")
@@ -1429,6 +1535,8 @@ def _run_count_check(login_username, target_username):
 
     env = os.environ.copy()
     env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
+    session_id = _generate_proxy_session_id()
+    _apply_proxy_env(env, session_id=session_id)
 
     cmd = [
         sys.executable,
@@ -1724,6 +1832,100 @@ def _get_credentials(login_username):
         "db_path": profile.get("db_path", str(DB_PATH_DEFAULT)),
     }
 
+
+def _sanitize_login_username(value: str) -> str:
+    username = (value or "").strip()
+    if not username:
+        return ""
+    if not re.match(r"^[A-Za-z0-9._]+$", username):
+        return ""
+    return username
+
+
+def _cookie_filename_for(login_username: str) -> str:
+    return f"cookies_{login_username}.txt"
+
+
+def _docker_client():
+    try:
+        import docker  # local import to avoid hard dependency if unused
+
+        return docker.from_env()
+    except Exception:
+        return None
+
+
+def _launch_login_flow(login_username: str):
+    cookie_dir = Path(os.getenv("INSTALAB_COOKIE_DIR", "/data/instalab/cookies"))
+    cookie_dir.mkdir(parents=True, exist_ok=True)
+    cookie_file = _cookie_filename_for(login_username)
+    cookie_path = str(cookie_dir / cookie_file)
+    pipe_path = f"/tmp/instalab_login_pipe_{login_username}"
+    log_path = f"/tmp/selenium_login_{login_username}.out"
+    client = _docker_client()
+    if not client:
+        raise RuntimeError("docker client unavailable; cannot launch VNC login")
+    try:
+        container = client.containers.get("instalab-vnc")
+    except Exception as exc:
+        raise RuntimeError(f"instalab-vnc container not available: {exc}")
+    cmd = (
+        f"mkfifo -m 666 {shlex.quote(pipe_path)} || true; "
+        f"(tail -f {shlex.quote(pipe_path)} | DISPLAY=:1 python3 /app/scripts/selenium_login.py "
+        f"--login {shlex.quote(login_username)} --cookie-out {shlex.quote(cookie_path)}) "
+        f"> {shlex.quote(log_path)} 2>&1"
+    )
+    container.exec_run(["bash", "-lc", cmd], detach=True)
+    LOGIN_LAUNCH.update(
+        {
+            "active": True,
+            "login_username": login_username,
+            "cookie_file": cookie_file,
+            "cookie_path": cookie_path,
+            "pipe_path": pipe_path,
+            "pid": None,
+            "started_at": datetime.now(LOCAL_TZ).isoformat(),
+            "status": "waiting",
+        }
+    )
+    return cookie_file
+
+
+def _finalize_login_flow():
+    pipe_path = LOGIN_LAUNCH.get("pipe_path")
+    if not pipe_path:
+        return False, "login session not initialized"
+    try:
+        client = _docker_client()
+        if not client:
+            return False, "docker client unavailable; cannot signal login"
+        container = client.containers.get("instalab-vnc")
+        container.exec_run(["bash", "-lc", f"echo done > {shlex.quote(pipe_path)}"], detach=True)
+    except Exception as exc:
+        return False, f"failed to signal login: {exc}"
+    return True, ""
+
+
+def _record_login_cookie(login_username: str, cookie_file: str):
+    logins = _read_login_file()
+    updated = False
+    for entry in logins:
+        if (entry.get("login_username") or "") == login_username:
+            entry["cookie_file"] = cookie_file
+            entry["disabled"] = False
+            updated = True
+    if not updated:
+        logins.append(
+            {
+                "login_username": login_username,
+                "login_password": None,
+                "cookie_file": cookie_file,
+                "db_path": str(DB_PATH_DEFAULT),
+            }
+        )
+    _write_login_file(logins)
+    _clear_login_cache()
+
 def _read_json_file(path: Path):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -1769,6 +1971,8 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
 
     env = os.environ.copy()
     env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
+    session_id = _generate_proxy_session_id()
+    _apply_proxy_env(env, session_id=session_id)
     if two_factor_code:
         env["RUN_2FA_CODE"] = str(two_factor_code).strip()
     else:
@@ -2070,6 +2274,9 @@ def api_logins():
             {
                 "login_username": p["login_username"],
                 "cookie_file": p.get("cookie_file"),
+                "cookie_exists": bool(
+                    (cf := _resolve_cookie_file(p.get("cookie_file"))) and os.path.exists(cf)
+                ),
                 "db_path": p.get("db_path"),
                 "source": p.get("source", "env"),
                 "session_exists": (info := _session_info(p["login_username"]))[0],
@@ -2252,6 +2459,45 @@ def api_logins_delete():
             except Exception:
                 pass
     return jsonify({"deleted": login_username, "session_removed": removed_session})
+
+
+@app.route("/api/logins/launch", methods=["POST"])
+def api_logins_launch():
+    data = request.get_json(silent=True) or {}
+    login_username = _sanitize_login_username(data.get("login_username") or "")
+    if not login_username:
+        return jsonify({"error": "login_username is required (letters, numbers, dot, underscore)"}), 400
+    if _is_blocked_login(login_username):
+        return jsonify({"error": "login_username is blocked"}), 400
+    if LOGIN_LAUNCH.get("active"):
+        return jsonify({"error": "login session already active"}), 409
+    cookie_file = _launch_login_flow(login_username)
+    return jsonify({"started": True, "login_username": login_username, "cookie_file": cookie_file})
+
+
+@app.route("/api/logins/launch/status", methods=["GET"])
+def api_logins_launch_status():
+    return jsonify(LOGIN_LAUNCH)
+
+
+@app.route("/api/logins/launch/finish", methods=["POST"])
+def api_logins_launch_finish():
+    if not LOGIN_LAUNCH.get("active"):
+        return jsonify({"error": "no active login session"}), 400
+    ok, msg = _finalize_login_flow()
+    if not ok:
+        return jsonify({"error": msg}), 500
+    login_username = LOGIN_LAUNCH.get("login_username") or ""
+    cookie_file = LOGIN_LAUNCH.get("cookie_file") or _cookie_filename_for(login_username)
+    cookie_path = Path(LOGIN_LAUNCH.get("cookie_path") or "")
+    if not cookie_path.exists():
+        return jsonify({"error": "cookie file not created yet"}), 409
+    try:
+        _record_login_cookie(login_username, cookie_file)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to save login: {exc}"}), 500
+    LOGIN_LAUNCH.update({"active": False, "status": "done"})
+    return jsonify({"ok": True, "login_username": login_username, "cookie_file": cookie_file})
 
 
 @app.route("/api/targets", methods=["GET"])
@@ -3001,7 +3247,8 @@ def api_monitor_status():
 
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
-    return jsonify({"config": _get_config(force=True), "defaults": CONFIG_DEFAULTS})
+    cfg = _get_config(force=True)
+    return jsonify({"config": _mask_config_for_api(cfg), "defaults": _mask_config_for_api(CONFIG_DEFAULTS)})
 
 
 @app.route("/api/config", methods=["PUT"])
@@ -3010,14 +3257,27 @@ def api_config_update():
     if not isinstance(data, dict) or not data:
         return jsonify({"error": "config payload required"}), 400
     try:
-        updated = _set_config_values(data)
+        cleaned = {}
+        for key, value in data.items():
+            if key in SENSITIVE_CONFIG_KEYS and (value is None or str(value).strip() == ""):
+                continue
+            cleaned[key] = value
+        if _parse_bool(cleaned.get("proxy_enabled", _get_config_value("proxy_enabled", False))):
+            host = cleaned.get("proxy_host") or _get_config_value("proxy_host", "")
+            port = cleaned.get("proxy_port") or _get_config_value("proxy_port", 0)
+            user = cleaned.get("proxy_username") or _get_config_value("proxy_username", "")
+            pwd = cleaned.get("proxy_password") or _get_config_value("proxy_password", "")
+            if not host or not port or not user or not pwd:
+                raise ValueError("Proxy enabled requires host, port, username, and password")
+        updated = _set_config_values(cleaned)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     try:
         _schedule_monitor_job()
     except Exception:
         pass
-    return jsonify({"updated": list(updated.keys()), "config": _get_config(force=True)})
+    cfg = _get_config(force=True)
+    return jsonify({"updated": list(updated.keys()), "config": _mask_config_for_api(cfg)})
 
 
 @app.route("/api/unfollow/status", methods=["GET"])
@@ -3168,8 +3428,54 @@ def api_unfollow_init():
     if UNFOLLOW_LOCK.locked():
         return jsonify({"error": "unfollow job running"}), 409
     # Launch interactive login in background (requires display on server)
-    executor.submit(init_login, UNFOLLOW_STORAGE)
+    proxy = _get_proxy_config(session_id=_generate_proxy_session_id())
+    executor.submit(
+        init_login,
+        UNFOLLOW_STORAGE,
+        proxy.get("server") if proxy.get("enabled") else None,
+        proxy.get("username"),
+        proxy.get("password"),
+    )
     return jsonify({"started": True, "note": "interactive login opened"})
+
+
+@app.route("/api/proxy/test", methods=["POST", "GET"])
+def api_proxy_test():
+    proxy = _get_proxy_config(session_id=_generate_proxy_session_id())
+    if not proxy.get("enabled"):
+        return jsonify({"ok": False, "error": "proxy disabled"}), 400
+    if not proxy.get("host") or not proxy.get("port") or not proxy.get("username") or not proxy.get("password"):
+        return jsonify({"ok": False, "error": "proxy credentials incomplete"}), 400
+
+    proxy_url = f"http://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
+    test_url = _proxy_test_url(proxy.get("provider", "brightdata"))
+
+    handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    ctx = ssl._create_unverified_context()
+    opener = urllib.request.build_opener(handler, urllib.request.HTTPSHandler(context=ctx))
+    req = urllib.request.Request(
+        test_url,
+        headers={
+            "User-Agent": "InstaLabProxyCheck/1.0",
+            "Accept": "text/plain",
+        },
+    )
+    start = time.monotonic()
+    try:
+        with opener.open(req, timeout=20) as resp:
+            body = resp.read(2048).decode("utf-8", errors="ignore").strip()
+            latency_ms = int((time.monotonic() - start) * 1000)
+            return jsonify(
+                {
+                    "ok": resp.status == 200,
+                    "status": resp.status,
+                    "latency_ms": latency_ms,
+                    "body": body[:400],
+                }
+            )
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return jsonify({"ok": False, "error": str(exc), "latency_ms": latency_ms}), 502
 
 
 @app.route("/api/run/cancel", methods=["POST"])

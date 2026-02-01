@@ -10,6 +10,7 @@ from db import get_db, get_columns, ddl, insert_ignore_sql, is_postgres
 import instaloader
 from instaloader.exceptions import TwoFactorAuthRequiredException
 from tqdm import tqdm
+from proxy_utils import load_proxy_from_env
 
 
 def _ensure_session_dir():
@@ -99,6 +100,9 @@ def fetch_counts(
 ):
     tz = ZoneInfo("America/New_York")
     loader = instaloader.Instaloader(quiet=True, sleep=True, request_timeout=request_timeout)
+    proxy = load_proxy_from_env()
+    if proxy:
+        loader.context._session.proxies.update({"http": proxy["url"], "https": proxy["url"]})
     login_with_session(loader, login_username, login_password, cookie_file=cookie_file)
     profile = instaloader.Profile.from_username(loader.context, target_username)
     timestamp = datetime.now(tz).strftime("%Y-%m-%d_%H-%M-%S")
@@ -149,6 +153,9 @@ def snapshot_profile(
 ):
     tz = ZoneInfo("America/New_York")
     loader = instaloader.Instaloader(quiet=False, sleep=True, request_timeout=request_timeout)
+    proxy = load_proxy_from_env()
+    if proxy:
+        loader.context._session.proxies.update({"http": proxy["url"], "https": proxy["url"]})
     login_with_session(loader, login_username, login_password, cookie_file=cookie_file)
 
     print(f"Loading profile @{target_username}...")
