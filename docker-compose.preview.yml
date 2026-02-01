@@ -42,6 +42,7 @@ services:
       INSTALAB_ENV: /srv/secrets/instalab.env
       INSTALAB_API_BASE: http://instalab-api-preview:5000/
       INSTALAB_DB_HOST: apps-postgres
+      DJANGO_DEBUG: "true"
       PYTHONUNBUFFERED: "1"
       DD_TRACE_ENABLED: "false"
       DD_LOGS_INJECTION: "false"
