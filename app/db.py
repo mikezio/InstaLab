@@ -86,6 +86,20 @@ def get_db():
     import sqlite3
 
     db_path = os.getenv("INSTALAB_SQLITE_PATH", str(BASE_DIR / "instaloader.db"))
+    # Ensure parent directory exists for the database file
+    db_path_obj = Path(db_path)
+    try:
+        db_path_obj.parent.mkdir(parents=True, exist_ok=True)
+    except (PermissionError, OSError) as e:
+        # If we can't create the configured directory (e.g., /data/instalab),
+        # fall back to using a local directory in the app folder
+        import sys
+        print(f"[db] Cannot create directory {db_path_obj.parent}: {e}", file=sys.stderr)
+        print(f"[db] Falling back to local database in app directory", file=sys.stderr)
+        db_path = str(BASE_DIR / "instaloader.db")
+        db_path_obj = Path(db_path)
+        db_path_obj.parent.mkdir(parents=True, exist_ok=True)
+    
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return DBConn(conn, "sqlite")
