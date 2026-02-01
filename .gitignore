@@ -12,6 +12,9 @@
 *.sqlite
 *.sqlite3
 
+# Django static files
+staticfiles/
+
 # Python
 __pycache__/
 *.pyc
