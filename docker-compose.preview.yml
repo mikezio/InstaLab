@@ -1,0 +1,67 @@
+services:
+  instalab-api-preview:
+    build:
+      context: /srv/apps/instalab
+    container_name: instalab-api-preview
+    user: "1001:1003"
+    command: python -m flask --app server:app run --host 0.0.0.0 --port 5000 --debug
+    env_file:
+      - /srv/secrets/instalab.env
+    environment:
+      INSTALAB_ENV: /srv/secrets/instalab.env
+      INSTALAB_DB_HOST: apps-postgres
+      FLASK_DEBUG: "1"
+      PYTHONUNBUFFERED: "1"
+      DD_TRACE_ENABLED: "false"
+      DD_LOGS_INJECTION: "false"
+      DD_RUNTIME_METRICS_ENABLED: "false"
+      DD_SERVICE: instalab-api-preview
+      DD_ENV: homelab
+      DD_VERSION: "1"
+    volumes:
+      - /srv/apps/instalab/app:/app
+      - /srv/secrets/instalab.env:/srv/secrets/instalab.env:ro
+      - /srv/secrets/instalab-logins.json:/srv/secrets/instalab-logins.json
+      - /srv/secrets/instalab-cookies:/data/instalab/cookies
+      - /srv/data/instalab:/data/instalab
+    ports:
+      - "5002:5000"
+    restart: unless-stopped
+    networks:
+      - apps-db
+
+  instalab-ui-preview:
+    build:
+      context: /srv/apps/instalab
+    container_name: instalab-ui-preview
+    user: "1001:1003"
+    command: python manage.py runserver 0.0.0.0:8000
+    working_dir: /app/django_app
+    env_file:
+      - /srv/secrets/instalab.env
+    environment:
+      INSTALAB_ENV: /srv/secrets/instalab.env
+      INSTALAB_API_BASE: http://instalab-api-preview:5000/
+      INSTALAB_DB_HOST: apps-postgres
+      PYTHONUNBUFFERED: "1"
+      DD_TRACE_ENABLED: "false"
+      DD_LOGS_INJECTION: "false"
+      DD_RUNTIME_METRICS_ENABLED: "false"
+      DD_SERVICE: instalab-ui-preview
+      DD_ENV: homelab
+      DD_VERSION: "1"
+    volumes:
+      - /srv/apps/instalab/app:/app
+      - /srv/secrets/instalab.env:/srv/secrets/instalab.env:ro
+    ports:
+      - "8003:8000"
+    depends_on:
+      - instalab-api-preview
+    restart: unless-stopped
+    networks:
+      - apps-db
+
+networks:
+  apps-db:
+    external: true
+    name: apps-db

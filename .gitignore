@@ -1,0 +1,28 @@
+# Secrets
+.env
+*.env
+/secrets/
+
+# Runtime data
+/data/
+/job_runs/
+/.playwright/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+
+# Git migration backups
+.git_app_backup/
