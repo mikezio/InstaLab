@@ -4,14 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>InstaLab Console</title>
+  <!-- Datadog RUM: Disabled by default to avoid exposing credentials.
+       To enable: Uncomment the code below and configure tokens via environment variables
+       in Django settings or context processors. -->
+  {% comment %}
   <script src="https://www.datadoghq-browser-agent.com/us1/v5/datadog-rum.js" type="text/javascript"></script>
   <script>
     window.DD_RUM && window.DD_RUM.init({
-      clientToken: "pubb92001b43e6a371049bd2f502f1c40fa",
-      applicationId: "d444dffb-5a99-48cc-9398-92fb50a74ea1",
+      clientToken: "{{ DATADOG_CLIENT_TOKEN }}",
+      applicationId: "{{ DATADOG_APPLICATION_ID }}",
       site: "datadoghq.com",
       service: "instalab-ui",
-      env: "homelab",
+      env: "{{ DATADOG_ENV|default:'production' }}",
       version: "1",
       sessionSampleRate: 100,
       sessionReplaySampleRate: 0,
@@ -19,13 +23,17 @@
       trackResources: true,
       trackLongTasks: true,
       defaultPrivacyLevel: "mask-user-input",
-      allowedTracingOrigins: ["https://instalab.mzio.dev"],
+      allowedTracingOrigins: ["{{ DATADOG_ALLOWED_ORIGIN|default:'https://instalab.mzio.dev' }}"],
       tracingSampleRate: 100
     });
   </script>
+  {% endcomment %}
   
+  <!-- Fonts: Using preconnect for better performance -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
-  <link rel="stylesheet" href="/static/ui.css?v=20260126f">
+  <link rel="stylesheet" href="/static/ui.css?v=20260201">
 
 </head>
 <body>
@@ -92,6 +100,24 @@
           </div>
         </div>
       </header>
+
+      <!-- API Error Banner -->
+      <div id="api-error-banner" class="hidden border-l-4 border-red-500 bg-red-50 px-6 py-3">
+        <div class="flex items-start gap-3">
+          <svg class="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+          </svg>
+          <div class="flex-1">
+            <h4 class="text-sm font-semibold text-red-800">API Connection Error</h4>
+            <p class="text-sm text-red-700 mt-1">Unable to connect to the backend API. Make sure the Flask API server is running. Data will not load until the connection is restored.</p>
+          </div>
+          <button class="text-red-500 hover:text-red-700" onclick="document.getElementById('api-error-banner').classList.add('hidden')">
+            <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/>
+            </svg>
+          </button>
+        </div>
+      </div>
 
       <main class="flex-1">
         <div class="mx-auto max-w-[1600px] px-6 py-6">
@@ -704,15 +730,17 @@
               <p class="muted">Passwords are scrubbed once a session is saved.</p>
             </div>
           </div>
-          <label for="acct-new-login-username">Username</label>
-          <input id="acct-new-login-username" placeholder="instagram_username">
-          <label for="acct-new-login-password">Password</label>
-          <input id="acct-new-login-password" type="password" placeholder="password">
-          <label for="acct-new-login-cookie">Cookie filename (optional)</label>
-          <input id="acct-new-login-cookie" placeholder="cookies_<username>.txt">
-          <div class="row" style="gap: 8px; margin-top: 8px;">
-            <button class="secondary" id="acct-add-login">Add / update account</button>
-          </div>
+          <form id="acct-add-form" onsubmit="return false;">
+            <label for="acct-new-login-username">Username</label>
+            <input id="acct-new-login-username" type="text" placeholder="instagram_username" autocomplete="username">
+            <label for="acct-new-login-password">Password</label>
+            <input id="acct-new-login-password" type="password" placeholder="password" autocomplete="current-password">
+            <label for="acct-new-login-cookie">Cookie filename (optional)</label>
+            <input id="acct-new-login-cookie" type="text" placeholder="cookies_<username>.txt">
+            <div class="row" style="gap: 8px; margin-top: 8px;">
+              <button type="button" class="secondary" id="acct-add-login">Add / update account</button>
+            </div>
+          </form>
           <div class="config-help">Use this to add new accounts or reauthorize after a reset.</div>
         </div>
       </div>
@@ -2982,6 +3010,17 @@
     const cohortWindowSel = document.getElementById('detail-cohort-window');
     if (cohortWindowSel) cohortWindowSel.onchange = () => loadCohortInsights(currentHistoryTarget);
 
+    function showAPIError(show = true) {
+      const banner = document.getElementById('api-error-banner');
+      if (banner) {
+        if (show) {
+          banner.classList.remove('hidden');
+        } else {
+          banner.classList.add('hidden');
+        }
+      }
+    }
+
     (async function init(){
       try {
         openView('overview');
@@ -2993,8 +3032,12 @@
         statusTimer = setInterval(fetchSystemStatus, 4000);
         fetchUnfollowStatus();
         setInterval(fetchUnfollowStatus, 6000);
+        // Hide API error banner if everything loaded successfully
+        showAPIError(false);
       } catch (e) {
         log('Init error: ' + e.message);
+        // Show API error banner if init fails
+        showAPIError(true);
       }
     })();
   </script>
