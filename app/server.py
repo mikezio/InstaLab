@@ -2096,6 +2096,10 @@ def api_logins_add():
         return jsonify({"error": "login_username is blocked"}), 400
 
     lookup = _get_login_lookup(force=True)
+    
+    # Read login file once at the beginning
+    logins = _read_login_file()
+    
     if login_username in lookup:
         profile = lookup.get(login_username) or {}
         session_file = _session_path_for_login(login_username)
@@ -2104,7 +2108,6 @@ def api_logins_add():
             and not profile.get("login_password")
             and not os.path.exists(session_file)
         ):
-            logins = _read_login_file()
             updated = False
             for entry in logins:
                 if entry.get("login_username") == login_username:
@@ -2124,7 +2127,7 @@ def api_logins_add():
                 return jsonify({"updated": login_username})
         return jsonify({"error": "login_username already exists"}), 409
 
-    logins = _read_login_file()
+    # Check for disabled login or existing entry (using already-loaded logins)
     for entry in logins:
         if entry.get("login_username") == login_username:
             if entry.get("disabled"):
@@ -2388,64 +2391,101 @@ def api_targets_summary():
     conn = _get_db()
     try:
         targets = _get_targets(conn)
+        if not targets:
+            return jsonify([])
+        
         cutoff = datetime.now(LOCAL_TZ) - timedelta(days=7)
+        cutoff_str = cutoff.strftime("%Y-%m-%d_%H-%M-%S")
+        
+        # Build single optimized query to get all data at once
+        placeholders = ",".join(["?"] * len(targets))
+        
+        # Get latest 2 runs per target for delta calculation
+        latest_query = f"""
+        SELECT 
+            target_username,
+            id, timestamp, followers_count, followees_count, non_followbacks_count,
+            followers_added, followers_removed, followees_added, followees_removed, 
+            login_username, duration_seconds, confidence_score, confidence_flag,
+            ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp DESC, id DESC) as rn
+        FROM runs
+        WHERE target_username IN ({placeholders})
+        """
+        
+        if is_postgres():
+            latest_query = latest_query.replace("?", "%s")
+        
+        cur = conn.execute(latest_query, tuple(targets))
+        rows_by_target = {}
+        for row in cur.fetchall():
+            target = row[0]  # target_username
+            if target not in rows_by_target:
+                rows_by_target[target] = []
+            if len(rows_by_target[target]) < 2:  # Only keep first 2
+                rows_by_target[target].append(dict(row))
+        
+        # Get history data (first 30 runs ordered by timestamp)
+        history_query = f"""
+        SELECT target_username, followers_count
+        FROM (
+            SELECT 
+                target_username, followers_count,
+                ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp ASC) as rn
+            FROM runs
+            WHERE target_username IN ({placeholders})
+        ) sub
+        WHERE rn <= 30
+        ORDER BY target_username, rn
+        """
+        
+        if is_postgres():
+            history_query = history_query.replace("?", "%s")
+        
+        hist_cur = conn.execute(history_query, tuple(targets))
+        history_by_target = {}
+        for row in hist_cur.fetchall():
+            target = row[0]
+            if target not in history_by_target:
+                history_by_target[target] = []
+            history_by_target[target].append(row[1])  # followers_count
+        
+        # Get week aggregates
+        week_query = f"""
+        SELECT 
+            target_username,
+            COUNT(*) as runs,
+            SUM(COALESCE(followers_added, 0)) as followers_added,
+            SUM(COALESCE(followers_removed, 0)) as followers_removed,
+            SUM(COALESCE(followees_added, 0)) as followees_added,
+            SUM(COALESCE(followees_removed, 0)) as followees_removed
+        FROM runs
+        WHERE target_username IN ({placeholders})
+          AND timestamp >= ?
+        GROUP BY target_username
+        """
+        
+        if is_postgres():
+            week_query = week_query.replace("?", "%s")
+        
+        week_cur = conn.execute(week_query, tuple(targets) + (cutoff_str,))
+        week_by_target = {row[0]: dict(row) for row in week_cur.fetchall()}
+        
+        # Build output
         out = []
         for t in targets:
-            cur = conn.execute(
-                """
-                SELECT id, timestamp, followers_count, followees_count, non_followbacks_count,
-                       followers_added, followers_removed, followees_added, followees_removed, login_username,
-                       duration_seconds, confidence_score, confidence_flag
-                FROM runs
-                WHERE target_username = ?
-                ORDER BY timestamp DESC, id DESC
-                LIMIT 2
-                """,
-                (t,),
-            )
-            rows = cur.fetchall()
+            rows = rows_by_target.get(t, [])
             if not rows:
                 continue
-            latest = dict(rows[0])
-            prev = dict(rows[1]) if len(rows) > 1 else None
+            
+            latest = rows[0]
+            prev = rows[1] if len(rows) > 1 else None
+            
             delta_f = latest["followers_count"] - (prev["followers_count"] if prev else 0)
             delta_fe = latest["followees_count"] - (prev["followees_count"] if prev else 0)
-            hist_cur = conn.execute(
-                """
-                SELECT followers_count FROM runs
-                WHERE target_username = ?
-                ORDER BY timestamp
-                LIMIT 30
-                """,
-                (t,),
-            )
-            history = [r[0] for r in hist_cur.fetchall()]
-            week_followers_added = 0
-            week_followers_removed = 0
-            week_followees_added = 0
-            week_followees_removed = 0
-            week_runs = 0
-            recent_cur = conn.execute(
-                """
-                SELECT timestamp, followers_added, followers_removed, followees_added, followees_removed
-                FROM runs
-                WHERE target_username = ?
-                ORDER BY timestamp DESC, id DESC
-                LIMIT 200
-                """,
-                (t,),
-            )
-            for r in recent_cur.fetchall():
-                ts = _parse_snapshot_ts(r["timestamp"])
-                if not ts:
-                    continue
-                if ts < cutoff:
-                    continue
-                week_runs += 1
-                week_followers_added += r["followers_added"] or 0
-                week_followers_removed += r["followers_removed"] or 0
-                week_followees_added += r["followees_added"] or 0
-                week_followees_removed += r["followees_removed"] or 0
+            
+            history = history_by_target.get(t, [])
+            week_data = week_by_target.get(t, {})
+            
             out.append(
                 {
                     "target_username": t,
@@ -2454,11 +2494,11 @@ def api_targets_summary():
                     "delta_followees": delta_fe,
                     "history_followers": history,
                     "week": {
-                        "runs": week_runs,
-                        "followers_added": week_followers_added,
-                        "followers_removed": week_followers_removed,
-                        "followees_added": week_followees_added,
-                        "followees_removed": week_followees_removed,
+                        "runs": week_data.get("runs", 0),
+                        "followers_added": week_data.get("followers_added", 0),
+                        "followers_removed": week_data.get("followers_removed", 0),
+                        "followees_added": week_data.get("followees_added", 0),
+                        "followees_removed": week_data.get("followees_removed", 0),
                     },
                 }
             )
