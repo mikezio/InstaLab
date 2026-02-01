@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request:
+    branches: ["main", "dev"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      INSTALAB_ENV: /tmp/instalab.env
+      INSTALAB_DB_TYPE: sqlite
+      INSTALAB_SQLITE_PATH: /tmp/instalab.db
+      INSTALAB_COOKIE_DIR: /tmp/instalab-cookies
+      INSTALAB_LOGINS_FILE: /tmp/instalab-logins.json
+      INSTALAB_API_BASE: http://127.0.0.1:5000/
+      DD_TRACE_ENABLED: "false"
+      DD_RUNTIME_METRICS_ENABLED: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r app/requirements.txt
+
+      - name: Python smoke import
+        run: |
+          python -c "import server; import instaloader_tracker; print('python ok')"
+        working-directory: app
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install Node deps
+        run: npm ci
+        working-directory: app
+
+      - name: Build UI
+        run: npm run build
+        working-directory: app
