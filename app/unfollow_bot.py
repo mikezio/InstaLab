@@ -33,7 +33,8 @@ def _maybe_accept_cookies(page) -> None:
             if btn.count() > 0 and btn.first.is_visible():
                 btn.first.click(timeout=2000)
                 return
-        except Exception:
+        except (TimeoutError, AttributeError):
+            # Button not found or not clickable, try next label
             continue
 
 
@@ -41,12 +42,12 @@ def _login_required(page) -> bool:
     try:
         if "accounts/login" in page.url:
             return True
-    except Exception:
+    except AttributeError:
         pass
     try:
         if page.locator('input[name="username"]').count() > 0:
             return True
-    except Exception:
+    except (AttributeError, RuntimeError):
         return False
     return False
 
