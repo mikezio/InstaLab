@@ -692,6 +692,35 @@
           <select id="cfg-monitor-login"></select>
           <div class="config-help">Checks counts and triggers a full run on meaningful change.</div>
         </div>
+        <div class="card config-section config-proxy">
+          <div class="proxy-header">
+            <div>
+              <h4>Proxy routing</h4>
+              <div class="config-help">Route all job traffic through Bright Data residential proxies.</div>
+            </div>
+            <span class="proxy-badge off" id="cfg-proxy-status">Proxy off</span>
+          </div>
+          <label for="cfg-proxy-enabled">Proxy</label>
+          <select id="cfg-proxy-enabled">
+            <option value="true">Enabled</option>
+            <option value="false">Disabled</option>
+          </select>
+          <label for="cfg-proxy-provider">Provider</label>
+          <select id="cfg-proxy-provider">
+            <option value="brightdata">Bright Data (Residential)</option>
+          </select>
+          <label for="cfg-proxy-host">Proxy host</label>
+          <input id="cfg-proxy-host" type="text" placeholder="brd.superproxy.io">
+          <label for="cfg-proxy-port">Proxy port</label>
+          <input id="cfg-proxy-port" type="number" min="1" max="65535" placeholder="33335">
+          <label for="cfg-proxy-username">Username</label>
+          <input id="cfg-proxy-username" type="text" placeholder="brd-customer-...-zone-...">
+          <label for="cfg-proxy-password">Password</label>
+          <input id="cfg-proxy-password" type="password" placeholder="not set">
+          <label for="cfg-proxy-api-key">API key (optional)</label>
+          <input id="cfg-proxy-api-key" type="password" placeholder="optional">
+          <div class="config-help">Native proxying needs the zone username + password. API key is for Bright Data API access.</div>
+        </div>
       </div>
       <div class="config-actions">
         <button class="secondary" id="cfg-reset">Reset to defaults</button>
@@ -1265,6 +1294,7 @@
       if (schTime2) schTime2.value = t2;
       if (schWeekday) schWeekday.value = dow;
       toggleFrequencyUI();
+      updateProxyConfigUI();
     }
 
     function fillConfigForm(fromDefaults=false) {
@@ -1293,6 +1323,16 @@
         const monSel = document.getElementById('cfg-monitor-login');
         if (monSel) monSel.value = src.monitor_login_username;
       }
+      document.getElementById('cfg-proxy-enabled').value = (src.proxy_enabled ?? false) ? 'true' : 'false';
+      document.getElementById('cfg-proxy-provider').value = src.proxy_provider ?? 'brightdata';
+      document.getElementById('cfg-proxy-host').value = src.proxy_host ?? 'brd.superproxy.io';
+      document.getElementById('cfg-proxy-port').value = src.proxy_port ?? 33335;
+      document.getElementById('cfg-proxy-username').value = src.proxy_username ?? '';
+      const proxyPass = document.getElementById('cfg-proxy-password');
+      const proxyKey = document.getElementById('cfg-proxy-api-key');
+      if (proxyPass) proxyPass.value = '';
+      if (proxyKey) proxyKey.value = '';
+      updateProxyConfigUI();
     }
 
     function openConfigModal() {
@@ -1340,7 +1380,16 @@
         monitor_threshold_delta: Number(document.getElementById('cfg-monitor-threshold').value || 0),
         monitor_min_gap_minutes: Number(document.getElementById('cfg-monitor-gap').value || 0),
         monitor_login_username: document.getElementById('cfg-monitor-login').value || '',
+        proxy_enabled: document.getElementById('cfg-proxy-enabled').value === 'true',
+        proxy_provider: document.getElementById('cfg-proxy-provider').value,
+        proxy_host: document.getElementById('cfg-proxy-host').value.trim(),
+        proxy_port: Number(document.getElementById('cfg-proxy-port').value || 0),
+        proxy_username: document.getElementById('cfg-proxy-username').value.trim(),
       };
+      const proxyPass = document.getElementById('cfg-proxy-password')?.value.trim();
+      const proxyKey = document.getElementById('cfg-proxy-api-key')?.value.trim();
+      if (proxyPass) payload.proxy_password = proxyPass;
+      if (proxyKey) payload.proxy_api_key = proxyKey;
       try {
         const res = await fetchJSON('/config', {method: 'PUT', body: JSON.stringify(payload)});
         configCache = res.config || configCache;
@@ -1559,6 +1608,21 @@
       });
       if (current) sel.value = current;
       if (!sel.value && loginsList && loginsList.length) sel.value = loginsList[0].login_username;
+    }
+
+    function updateProxyConfigUI() {
+      const enabled = getConfigValue('proxy_enabled', false);
+      const badge = document.getElementById('cfg-proxy-status');
+      if (badge) {
+        badge.textContent = enabled ? 'Proxy on' : 'Proxy off';
+        badge.className = `proxy-badge ${enabled ? 'on' : 'off'}`;
+      }
+      const passSet = getConfigValue('proxy_password_set', false);
+      const keySet = getConfigValue('proxy_api_key_set', false);
+      const passEl = document.getElementById('cfg-proxy-password');
+      const keyEl = document.getElementById('cfg-proxy-api-key');
+      if (passEl) passEl.placeholder = passSet ? '•••••• saved' : 'not set';
+      if (keyEl) keyEl.placeholder = keySet ? '•••••• saved' : 'optional';
     }
 
     function updateRailSessionStatus() {

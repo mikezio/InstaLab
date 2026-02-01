@@ -173,6 +173,12 @@
   .config-grid { @apply grid gap-4 md:grid-cols-2; }
   .config-section h4 { @apply text-xs uppercase tracking-wide text-muted font-semibold; }
   .config-actions { @apply flex flex-wrap gap-2 justify-end; }
+  .config-proxy { @apply relative overflow-hidden; background: linear-gradient(135deg, #fffaf0 0%, #ffffff 65%); }
+  .config-proxy::after { content: ""; position: absolute; inset: -40% -20% auto auto; width: 140px; height: 140px; border-radius: 999px; background: radial-gradient(circle at 30% 30%, rgba(251, 191, 36, 0.18), transparent 70%); pointer-events: none; }
+  .proxy-header { @apply flex items-center justify-between gap-3; }
+  .proxy-badge { @apply text-[10px] uppercase tracking-wide font-semibold px-2 py-1 rounded-full border; }
+  .proxy-badge.on { background: #ecfdf3; border-color: #bbf7d0; color: #047857; }
+  .proxy-badge.off { background: #f8fafc; border-color: #e2e8f0; color: #64748b; }
 
   .explorer-grid { @apply grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]; }
   .explorer-rail { @apply space-y-4; }

@@ -124,6 +124,13 @@ CONFIG_DEFAULTS = {
     "run_request_timeout": float(os.getenv("RUN_REQUEST_TIMEOUT", "600")),
     "run_item_delay_min": float(os.getenv("RUN_ITEM_DELAY_MIN", "0.25")),
     "run_item_delay_max": float(os.getenv("RUN_ITEM_DELAY_MAX", "0.75")),
+    "proxy_enabled": os.getenv("INSTALAB_PROXY_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+    "proxy_provider": os.getenv("INSTALAB_PROXY_PROVIDER", "brightdata"),
+    "proxy_host": os.getenv("INSTALAB_PROXY_HOST", "brd.superproxy.io"),
+    "proxy_port": int(os.getenv("INSTALAB_PROXY_PORT", "33335")),
+    "proxy_username": os.getenv("INSTALAB_PROXY_USERNAME", ""),
+    "proxy_password": os.getenv("INSTALAB_PROXY_PASSWORD", ""),
+    "proxy_api_key": os.getenv("INSTALAB_PROXY_API_KEY", ""),
     "unfollow_max_per_run": 25,
     "unfollow_delay_min": 25,
     "unfollow_delay_max": 45,
@@ -145,6 +152,13 @@ CONFIG_SCHEMA = {
     "run_request_timeout": {"type": "float", "min": 10, "max": 3600},
     "run_item_delay_min": {"type": "float", "min": 0.0, "max": 5.0},
     "run_item_delay_max": {"type": "float", "min": 0.0, "max": 5.0},
+    "proxy_enabled": {"type": "bool"},
+    "proxy_provider": {"type": "str"},
+    "proxy_host": {"type": "str"},
+    "proxy_port": {"type": "int", "min": 1, "max": 65535},
+    "proxy_username": {"type": "str"},
+    "proxy_password": {"type": "str"},
+    "proxy_api_key": {"type": "str"},
     "unfollow_max_per_run": {"type": "int", "min": 1, "max": 500},
     "unfollow_delay_min": {"type": "int", "min": 1, "max": 600},
     "unfollow_delay_max": {"type": "int", "min": 1, "max": 900},
@@ -163,6 +177,7 @@ CONFIG_SCHEMA = {
     "monitor_min_gap_minutes": {"type": "int", "min": 60, "max": 1440},
     "monitor_login_username": {"type": "str"},
 }
+SENSITIVE_CONFIG_KEYS = {"proxy_password", "proxy_api_key"}
 CONFIG_CACHE = {"data": {}, "ts": 0.0}
 CONFIG_CACHE_TTL = 5.0
 
@@ -787,6 +802,15 @@ def _get_config(force=False):
     return merged
 
 
+def _mask_config_for_api(cfg: dict) -> dict:
+    safe = dict(cfg)
+    for key in SENSITIVE_CONFIG_KEYS:
+        if key in safe:
+            safe.pop(key, None)
+            safe[f"{key}_set"] = bool(cfg.get(key))
+    return safe
+
+
 def _get_config_value(key, fallback=None):
     cfg = _get_config()
     if key in cfg:
@@ -821,6 +845,47 @@ def _set_config_values(updates: dict):
         conn.close()
     CONFIG_CACHE["ts"] = 0.0
     return cleaned
+
+
+def _build_proxy_server(host: str, port: int) -> str:
+    return f"http://{host}:{int(port)}"
+
+
+def _get_proxy_config():
+    enabled = _parse_bool(_get_config_value("proxy_enabled", False))
+    provider = str(_get_config_value("proxy_provider", "brightdata") or "brightdata").strip().lower()
+    host = str(_get_config_value("proxy_host", "") or "").strip().rstrip("/")
+    port = int(_get_config_value("proxy_port", 33335) or 33335)
+    username = str(_get_config_value("proxy_username", "") or "").strip()
+    password = str(_get_config_value("proxy_password", "") or "").strip()
+    if not enabled:
+        return {"enabled": False}
+    if not host or not port:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "provider": provider,
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "server": _build_proxy_server(host, port),
+    }
+
+
+def _apply_proxy_env(env: dict):
+    proxy = _get_proxy_config()
+    if not proxy.get("enabled"):
+        env["INSTALAB_PROXY_ENABLED"] = "false"
+        return
+    env["INSTALAB_PROXY_ENABLED"] = "true"
+    env["INSTALAB_PROXY_PROVIDER"] = proxy.get("provider", "brightdata")
+    env["INSTALAB_PROXY_HOST"] = proxy.get("host", "")
+    env["INSTALAB_PROXY_PORT"] = str(proxy.get("port", 33335))
+    if proxy.get("username"):
+        env["INSTALAB_PROXY_USERNAME"] = proxy.get("username")
+    if proxy.get("password"):
+        env["INSTALAB_PROXY_PASSWORD"] = proxy.get("password")
 
 def _init_unfollow_table():
     conn = _get_db()
@@ -1140,6 +1205,7 @@ def _unfollow_worker(usernames, login_username, target_username, dry_run, max_ac
         return UNFOLLOW_CANCEL.is_set()
 
     try:
+        proxy = _get_proxy_config()
         result = unfollow_users(
             usernames,
             UNFOLLOW_STORAGE,
@@ -1151,6 +1217,9 @@ def _unfollow_worker(usernames, login_username, target_username, dry_run, max_ac
             log=_log_unfollow,
             progress=_progress,
             record=_record,
+            proxy_server=proxy.get("server") if proxy.get("enabled") else None,
+            proxy_username=proxy.get("username"),
+            proxy_password=proxy.get("password"),
         )
         cancelled = bool(result.get("cancelled")) or UNFOLLOW_CANCEL.is_set()
         fatal_error = result.get("fatal_error")
@@ -1428,6 +1497,7 @@ def _run_count_check(login_username, target_username):
 
     env = os.environ.copy()
     env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
+    _apply_proxy_env(env)
 
     cmd = [
         sys.executable,
@@ -1768,6 +1838,7 @@ def run_snapshot(login_username, target_username, rebuild_dashboard=True, job_id
 
     env = os.environ.copy()
     env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
+    _apply_proxy_env(env)
     if two_factor_code:
         env["RUN_2FA_CODE"] = str(two_factor_code).strip()
     else:
@@ -3010,7 +3081,8 @@ def api_monitor_status():
 
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
-    return jsonify({"config": _get_config(force=True), "defaults": CONFIG_DEFAULTS})
+    cfg = _get_config(force=True)
+    return jsonify({"config": _mask_config_for_api(cfg), "defaults": _mask_config_for_api(CONFIG_DEFAULTS)})
 
 
 @app.route("/api/config", methods=["PUT"])
@@ -3019,14 +3091,27 @@ def api_config_update():
     if not isinstance(data, dict) or not data:
         return jsonify({"error": "config payload required"}), 400
     try:
-        updated = _set_config_values(data)
+        cleaned = {}
+        for key, value in data.items():
+            if key in SENSITIVE_CONFIG_KEYS and (value is None or str(value).strip() == ""):
+                continue
+            cleaned[key] = value
+        if _parse_bool(cleaned.get("proxy_enabled", _get_config_value("proxy_enabled", False))):
+            host = cleaned.get("proxy_host") or _get_config_value("proxy_host", "")
+            port = cleaned.get("proxy_port") or _get_config_value("proxy_port", 0)
+            user = cleaned.get("proxy_username") or _get_config_value("proxy_username", "")
+            pwd = cleaned.get("proxy_password") or _get_config_value("proxy_password", "")
+            if not host or not port or not user or not pwd:
+                raise ValueError("Proxy enabled requires host, port, username, and password")
+        updated = _set_config_values(cleaned)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     try:
         _schedule_monitor_job()
     except Exception:
         pass
-    return jsonify({"updated": list(updated.keys()), "config": _get_config(force=True)})
+    cfg = _get_config(force=True)
+    return jsonify({"updated": list(updated.keys()), "config": _mask_config_for_api(cfg)})
 
 
 @app.route("/api/unfollow/status", methods=["GET"])
@@ -3177,7 +3262,14 @@ def api_unfollow_init():
     if UNFOLLOW_LOCK.locked():
         return jsonify({"error": "unfollow job running"}), 409
     # Launch interactive login in background (requires display on server)
-    executor.submit(init_login, UNFOLLOW_STORAGE)
+    proxy = _get_proxy_config()
+    executor.submit(
+        init_login,
+        UNFOLLOW_STORAGE,
+        proxy.get("server") if proxy.get("enabled") else None,
+        proxy.get("username"),
+        proxy.get("password"),
+    )
     return jsonify({"started": True, "note": "interactive login opened"})
 
 
