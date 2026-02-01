@@ -3,8 +3,7 @@ module.exports = {
   content: [
     "./django_app/dashboard/templates/**/*.html",
     "./django_app/static/**/*.js",
-    "./dashboard/**/*.html",
-    "./ui_src/**/*.{html,js}"
+    "./ui_src/**/*.{html,js,css}"
   ],
   theme: {
     extend: {

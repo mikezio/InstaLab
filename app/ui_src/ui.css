@@ -31,6 +31,10 @@
 @layer components {
   .cc-shell { @apply hidden; }
 
+  /* Empty state and loading indicators */
+  .empty-placeholder { @apply text-gray-400 italic; }
+  .loading-pulse { @apply animate-pulse text-gray-400; }
+
   .panel { @apply border border-gray-200 bg-white p-5; color: #0f172a; }
   .panel.glass { @apply bg-white border border-gray-200; }
   .signal-board { @apply panel; }
