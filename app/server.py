@@ -52,6 +52,7 @@ LOCAL_TZ = ZoneInfo("America/New_York")
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH_DEFAULT = BASE_DIR / "instaloader.db"
 # Environment variables are already loaded by db module
+ENV_PATH = Path(os.getenv("INSTALAB_ENV", "/srv/secrets/instalab.env"))
 COOKIE_DIR = Path(os.getenv("INSTALAB_COOKIE_DIR", "/data/instalab/cookies"))
 
 JOB_TMP_DIR = BASE_DIR / "job_runs"
