@@ -38,12 +38,23 @@ def api_proxy(request, path: str):
     but the Flask backend should implement its own validation.
     """
     # Validate path to prevent path traversal and malicious input
-    # Allow alphanumeric, hyphens, underscores, slashes, and dots but prevent ../ patterns
-    if not re.match(r'^[a-zA-Z0-9/_.-]+$', path) or '..' in path:
-        logger.warning(f"Invalid API path rejected: {path}")
+    # Normalize the path first to resolve any .. or . segments
+    import os
+    normalized_path = os.path.normpath(path)
+    
+    # Check for directory traversal attempts
+    # The normalized path should not start with .. or contain absolute path indicators
+    if normalized_path.startswith('..') or os.path.isabs(normalized_path):
+        logger.warning(f"Path traversal attempt rejected: {path}")
         return JsonResponse({"error": "Invalid API path"}, status=400)
     
-    target = urljoin(FLASK_BASE, f"api/{path}")
+    # Only allow alphanumeric, hyphens, underscores, and slashes (no dots)
+    # This prevents any further path manipulation attempts
+    if not re.match(r'^[a-zA-Z0-9/_-]+$', normalized_path):
+        logger.warning(f"Invalid API path characters rejected: {path}")
+        return JsonResponse({"error": "Invalid API path"}, status=400)
+    
+    target = urljoin(FLASK_BASE, f"api/{normalized_path}")
     method = request.method
     headers = {"Content-Type": request.content_type} if request.content_type else {}
     params = request.GET.dict()

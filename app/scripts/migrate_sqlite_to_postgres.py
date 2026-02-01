@@ -4,6 +4,7 @@ import sqlite3
 from pathlib import Path
 
 import psycopg2
+from psycopg2 import sql
 
 
 def _env(key, default=None):
@@ -120,7 +121,6 @@ def migrate(sqlite_path: str):
                 continue
             cols = rows[0].keys()
             # Use psycopg2.sql.Identifier for safe table/column name quoting
-            from psycopg2 import sql
             col_identifiers = [sql.Identifier(c) for c in cols]
             col_list = sql.SQL(", ").join(col_identifiers)
             placeholders = sql.SQL(", ").join([sql.Placeholder()] * len(cols))
@@ -139,7 +139,6 @@ def migrate(sqlite_path: str):
             with pconn.cursor() as cur:
                 for table in TABLES_WITH_SEQUENCES:
                     # Use psycopg2.sql for safe identifier quoting
-                    from psycopg2 import sql
                     cur.execute(
                         sql.SQL(
                             "SELECT setval(pg_get_serial_sequence({}, 'id'), "
