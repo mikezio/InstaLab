@@ -1,6 +1,7 @@
 import os
 import random
 import re
+import shutil
 import time
 import tempfile
 from contextlib import contextmanager
@@ -358,11 +359,29 @@ def _driver(request_timeout=60.0):
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1200,900")
+    
+    # Track temp directory for cleanup if we create one
+    temp_home = None
+    temp_xdg = None
+    
     if not headless:
-        home_dir = Path(os.getenv("SELENIUM_HOME", tempfile.mkdtemp(prefix="instalab-chrome-")))
+        selenium_home = os.getenv("SELENIUM_HOME")
+        if selenium_home:
+            home_dir = Path(selenium_home)
+        else:
+            # Create temp directory and track it for cleanup
+            temp_home = tempfile.mkdtemp(prefix="instalab-chrome-")
+            home_dir = Path(temp_home)
         home_dir.mkdir(parents=True, exist_ok=True)
         os.environ["HOME"] = str(home_dir)
-        xdg_runtime = Path(os.getenv("XDG_RUNTIME_DIR", "/tmp/xdg-runtime"))
+        
+        xdg_dir_env = os.getenv("XDG_RUNTIME_DIR")
+        if xdg_dir_env:
+            xdg_runtime = Path(xdg_dir_env)
+        else:
+            # Create temp directory and track it for cleanup
+            temp_xdg = tempfile.mkdtemp(prefix="instalab-xdg-")
+            xdg_runtime = Path(temp_xdg)
         xdg_runtime.mkdir(parents=True, exist_ok=True)
         try:
             xdg_runtime.chmod(0o700)
@@ -394,6 +413,17 @@ def _driver(request_timeout=60.0):
         yield driver
     finally:
         driver.quit()
+        # Clean up temporary directories if we created them
+        if temp_home:
+            try:
+                shutil.rmtree(temp_home, ignore_errors=True)
+            except Exception:
+                pass
+        if temp_xdg:
+            try:
+                shutil.rmtree(temp_xdg, ignore_errors=True)
+            except Exception:
+                pass
 
 
 def fetch_counts(

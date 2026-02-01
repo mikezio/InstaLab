@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from threading import Lock
 
 from dotenv import load_dotenv
 
@@ -16,6 +17,10 @@ for _p in _env_paths:
 
 DB_TYPE = os.getenv("INSTALAB_DB_TYPE", "sqlite").strip().lower()
 
+# Simple connection pool for PostgreSQL
+_pg_pool = None
+_pg_pool_lock = Lock()
+
 
 def is_postgres() -> bool:
     return DB_TYPE in {"postgres", "postgresql"}
@@ -29,9 +34,10 @@ def _adapt_sql(sql: str) -> str:
 
 
 class DBConn:
-    def __init__(self, conn, kind: str):
+    def __init__(self, conn, kind: str, pooled: bool = False):
         self._conn = conn
         self._kind = kind
+        self._pooled = pooled
 
     def execute(self, sql: str, params=()):
         if self._kind == "postgres":
@@ -54,7 +60,16 @@ class DBConn:
         return self._conn.rollback()
 
     def close(self):
-        return self._conn.close()
+        # If using pooled connection, return it to the pool instead of closing
+        global _pg_pool
+        if self._pooled and _pg_pool and self._kind == "postgres":
+            try:
+                _pg_pool.putconn(self._conn)
+            except Exception:
+                # If pool is closed or error, just close the connection
+                self._conn.close()
+        else:
+            return self._conn.close()
 
     def cursor(self):
         if self._kind == "postgres":
@@ -66,7 +81,46 @@ def get_db():
     if is_postgres():
         import psycopg2
         import psycopg2.extras
+        from psycopg2 import pool
 
+        global _pg_pool, _pg_pool_lock
+        
+        # Initialize pool on first use (lazy initialization)
+        if _pg_pool is None:
+            with _pg_pool_lock:
+                if _pg_pool is None:  # Double-check pattern
+                    host = os.getenv("INSTALAB_DB_HOST", "127.0.0.1")
+                    port = int(os.getenv("INSTALAB_DB_PORT", "5432"))
+                    name = os.getenv("INSTALAB_DB_NAME", "instalab")
+                    user = os.getenv("INSTALAB_DB_USER", "instalab")
+                    password = os.getenv("INSTALAB_DB_PASS", "")
+                    
+                    # Create a threaded connection pool (min 2, max 10 connections)
+                    # ThreadedConnectionPool is thread-safe for Flask multi-threaded apps
+                    try:
+                        _pg_pool = pool.ThreadedConnectionPool(
+                            minconn=2,
+                            maxconn=10,
+                            host=host,
+                            port=port,
+                            dbname=name,
+                            user=user,
+                            password=password,
+                            cursor_factory=psycopg2.extras.DictCursor,
+                        )
+                    except Exception:
+                        # If pool creation fails, fall back to direct connection
+                        _pg_pool = None
+        
+        # Try to get connection from pool
+        if _pg_pool:
+            try:
+                conn = _pg_pool.getconn()
+                return DBConn(conn, "postgres", pooled=True)
+            except Exception:
+                pass
+        
+        # Fallback to direct connection if pool unavailable
         host = os.getenv("INSTALAB_DB_HOST", "127.0.0.1")
         port = int(os.getenv("INSTALAB_DB_PORT", "5432"))
         name = os.getenv("INSTALAB_DB_NAME", "instalab")
@@ -102,6 +156,8 @@ def get_db():
     
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    # Set busy timeout for better concurrency under load
+    conn.execute("PRAGMA busy_timeout = 30000")
     return DBConn(conn, "sqlite")
 
 

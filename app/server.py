@@ -29,9 +29,9 @@ from pathlib import Path
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory, redirect
 
 from instaloader_tracker import update_run_duration, _init_db as _init_instaloader_db
@@ -51,15 +51,7 @@ LOCAL_TZ = ZoneInfo("America/New_York")
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH_DEFAULT = BASE_DIR / "instaloader.db"
-ENV_PATH = Path(os.getenv("INSTALAB_ENV", "/srv/secrets/instalab.env"))
-
-# Load environment (credentials live here)
-if ENV_PATH.exists():
-    load_dotenv(ENV_PATH)
-else:
-    load_dotenv(BASE_DIR / ".env")
-
-# Initialize COOKIE_DIR after loading environment
+# Environment variables are already loaded by db module
 COOKIE_DIR = Path(os.getenv("INSTALAB_COOKIE_DIR", "/data/instalab/cookies"))
 
 JOB_TMP_DIR = BASE_DIR / "job_runs"
@@ -80,6 +72,28 @@ def _ensure_job_tmp_dir():
 
 
 _ensure_job_tmp_dir()
+
+
+def _cleanup_old_job_dirs():
+    """Clean up job directories older than 24 hours."""
+    try:
+        if not JOB_TMP_DIR.exists():
+            return
+        now = time.time()
+        max_age_seconds = 24 * 3600  # 24 hours
+        for item in JOB_TMP_DIR.iterdir():
+            if not item.is_dir():
+                continue
+            try:
+                # Check if directory is older than max_age
+                mtime = item.stat().st_mtime
+                if now - mtime > max_age_seconds:
+                    shutil.rmtree(item, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 def _ensure_cookie_dir():
     global COOKIE_DIR
@@ -155,6 +169,10 @@ CONFIG_CACHE_TTL = 5.0
 LOGIN_FILE_PATH = os.getenv("INSTALAB_LOGINS_FILE", "/srv/secrets/instalab-logins.json")
 LOGIN_CACHE = {"profiles": [], "lookup": {}, "ts": 0.0}
 LOGIN_CACHE_TTL = 5.0
+
+# Cache backend availability check (since imports are expensive in health checks)
+_BACKEND_HEALTH_CACHE = {"backend": None, "status": None, "ts": 0.0}
+_BACKEND_HEALTH_CACHE_TTL = 60.0  # Cache for 1 minute
 
 BASE_LOGIN_PROFILES = [
     {
@@ -343,6 +361,7 @@ def _get_db():
             conn.execute("PRAGMA busy_timeout=30000")
         except Exception as e:
             print(f"Warning: Could not set busy_timeout: {e}", file=sys.stderr)
+    # Add schema migrations if needed
     try:
         cols = get_columns(conn, "runs")
         if "duration_seconds" not in cols:
@@ -567,6 +586,14 @@ def _health_check_sessions():
 
 def _health_check_scraper():
     backend = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "selenium").strip().lower()
+    
+    # Check cache first
+    now = time.time()
+    if (_BACKEND_HEALTH_CACHE["backend"] == backend and 
+        _BACKEND_HEALTH_CACHE["ts"] > 0 and 
+        now - _BACKEND_HEALTH_CACHE["ts"] < _BACKEND_HEALTH_CACHE_TTL):
+        return _BACKEND_HEALTH_CACHE["status"]
+    
     details = {"backend": backend}
     status = "ok"
     if backend in {"instaloader", "insta", "iloader"}:
@@ -587,7 +614,13 @@ def _health_check_scraper():
         details["chromedriver"] = chromedriver
         if not chromedriver:
             status = "degraded" if status == "ok" else status
-    return {"status": status, "details": details}
+    
+    result = {"status": status, "details": details}
+    # Update cache
+    _BACKEND_HEALTH_CACHE["backend"] = backend
+    _BACKEND_HEALTH_CACHE["status"] = result
+    _BACKEND_HEALTH_CACHE["ts"] = now
+    return result
 
 
 def _health_check_runs():
@@ -1415,9 +1448,21 @@ def _run_count_check(login_username, target_username):
         proc.communicate(timeout=180)
     except Exception:
         _terminate_proc(proc)
+        # Clean up temp directory on failure
+        try:
+            shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception:
+            pass
         return None
 
     payload = _read_json_file(result_path) or {}
+    
+    # Clean up temp directory after reading results
+    try:
+        shutil.rmtree(job_dir, ignore_errors=True)
+    except Exception:
+        pass
+    
     if payload.get("status") != "success":
         return None
     return payload.get("result") or None
@@ -1820,11 +1865,28 @@ def run_snapshot(login_username, target_username, rebuild_dashboard=True, job_id
     result_payload = _read_json_file(result_path)
     if not result_payload:
         tail = _tail_file(err_path)
+        # Clean up temp directory on failure
+        try:
+            shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception:
+            pass
         raise RuntimeError(f"worker exited without result{(': ' + tail) if tail else ''}")
     if result_payload.get("status") != "success":
+        # Clean up temp directory on failure
+        try:
+            shutil.rmtree(job_dir, ignore_errors=True)
+        except Exception:
+            pass
         raise RuntimeError(result_payload.get("error", "worker failed"))
 
     result = result_payload.get("result") or {}
+    
+    # Clean up temp directory after successful completion
+    try:
+        shutil.rmtree(job_dir, ignore_errors=True)
+    except Exception:
+        pass
+    
     if rebuild_dashboard:
         dashboard_builder.build_dashboard(
             base_dir=str(BASE_DIR),
@@ -1860,6 +1922,15 @@ executor = ThreadPoolExecutor(max_workers=3)
 scheduler = BackgroundScheduler()
 scheduler.configure(timezone=LOCAL_TZ)
 scheduler.start()
+
+# Schedule periodic cleanup of old job directories (runs every 6 hours)
+scheduler.add_job(
+    _cleanup_old_job_dirs,
+    trigger="interval",
+    hours=6,
+    id="cleanup_old_job_dirs",
+    name="Cleanup old job directories",
+)
 
 # Track in-flight manual runs
 RUN_FUTURES = {}
@@ -2026,6 +2097,10 @@ def api_logins_add():
         return jsonify({"error": "login_username is blocked"}), 400
 
     lookup = _get_login_lookup(force=True)
+    
+    # Read login file once at the beginning
+    logins = _read_login_file()
+    
     if login_username in lookup:
         profile = lookup.get(login_username) or {}
         session_file = _session_path_for_login(login_username)
@@ -2034,7 +2109,6 @@ def api_logins_add():
             and not profile.get("login_password")
             and not os.path.exists(session_file)
         ):
-            logins = _read_login_file()
             updated = False
             for entry in logins:
                 if entry.get("login_username") == login_username:
@@ -2054,7 +2128,7 @@ def api_logins_add():
                 return jsonify({"updated": login_username})
         return jsonify({"error": "login_username already exists"}), 409
 
-    logins = _read_login_file()
+    # Check for disabled login or existing entry (using already-loaded logins)
     for entry in logins:
         if entry.get("login_username") == login_username:
             if entry.get("disabled"):
@@ -2318,64 +2392,116 @@ def api_targets_summary():
     conn = _get_db()
     try:
         targets = _get_targets(conn)
+        if not targets:
+            return jsonify([])
+        
         cutoff = datetime.now(LOCAL_TZ) - timedelta(days=7)
+        cutoff_str = cutoff.strftime("%Y-%m-%d_%H-%M-%S")
+        
+        # Build single optimized query to get all data at once
+        placeholders = ",".join(["?"] * len(targets))
+        
+        # Get latest 2 runs per target for delta calculation
+        # Filter in outer query to retrieve only top 2 rows per target
+        latest_query = f"""
+        SELECT 
+            target_username,
+            id, timestamp, followers_count, followees_count, non_followbacks_count,
+            followers_added, followers_removed, followees_added, followees_removed, 
+            login_username, duration_seconds, confidence_score, confidence_flag,
+            rn
+        FROM (
+            SELECT 
+                target_username,
+                id, timestamp, followers_count, followees_count, non_followbacks_count,
+                followers_added, followers_removed, followees_added, followees_removed, 
+                login_username, duration_seconds, confidence_score, confidence_flag,
+                ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp DESC, id DESC) as rn
+            FROM runs
+            WHERE target_username IN ({placeholders})
+        ) ranked
+        WHERE rn <= 2
+        """
+        
+        if is_postgres():
+            latest_query = latest_query.replace("?", "%s")
+        
+        cur = conn.execute(latest_query, tuple(targets))
+        rows_by_target = {}
+        for row in cur.fetchall():
+            row_dict = dict(row)
+            target = row_dict["target_username"]
+            if target not in rows_by_target:
+                rows_by_target[target] = []
+            rows_by_target[target].append(row_dict)
+        
+        # Get history data (first 30 runs ordered by timestamp)
+        # Filter ranked results to first 30 rows per target for efficiency
+        history_query = f"""
+        SELECT target_username, followers_count
+        FROM (
+            SELECT 
+                target_username, followers_count,
+                ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp ASC) as rn
+            FROM runs
+            WHERE target_username IN ({placeholders})
+        ) ranked
+        WHERE rn <= 30
+        ORDER BY target_username, rn
+        """
+        
+        if is_postgres():
+            history_query = history_query.replace("?", "%s")
+        
+        hist_cur = conn.execute(history_query, tuple(targets))
+        history_by_target = {}
+        for row in hist_cur.fetchall():
+            row_dict = dict(row)
+            target = row_dict["target_username"]
+            if target not in history_by_target:
+                history_by_target[target] = []
+            history_by_target[target].append(row_dict["followers_count"])
+        
+        # Get week aggregates
+        week_query = f"""
+        SELECT 
+            target_username,
+            COUNT(*) as runs,
+            SUM(COALESCE(followers_added, 0)) as followers_added,
+            SUM(COALESCE(followers_removed, 0)) as followers_removed,
+            SUM(COALESCE(followees_added, 0)) as followees_added,
+            SUM(COALESCE(followees_removed, 0)) as followees_removed
+        FROM runs
+        WHERE target_username IN ({placeholders})
+          AND timestamp >= ?
+        GROUP BY target_username
+        """
+        
+        if is_postgres():
+            week_query = week_query.replace("?", "%s")
+        
+        week_cur = conn.execute(week_query, tuple(targets) + (cutoff_str,))
+        week_by_target = {}
+        for row in week_cur.fetchall():
+            row_dict = dict(row)
+            week_by_target[row_dict["target_username"]] = row_dict
+        
+        # Build output
         out = []
         for t in targets:
-            cur = conn.execute(
-                """
-                SELECT id, timestamp, followers_count, followees_count, non_followbacks_count,
-                       followers_added, followers_removed, followees_added, followees_removed, login_username,
-                       duration_seconds, confidence_score, confidence_flag
-                FROM runs
-                WHERE target_username = ?
-                ORDER BY timestamp DESC, id DESC
-                LIMIT 2
-                """,
-                (t,),
-            )
-            rows = cur.fetchall()
+            rows = rows_by_target.get(t, [])
             if not rows:
                 continue
-            latest = dict(rows[0])
-            prev = dict(rows[1]) if len(rows) > 1 else None
+            
+            latest = rows[0]
+            prev = rows[1] if len(rows) > 1 else None
+            
             delta_f = latest["followers_count"] - (prev["followers_count"] if prev else 0)
             delta_fe = latest["followees_count"] - (prev["followees_count"] if prev else 0)
-            hist_cur = conn.execute(
-                """
-                SELECT followers_count FROM runs
-                WHERE target_username = ?
-                ORDER BY timestamp
-                LIMIT 30
-                """,
-                (t,),
-            )
-            history = [r[0] for r in hist_cur.fetchall()]
-            week_followers_added = 0
-            week_followers_removed = 0
-            week_followees_added = 0
-            week_followees_removed = 0
-            week_runs = 0
-            recent_cur = conn.execute(
-                """
-                SELECT timestamp, followers_added, followers_removed, followees_added, followees_removed
-                FROM runs
-                WHERE target_username = ?
-                ORDER BY timestamp DESC, id DESC
-                LIMIT 200
-                """,
-                (t,),
-            )
-            for r in recent_cur.fetchall():
-                ts = _parse_snapshot_ts(r["timestamp"])
-                if not ts:
-                    continue
-                if ts < cutoff:
-                    continue
-                week_runs += 1
-                week_followers_added += r["followers_added"] or 0
-                week_followers_removed += r["followers_removed"] or 0
-                week_followees_added += r["followees_added"] or 0
-                week_followees_removed += r["followees_removed"] or 0
+            
+            history = history_by_target.get(t, [])
+            week_data = week_by_target.get(t, {})
+            
             out.append(
                 {
                     "target_username": t,
@@ -2384,11 +2510,11 @@ def api_targets_summary():
                     "delta_followees": delta_fe,
                     "history_followers": history,
                     "week": {
-                        "runs": week_runs,
-                        "followers_added": week_followers_added,
-                        "followers_removed": week_followers_removed,
-                        "followees_added": week_followees_added,
-                        "followees_removed": week_followees_removed,
+                        "runs": week_data.get("runs", 0),
+                        "followers_added": week_data.get("followers_added", 0),
+                        "followers_removed": week_data.get("followers_removed", 0),
+                        "followees_added": week_data.get("followees_added", 0),
+                        "followees_removed": week_data.get("followees_removed", 0),
                     },
                 }
             )
