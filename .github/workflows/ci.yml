@@ -54,6 +54,5 @@ jobs:
 
       - name: Run Python tests
         run: |
-          pip install pytest pytest-cov
-          pytest app/tests/ -v || echo "Tests failed (expected - test suite is new)"
-        continue-on-error: true
+          pip install -r app/requirements-dev.txt
+          pytest
