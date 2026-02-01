@@ -25,6 +25,11 @@ InstaLab is an operations console for Instagram snapshot runs (followers/followi
 4) Optional VNC login helper:
    - http://localhost:7900
 
+## Local with Postgres (optional)
+If you prefer Postgres instead of SQLite:
+- `docker compose -f docker-compose.local.yml -f docker-compose.local-postgres.yml up -d --build`
+- Or: `./scripts/local_postgres_up.sh`
+
 ## Environment and secrets
 - Secrets are not committed. Use `.env.example` as a template.
 - Runtime data (DB, cookies, job artifacts) should live outside the repo.

@@ -1,0 +1,45 @@
+services:
+  instalab-db:
+    image: postgres:16
+    container_name: instalab-db
+    environment:
+      POSTGRES_DB: instalab
+      POSTGRES_USER: instalab
+      POSTGRES_PASSWORD: instalab
+    volumes:
+      - instalab_pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U instalab -d instalab"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  instalab-api:
+    environment:
+      INSTALAB_DB_TYPE: postgres
+      INSTALAB_DB_HOST: instalab-db
+      INSTALAB_DB_PORT: 5432
+      INSTALAB_DB_NAME: instalab
+      INSTALAB_DB_USER: instalab
+      INSTALAB_DB_PASS: instalab
+    depends_on:
+      instalab-db:
+        condition: service_healthy
+
+  instalab-ui:
+    environment:
+      INSTALAB_DB_TYPE: postgres
+      INSTALAB_DB_HOST: instalab-db
+      INSTALAB_DB_PORT: 5432
+      INSTALAB_DB_NAME: instalab
+      INSTALAB_DB_USER: instalab
+      INSTALAB_DB_PASS: instalab
+    depends_on:
+      instalab-db:
+        condition: service_healthy
+
+volumes:
+  instalab_pg_data:
