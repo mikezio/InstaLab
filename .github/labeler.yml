@@ -1,0 +1,27 @@
+ui:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "app/ui_src/**"
+          - "app/django_app/templates/**"
+          - "app/django_app/static/**"
+backend:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "app/*.py"
+          - "app/scripts/**"
+          - "app/django_app/**"
+docker:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "Dockerfile"
+          - "docker-compose*.yml"
+          - "scripts/*.sh"
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "README.md"
+          - "**/*.md"
+infra:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
