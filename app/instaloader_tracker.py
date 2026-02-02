@@ -13,6 +13,12 @@ from tqdm import tqdm
 from proxy_utils import load_proxy_from_env
 
 
+def _apply_proxy(loader):
+    proxy = load_proxy_from_env()
+    if proxy:
+        loader.context._session.proxies.update({"http": proxy["url"], "https": proxy["url"]})
+
+
 def _ensure_session_dir():
     session_dir = os.path.expanduser("~/.config/instaloader")
     os.makedirs(session_dir, exist_ok=True)
@@ -100,10 +106,9 @@ def fetch_counts(
 ):
     tz = ZoneInfo("America/New_York")
     loader = instaloader.Instaloader(quiet=True, sleep=True, request_timeout=request_timeout)
-    proxy = load_proxy_from_env()
-    if proxy:
-        loader.context._session.proxies.update({"http": proxy["url"], "https": proxy["url"]})
+    _apply_proxy(loader)
     login_with_session(loader, login_username, login_password, cookie_file=cookie_file)
+    _apply_proxy(loader)
     profile = instaloader.Profile.from_username(loader.context, target_username)
     timestamp = datetime.now(tz).strftime("%Y-%m-%d_%H-%M-%S")
     return {
@@ -153,10 +158,9 @@ def snapshot_profile(
 ):
     tz = ZoneInfo("America/New_York")
     loader = instaloader.Instaloader(quiet=False, sleep=True, request_timeout=request_timeout)
-    proxy = load_proxy_from_env()
-    if proxy:
-        loader.context._session.proxies.update({"http": proxy["url"], "https": proxy["url"]})
+    _apply_proxy(loader)
     login_with_session(loader, login_username, login_password, cookie_file=cookie_file)
+    _apply_proxy(loader)
 
     print(f"Loading profile @{target_username}...")
     profile = instaloader.Profile.from_username(loader.context, target_username)
