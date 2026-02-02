@@ -917,6 +917,17 @@ def _apply_proxy_env(env: dict, *, session_id: str | None = None):
         env["INSTALAB_PROXY_USERNAME"] = proxy.get("username")
     if proxy.get("password"):
         env["INSTALAB_PROXY_PASSWORD"] = proxy.get("password")
+    host = proxy.get("host") or ""
+    port = proxy.get("port")
+    if host and port:
+        user = proxy.get("username") or ""
+        pwd = proxy.get("password") or ""
+        if user and pwd:
+            proxy_url = f"http://{user}:{pwd}@{host}:{int(port)}"
+        else:
+            proxy_url = f"http://{host}:{int(port)}"
+        env["HTTP_PROXY"] = proxy_url
+        env["HTTPS_PROXY"] = proxy_url
 
 
 def _proxy_test_url(provider: str) -> str:
