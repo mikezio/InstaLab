@@ -3046,8 +3046,6 @@ def api_run():
     login_username = data.get("login_username")
     target_username = data.get("target_username")
     two_factor_code = data.get("two_factor_code") or data.get("twoFactorCode")
-    rebuild = data.get("rebuild", True)
-    rebuild = bool(rebuild)
     if not login_username or not target_username:
         return jsonify({"error": "login_username and target_username are required"}), 400
     if _is_blocked_login(login_username):
