@@ -11,6 +11,7 @@ This document describes the Flask API endpoints available in InstaLab.
 ## Table of Contents
 
 - [Health & Status](#health--status)
+- [Run Lifecycle](#run-lifecycle)
 - [Runs](#runs)
 - [Jobs](#jobs)
 - [Targets](#targets)
@@ -22,6 +23,7 @@ This document describes the Flask API endpoints available in InstaLab.
 - [Configuration](#configuration)
 - [Schedules](#schedules)
 - [Import](#import)
+- [Error Responses](#error-responses)
 
 ---
 
@@ -47,7 +49,7 @@ Includes extra checks (sessions, scraper, runs, unfollow).
 
 ### GET `/api/status`
 
-Real‑time run status.
+Real‑time run status **for active jobs only**. Completed jobs are not listed here.
 
 **Response:**
 ```json
@@ -73,6 +75,23 @@ Real‑time run status.
   "unfollow": {"state": "idle"}
 }
 ```
+
+---
+
+## Run Lifecycle
+
+### Typical flow
+1. Add login (`/api/logins/add`) or ensure existing login has password/session.
+2. Start run (`/api/run`).
+3. If 2FA/challenge required, submit code via `/api/logins/challenge` or include `two_factor_code` / `challenge_code` in the run request.
+4. Poll `/api/run/<job_id>` until `done=true`.
+5. Use `/api/jobs/latest?login_username=...` for logs/trace tail.
+6. View run history via `/api/runs` and `/api/run/<run_id>`.
+
+### Locking behavior
+- Per‑login run lock: only one active run per login.
+- Per‑target run lock: only one active run per target.
+- If locked, API returns **429**.
 
 ---
 
@@ -164,6 +183,12 @@ Returns progress/result plus log tails.
 
 Returns the latest job for a login (progress/result/log tails + trace tail).
 
+**Response keys:**
+- `progress` – current phase/count
+- `result` – final success/error payload if finished
+- `worker_out_tail` / `worker_err_tail`
+- `trace_tail` – private API request/response trace (JSONL tail)
+
 ---
 
 ## Targets
@@ -187,6 +212,12 @@ Latest run per target plus overall latest run.
 ### GET `/api/logins`
 
 List available logins (masked fields only).
+
+**Fields include:**
+- `login_username`
+- `has_password`, `has_totp_seed`
+- `private_session_exists`, `private_session_mtime`
+- `last_login_at`, `last_error`
 
 ### POST `/api/logins/add`
 
@@ -290,11 +321,11 @@ High‑level totals and performance stats.
 
 ### GET `/api/config`
 
-Returns current config + defaults.
+Returns current config + defaults (masked for sensitive values).
 
 ### PUT `/api/config`
 
-Update config values (validates proxy settings when enabled).
+Update config values. If `proxy_enabled` is true, host/port/user/pass are required.
 
 ---
 
@@ -345,6 +376,8 @@ Bulk import follower/followee lists.
 **400:** `{"error": "..."}`
 
 **404:** `{"error": "not found"}`
+
+**429:** `{"error": "another run is already in progress for this login"}`
 
 **500:** `{"error": "..."}`
 
