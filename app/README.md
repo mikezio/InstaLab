@@ -3,8 +3,8 @@
 Single‑pane console for Instagram snapshot runs, scheduling, history, and cleanup actions.
 
 ## Components
-- **Flask API** (`server.py`): runs snapshots, schedules, unfollow cleanup, and provides the API.
-- **Django UI** (`django_app/`): modern dashboard that proxies `/api/*` to the Flask backend.
+- **Flask API** (`server.py`): runs snapshots (instagrapi private API), schedules, unfollow cleanup, and provides the API.
+- **Django UI** (`django_app/`): dashboard that proxies `/api/*` to the Flask backend.
 
 ## Quick start
 ```bash
@@ -29,5 +29,6 @@ API: http://127.0.0.1:5000/api
 
 ## Notes
 - Secrets are kept in `.env` (not committed). Use `.env.example` as a template.
-- Primary storage is Postgres (see `INSTALAB_DB_*` env vars in `.env.example`).
-- Settings are stored in the DB and editable via the **Settings** button in the UI.
+- Postgres only (see `INSTALAB_DB_*` env vars in `.env.example`).
+- Login sessions are stored in Postgres and cached under `/data/instalab/private`.
+- Settings live in the DB and are editable via the **Settings** button in the UI.
