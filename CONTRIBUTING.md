@@ -120,3 +120,6 @@ docker compose -f docker-compose.local.yml -f docker-compose.local-postgres.yml 
 - Use GitHub Issues for bugs
 - Use Discussions for questions
 - Security reports: see [SECURITY.md](SECURITY.md)
+
+## Architecture
+See [ARCHITECTURE.md](ARCHITECTURE.md) for system internals and run lifecycle.

@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - Accounts UI updates (challenge/TOTP/logs)
 - Runner safeguards (stall detection, login mode, throttling)
 - Proxy routing config (Decodo native)
+- Architecture doc with run lifecycle + internal flows
 
 ### Breaking Changes
 - SQLite backend removed (Postgres only)

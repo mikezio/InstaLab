@@ -73,6 +73,7 @@ If you already have Postgres running, set the `INSTALAB_DB_*` values in `.env` a
 
 ## Documentation
 - [API.md](API.md) – API endpoint documentation
+- [ARCHITECTURE.md](ARCHITECTURE.md) – System architecture and run lifecycle
 - [SECURITY.md](SECURITY.md) – Security considerations and deployment best practices
 - [CONTRIBUTING.md](CONTRIBUTING.md) – Guidelines for contributing to the project
 

@@ -243,6 +243,7 @@ Delete a login.
 ### POST `/api/logins/challenge`
 
 Store an SMS/email challenge code for the next run.
+Codes are consumed once and expire after ~2 minutes.
 
 ### POST `/api/logins/new-password`
 
