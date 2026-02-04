@@ -1,5 +1,6 @@
 import os
 from typing import Optional
+from urllib.parse import quote
 
 
 def _truthy(value: str | None) -> bool:
@@ -7,7 +8,12 @@ def _truthy(value: str | None) -> bool:
 
 
 def _normalize_host(host: str) -> str:
-    return (host or "").strip().rstrip("/")
+    host = (host or "").strip().rstrip("/")
+    if host.startswith("http://"):
+        host = host[7:]
+    elif host.startswith("https://"):
+        host = host[8:]
+    return host
 
 
 def build_proxy_server(host: str, port: int) -> str:
@@ -17,7 +23,9 @@ def build_proxy_server(host: str, port: int) -> str:
 def build_proxy_url(host: str, port: int, username: str | None = None, password: str | None = None) -> str:
     host = _normalize_host(host)
     if username and password:
-        return f"http://{username}:{password}@{host}:{int(port)}"
+        user_enc = quote(str(username), safe="")
+        pass_enc = quote(str(password), safe="")
+        return f"http://{user_enc}:{pass_enc}@{host}:{int(port)}"
     return f"http://{host}:{int(port)}"
 
 
@@ -25,23 +33,23 @@ def load_proxy_from_env() -> Optional[dict]:
     enabled = _truthy(os.getenv("INSTALAB_PROXY_ENABLED"))
     if not enabled:
         return None
+    access_mode = (os.getenv("INSTALAB_PROXY_ACCESS_MODE") or "native").strip().lower()
+    if access_mode != "native":
+        access_mode = "native"
     host = _normalize_host(os.getenv("INSTALAB_PROXY_HOST", ""))
-    port_raw = os.getenv("INSTALAB_PROXY_PORT", "33335")
+    port_raw = os.getenv("INSTALAB_PROXY_PORT", "7000")
     try:
         port = int(port_raw)
     except (TypeError, ValueError):
-        port = 33335
+        port = 7000
     if not host:
         return None
     username = (os.getenv("INSTALAB_PROXY_USERNAME") or "").strip()
     password = (os.getenv("INSTALAB_PROXY_PASSWORD") or "").strip()
-    provider = (os.getenv("INSTALAB_PROXY_PROVIDER") or "brightdata").strip().lower()
-    sticky = _truthy(os.getenv("INSTALAB_PROXY_STICKY"))
-    session_id = (os.getenv("INSTALAB_PROXY_SESSION") or "").strip()
-    if sticky and session_id and provider == "brightdata" and username and "session-" not in username:
-        username = f"{username}-session-{session_id}"
+    provider = (os.getenv("INSTALAB_PROXY_PROVIDER") or "decodo").strip().lower()
     return {
         "enabled": True,
+        "access_mode": access_mode,
         "provider": provider,
         "host": host,
         "port": port,

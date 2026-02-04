@@ -8,7 +8,7 @@ Single‑pane console for Instagram snapshot runs, scheduling, history, and clea
 
 ## Quick start
 ```bash
-cd /home/stremio/instaloader_data
+cd /srv/apps/instalab/app
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -29,5 +29,5 @@ API: http://127.0.0.1:5000/api
 
 ## Notes
 - Secrets are kept in `.env` (not committed). Use `.env.example` as a template.
-- SQLite data files and generated outputs are ignored via `.gitignore`.
+- Primary storage is Postgres (see `INSTALAB_DB_*` env vars in `.env.example`).
 - Settings are stored in the DB and editable via the **Settings** button in the UI.

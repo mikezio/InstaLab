@@ -122,12 +122,7 @@ location / {
 
 ## Database Security
 
-### SQLite (default)
-- **Location:** `INSTALAB_SQLITE_PATH` (default: `/data/instalab/instaloader.db`)
-- **Permissions:** Set to `600` (owner read/write only)
-- **Contains:** Follower lists, run history, credentials (if using config table)
-
-### PostgreSQL
+### PostgreSQL (default)
 - **Connection:** Uses `INSTALAB_DB_*` environment variables
 - **Network:** Ensure Postgres is not exposed to internet
 - **Credentials:** Use strong passwords, never commit connection strings

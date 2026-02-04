@@ -18,7 +18,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from proxy_utils import load_proxy_from_env
 
-from instaloader_tracker import write_run_metadata
+from instaloader_tracker import write_run_metadata, write_run_profile_counts
 
 
 BASE_URL = "https://www.instagram.com"
@@ -37,6 +37,7 @@ USERNAME_BLACKLIST = {
     "tv",
     "direct",
     "privacy",
+    "policy",
     "press",
     "login",
     "challenge",
@@ -69,8 +70,8 @@ def _parse_count(value: str | None):
 def _parse_counts_from_desc(desc: str | None):
     if not desc:
         return None, None
-    followers_match = re.search(r"([0-9.,]+[kmbKMB]?)\\s+Followers", desc)
-    following_match = re.search(r"([0-9.,]+[kmbKMB]?)\\s+Following", desc)
+    followers_match = re.search(r"([0-9.,]+[kmbKMB]?)\s+Followers", desc)
+    following_match = re.search(r"([0-9.,]+[kmbKMB]?)\s+Following", desc)
     followers = _parse_count(followers_match.group(1)) if followers_match else None
     following = _parse_count(following_match.group(1)) if following_match else None
     return followers, following
@@ -87,9 +88,32 @@ def _username_from_href(href: str | None):
     if len(parts) != 1:
         return None
     username = parts[0]
+    if not re.match(r"^[A-Za-z0-9._]{1,30}$", username):
+        return None
+    # Skip numeric-only tokens (often IDs or non-user links).
+    if username.isdigit():
+        return None
     if username.lower() in USERNAME_BLACKLIST:
         return None
     return username
+
+
+def _username_from_text(text: str | None):
+    if not text:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines[:2]:
+        token = line.lstrip("@").strip()
+        if not token:
+            continue
+        if not re.match(r"^[A-Za-z0-9._]{1,30}$", token):
+            continue
+        if token.isdigit():
+            continue
+        if token.lower() in USERNAME_BLACKLIST:
+            continue
+        return token
+    return None
 
 
 def _load_netscape_cookies(path: str):
@@ -113,17 +137,25 @@ def _load_netscape_cookies(path: str):
                 "domain": domain,
             }
             if expires.isdigit():
-                cookie["expiry"] = int(expires)
+                exp = int(expires)
+                if exp > 0:
+                    cookie["expiry"] = exp
             cookies.append(cookie)
     return cookies
 
 
 def _apply_cookies(driver, cookies):
     driver.get(BASE_URL + "/")
+    host = urlparse(driver.current_url).hostname or ""
     for cookie in cookies:
         cookie = cookie.copy()
-        if cookie.get("domain", "").startswith("."):
-            cookie["domain"] = cookie["domain"].lstrip(".")
+        domain = cookie.get("domain") or ""
+        if domain and not domain.startswith(".") and host and host.endswith(domain):
+            # Preserve subdomain coverage when cookie domain is root.
+            cookie["domain"] = f".{domain}"
+        elif domain and host and domain not in host:
+            # Fall back to current host to avoid invalid domain errors.
+            cookie["domain"] = host
         try:
             driver.add_cookie(cookie)
         except WebDriverException:
@@ -136,6 +168,14 @@ def _is_logged_in(driver):
     if "login" in url:
         return False
     if "challenge" in url or "checkpoint" in url:
+        return False
+    try:
+        page = driver.page_source or ""
+    except Exception:
+        page = ""
+    if "/accounts/login" in page or "/accounts/emailsignup" in page:
+        return False
+    if "Log in" in page and "Sign up" in page:
         return False
     if driver.find_elements(By.CSS_SELECTOR, "input[name='username']"):
         return False
@@ -187,12 +227,19 @@ def _ensure_logged_in(driver, login_username, login_password, cookie_file=None, 
         cookies = _load_netscape_cookies(cookie_file)
         if cookies:
             _apply_cookies(driver, cookies)
+            try:
+                driver.get(BASE_URL + "/accounts/edit/")
+                WebDriverWait(driver, 10).until(
+                    lambda d: d.execute_script("return document.readyState") == "complete"
+                )
+            except Exception:
+                pass
     if _is_logged_in(driver):
         return
     if "challenge" in (driver.current_url or "").lower():
         raise RuntimeError("login challenge detected; refresh cookies with a real browser session")
     if not login_password:
-        raise RuntimeError("missing RUN_LOGIN_PASSWORD (no session cookies loaded)")
+        raise RuntimeError("missing RUN_LOGIN_PASSWORD (cookies not authenticated)")
     _login(driver, login_username, login_password, two_factor_code=two_factor_code)
 
 
@@ -287,8 +334,21 @@ def _collect_usernames(
     item_delay_min=0.0,
     item_delay_max=0.0,
     cancel_check=None,
+    expected_min=None,
 ):
     dialog = _open_list(driver, kind)
+    try:
+        if dialog.find_elements(By.CSS_SELECTOR, "input[name='username'], input[name='password']"):
+            _dump_debug(driver, f"list_{kind}_login_prompt")
+            raise RuntimeError("login required; refresh cookies with a real browser session")
+        dialog_text = dialog.text or ""
+        if "Log in" in dialog_text and "Sign up" in dialog_text:
+            _dump_debug(driver, f"list_{kind}_login_prompt")
+            raise RuntimeError("login required; refresh cookies with a real browser session")
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
     scroll_box = _find_scroll_container(driver, dialog) or dialog
     seen = set()
     idle_rounds = 0
@@ -301,9 +361,20 @@ def _collect_usernames(
     while idle_rounds < 6:
         if cancel_check and cancel_check():
             raise RuntimeError("cancelled")
-        anchors = dialog.find_elements(By.CSS_SELECTOR, "a[href]")
+        anchors = dialog.find_elements(By.CSS_SELECTOR, "a")
         for anchor in anchors:
             username = _username_from_href(anchor.get_attribute("href"))
+            if not username:
+                username = _username_from_text(anchor.text)
+            if not username:
+                username = _username_from_text(anchor.get_attribute("title"))
+            if not username:
+                username = _username_from_text(anchor.get_attribute("aria-label"))
+            if username:
+                seen.add(username)
+        items = dialog.find_elements(By.CSS_SELECTOR, "li")
+        for item in items:
+            username = _username_from_text(item.text)
             if username:
                 seen.add(username)
         if progress:
@@ -324,6 +395,12 @@ def _collect_usernames(
         driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
     except Exception:
         pass
+    if not seen:
+        _dump_debug(driver, f"list_{kind}_empty")
+        if expected_min and expected_min > 0:
+            raise RuntimeError(
+                f"no {kind} collected despite profile count {expected_min}; likely not logged in"
+            )
     return sorted(seen)
 
 
@@ -448,6 +525,13 @@ def fetch_counts(
             two_factor_code=os.getenv("RUN_2FA_CODE") or os.getenv("INSTALAB_2FA_CODE"),
         )
         driver.get(PROFILE_URL.format(username=target_username))
+        try:
+            WebDriverWait(driver, 10).until(
+                lambda d: d.find_elements(By.CSS_SELECTOR, "meta[property='og:description']")
+                or d.find_elements(By.XPATH, "//a[contains(@href,'/followers')]/span")
+            )
+        except Exception:
+            pass
         if not _is_logged_in(driver):
             raise RuntimeError("login challenge detected after profile load; refresh cookies")
         followers, following = _get_counts(driver)
@@ -471,9 +555,26 @@ def snapshot_profile(
     db_path=None,
     cancel_check=None,
     progress=None,
+    profile_only=False,
+    login_mode="auto",
     item_delay_min=0.0,
     item_delay_max=0.0,
+    pause_every_min=0,
+    pause_every_max=0,
+    pause_seconds_min=0.0,
+    pause_seconds_max=0.0,
+    trace_enabled=False,
+    trace_path=None,
 ):
+    _ = (
+        login_mode,
+        pause_every_min,
+        pause_every_max,
+        pause_seconds_min,
+        pause_seconds_max,
+        trace_enabled,
+        trace_path,
+    )
     tz = ZoneInfo("America/New_York")
     with _driver(request_timeout=request_timeout) as driver:
         _ensure_logged_in(
@@ -484,6 +585,13 @@ def snapshot_profile(
             two_factor_code=os.getenv("RUN_2FA_CODE") or os.getenv("INSTALAB_2FA_CODE"),
         )
         driver.get(PROFILE_URL.format(username=target_username))
+        try:
+            WebDriverWait(driver, 10).until(
+                lambda d: d.find_elements(By.CSS_SELECTOR, "meta[property='og:description']")
+                or d.find_elements(By.XPATH, "//a[contains(@href,'/followers')]/span")
+            )
+        except Exception:
+            pass
         if not _is_logged_in(driver):
             raise RuntimeError("login challenge detected after profile load; refresh cookies")
         followers_total, following_total = _get_counts(driver)
@@ -492,6 +600,32 @@ def snapshot_profile(
                 progress("totals", {"followers_total": followers_total, "following_total": following_total})
             except Exception:
                 pass
+
+        if profile_only:
+            timestamp = datetime.now(tz).strftime("%Y-%m-%d_%H-%M-%S")
+            changes = None
+            run_id = None
+            if db_path:
+                changes, run_id = write_run_profile_counts(
+                    db_path=db_path,
+                    login_username=login_username,
+                    target_username=target_username,
+                    timestamp=timestamp,
+                    followers_count=int(followers_total or 0),
+                    followees_count=int(following_total or 0),
+                )
+            return {
+                "timestamp": timestamp,
+                "followers_count": int(followers_total or 0),
+                "followees_count": int(following_total or 0),
+                "changes": changes,
+                "run_id": run_id,
+                "non_followbacks": [],
+                "followers_fetch_seconds": 0,
+                "followees_fetch_seconds": 0,
+                "followers_rate": None,
+                "followees_rate": None,
+            }
 
         if cancel_check and cancel_check():
             raise RuntimeError("cancelled")
@@ -508,6 +642,7 @@ def snapshot_profile(
             progress=(lambda c: progress("followers", c)) if progress else None,
             item_delay_min=item_delay_min,
             item_delay_max=item_delay_max,
+            expected_min=followers_total,
         )
         followers_fetch_seconds = int(time.time() - t0)
 
@@ -526,6 +661,7 @@ def snapshot_profile(
             progress=(lambda c: progress("following", c)) if progress else None,
             item_delay_min=item_delay_min,
             item_delay_max=item_delay_max,
+            expected_min=following_total,
         )
         followees_fetch_seconds = int(time.time() - t1)
 

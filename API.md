@@ -32,7 +32,7 @@ System health check endpoint.
 ```json
 {
   "status": "ok",
-  "db_type": "sqlite",
+  "db_type": "postgres",
   "db_connected": true,
   "scheduler_running": true,
   "active_jobs": 0,
@@ -74,7 +74,7 @@ Queue a new snapshot run.
 {
   "target": "target_username",
   "login": "login_username",
-  "scraper_backend": "instaloader"  // optional: "instaloader" or "selenium"
+  "scraper_backend": "private"  // optional, defaults to private API
 }
 ```
 

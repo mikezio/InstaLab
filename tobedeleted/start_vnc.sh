@@ -7,13 +7,28 @@ VNC_PORT="${VNC_PORT:-5900}"
 NOVNC_PORT="${NOVNC_PORT:-7900}"
 
 export DISPLAY=":${DISPLAY_NUM}"
+export TZ="${TZ:-America/New_York}"
 
 # Ensure X11 socket dir exists (Xvfb won't create it when non-root).
 mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix
 
+LOCK_FILE="/tmp/.X${DISPLAY_NUM}-lock"
+SOCKET_FILE="/tmp/.X11-unix/X${DISPLAY_NUM}"
+if [ -f "${LOCK_FILE}" ]; then
+  pid="$(cat "${LOCK_FILE}" 2>/dev/null || true)"
+  if [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1; then
+    echo "Xvfb already running on display ${DISPLAY} (pid ${pid}); skipping cleanup"
+  else
+    rm -f "${LOCK_FILE}" "${SOCKET_FILE}"
+  fi
+fi
+
 Xvfb "${DISPLAY}" -screen 0 "${SCREEN_RES}" -ac +extension RANDR &
-sleep 0.5
+for i in {1..20}; do
+  [ -S "${SOCKET_FILE}" ] && break
+  sleep 0.2
+done
 
 fluxbox >/tmp/fluxbox.log 2>&1 &
 

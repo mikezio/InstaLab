@@ -132,7 +132,7 @@ Currently, the project has minimal test coverage. We welcome contributions to im
 **Python smoke test:**
 ```bash
 cd app
-python -c "import server; import instaloader_tracker; print('ok')"
+python -c "import server; import private_api_tracker; print('ok')"
 ```
 
 **UI build test:**
@@ -148,7 +148,7 @@ When adding new features:
 1. **Write unit tests** for core logic
 2. **Write integration tests** for API endpoints
 3. **Test error cases** and edge conditions
-4. **Test with both SQLite and PostgreSQL** (if database-related)
+4. **Test with PostgreSQL** (if database-related)
 
 Example test structure (future):
 ```python

@@ -34,7 +34,179 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;700&family=Manrope:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="{% static 'ui.css' %}">
+  <style>
+    :root {
+      --atlas-ink: #1f1a17;
+      --atlas-muted: #7b6b5f;
+      --atlas-paper: #f8f3ec;
+      --atlas-paper-2: #fff9f1;
+      --atlas-accent: #b3542e;
+      --atlas-accent-2: #e7b74c;
+      --atlas-line: rgba(31, 26, 23, 0.12);
+      --atlas-shadow: 0 30px 80px rgba(31, 26, 23, 0.18);
+    }
+    #config-modal .modal-card.luxe,
+    #accounts-modal .modal-card.luxe {
+      font-family: "Manrope", system-ui, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(231, 183, 76, 0.12), transparent 45%),
+        linear-gradient(160deg, rgba(179, 84, 46, 0.08), transparent 60%),
+        var(--atlas-paper);
+      border: 1px solid var(--atlas-line);
+      box-shadow: var(--atlas-shadow);
+      color: var(--atlas-ink);
+    }
+    #config-modal h3,
+    #accounts-modal h3,
+    #config-modal h4,
+    #accounts-modal h4 {
+      font-family: "Fraunces", serif;
+      letter-spacing: -0.01em;
+    }
+    .config-hero {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--atlas-line);
+    }
+    .config-kicker {
+      text-transform: uppercase;
+      letter-spacing: 0.35em;
+      font-size: 0.6rem;
+      color: var(--atlas-muted);
+      font-weight: 600;
+    }
+    .config-sub {
+      color: var(--atlas-muted);
+      font-size: 0.9rem;
+      margin-top: 0.3rem;
+    }
+    .config-hero-actions {
+      display: flex;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .config-shell,
+    .accounts-shell {
+      display: grid;
+      gap: 1.5rem;
+      margin-top: 1.5rem;
+    }
+    @media (min-width: 1024px) {
+      .config-shell {
+        grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+      }
+      .accounts-shell {
+        grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+      }
+    }
+    .config-card {
+      background: rgba(255, 255, 255, 0.7);
+      border: 1px solid var(--atlas-line);
+      border-radius: 18px;
+      padding: 1rem;
+      box-shadow: inset 0 0 0 1px rgba(31, 26, 23, 0.04);
+    }
+    .config-card h4 {
+      margin-bottom: 0.75rem;
+    }
+    .logtail-label {
+      margin-top: 0.75rem;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--atlas-muted);
+    }
+    .logtail {
+      margin-top: 0.4rem;
+      background:
+        linear-gradient(180deg, rgba(255, 250, 242, 0.98), rgba(242, 232, 220, 0.96));
+      color: var(--atlas-ink);
+      border-radius: 12px;
+      padding: 0.75rem;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.72rem;
+      line-height: 1.45;
+      max-height: 200px;
+      overflow: auto;
+      white-space: pre-wrap;
+      border: 1px solid var(--atlas-line);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 10px 30px rgba(31, 26, 23, 0.08);
+    }
+    .config-grid {
+      display: grid;
+      gap: 0.75rem;
+    }
+    @media (min-width: 768px) {
+      .config-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+    .config-card label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--atlas-muted);
+      font-weight: 600;
+    }
+    #config-modal input,
+    #config-modal select,
+    #config-modal textarea,
+    #accounts-modal input,
+    #accounts-modal select {
+      width: 100%;
+      background: var(--atlas-paper-2);
+      border: 1px solid var(--atlas-line);
+      border-radius: 12px;
+      padding: 0.55rem 0.7rem;
+    }
+    .config-help {
+      color: var(--atlas-muted);
+      font-size: 0.75rem;
+      margin-top: 0.35rem;
+    }
+    .proxy-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 1rem;
+      margin-bottom: 0.75rem;
+    }
+    .proxy-actions {
+      margin-top: 0.8rem;
+      display: flex;
+      gap: 0.8rem;
+      align-items: center;
+    }
+    .accounts-list .account-row {
+      display: grid;
+      gap: 0.75rem;
+      padding: 0.75rem;
+      border-radius: 14px;
+      border: 1px solid rgba(31, 26, 23, 0.08);
+      background: rgba(255, 255, 255, 0.6);
+    }
+    .accounts-list .account-row + .account-row {
+      margin-top: 0.75rem;
+    }
+    .accounts-list .account-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    .accounts-hero .config-kicker {
+      color: rgba(179, 84, 46, 0.7);
+    }
+    .section-head p {
+      margin-top: 0.25rem;
+    }
+  </style>
 
 </head>
 <body>
@@ -602,208 +774,398 @@
     </div>
   </div>
 
-  <div id="config-modal" class="modal">
-    <div class="modal-card">
+  <div id="challenge-modal" class="modal">
+    <div class="modal-card" style="max-width: 520px;">
       <div class="row" style="justify-content: space-between; align-items: center;">
+        <strong>Challenge code required</strong>
+        <button class="secondary" id="close-challenge">Close</button>
+      </div>
+      <p class="muted" id="challenge-subtext" style="margin-top: 8px;">
+        Enter the SMS/email code for <strong id="challenge-login">this login</strong> to continue the run.
+      </p>
+      <div class="form-grid" style="margin-top: 12px;">
         <div>
-          <h3 style="margin: 0;">Configuration</h3>
-          <p class="muted" style="margin: 2px 0 0;">Tune defaults, safeguards, and display preferences.</p>
+          <label for="challenge-code">Challenge code</label>
+          <input id="challenge-code" placeholder="123456" autocomplete="one-time-code">
         </div>
-        <button class="secondary" id="close-config">Close</button>
+        <div class="field-action">
+          <button id="challenge-submit">Continue</button>
+        </div>
       </div>
-      <div class="divider"></div>
-      <div class="config-grid">
-        <div class="card config-section">
-          <h4>Runner safeguards</h4>
-          <label for="cfg-run-stall">Stall timeout (sec)</label>
-          <input id="cfg-run-stall" type="number" min="60" max="21600">
-          <div class="config-help">Cancel a run if no progress is detected.</div>
-          <label for="cfg-run-max">Max run duration (sec)</label>
-          <input id="cfg-run-max" type="number" min="600" max="43200">
-          <div class="config-help">Hard stop for any single snapshot run.</div>
-          <label for="cfg-run-request">Request timeout (sec)</label>
-          <input id="cfg-run-request" type="number" min="10" max="3600">
-          <div class="config-help">Network timeout while fetching data.</div>
-          <label for="cfg-run-delay-min">Per-account delay min (sec)</label>
-          <input id="cfg-run-delay-min" type="number" min="0" max="5" step="0.05">
-          <label for="cfg-run-delay-max">Per-account delay max (sec)</label>
-          <input id="cfg-run-delay-max" type="number" min="0" max="5" step="0.05">
-          <div class="config-help">Adds jitter between account fetches to reduce rate-limit pressure.</div>
+      <div class="config-help">Use this when Instagram sends a verification code via email or SMS.</div>
+    </div>
+  </div>
+
+    <div id="config-modal" class="modal">
+    <div class="modal-card luxe">
+      <div class="config-hero">
+        <div>
+          <div class="config-kicker">Private API Control</div>
+          <h3>Command Settings</h3>
+          <p class="config-sub">Tune run behavior, pacing, safety rails, and infrastructure defaults.</p>
         </div>
-        <div class="card config-section">
-          <h4>Unfollow defaults</h4>
-          <label for="cfg-unfollow-max">Max unfollows per run</label>
-          <input id="cfg-unfollow-max" type="number" min="1" max="500">
-          <label for="cfg-unfollow-delay-min">Delay min (sec)</label>
-          <input id="cfg-unfollow-delay-min" type="number" min="1" max="600">
-          <label for="cfg-unfollow-delay-max">Delay max (sec)</label>
-          <input id="cfg-unfollow-delay-max" type="number" min="1" max="900">
-          <label for="cfg-unfollow-dry">Default mode</label>
-          <select id="cfg-unfollow-dry">
-            <option value="false">Unfollow</option>
-            <option value="true">Preview only</option>
-          </select>
-          <div class="config-help">Used when you hit Clean no-follow-back.</div>
+        <div class="config-hero-actions">
+          <button class="secondary" id="cfg-reset">Reset to defaults</button>
+          <button id="cfg-save">Save changes</button>
+          <button class="ghost-btn" id="close-config">Close</button>
         </div>
-        <div class="card config-section">
-          <h4>Schedule defaults</h4>
-          <label for="cfg-sch-frequency">Frequency</label>
-          <select id="cfg-sch-frequency">
-            <option value="once_daily">Once daily</option>
-            <option value="twice_daily">Twice daily</option>
-            <option value="every_other_day">Every other day</option>
-            <option value="weekly">Weekly</option>
-          </select>
-          <label for="cfg-sch-time1">Time</label>
-          <input id="cfg-sch-time1" type="time">
-          <label for="cfg-sch-time2">Second time</label>
-          <input id="cfg-sch-time2" type="time">
-          <label for="cfg-sch-weekday">Day of week</label>
-          <select id="cfg-sch-weekday">
-            <option value="0">Sunday</option>
-            <option value="1">Monday</option>
-            <option value="2">Tuesday</option>
-            <option value="3">Wednesday</option>
-            <option value="4">Thursday</option>
-            <option value="5">Friday</option>
-            <option value="6">Saturday</option>
-          </select>
-          <div class="config-help">Applied when you open the schedule builder.</div>
-        </div>
-        <div class="card config-section">
-          <h4>Display</h4>
-          <label for="cfg-ui-timezone">UI timezone</label>
-          <input id="cfg-ui-timezone" placeholder="America/New_York">
-          <div class="config-help">Formatting in the UI only. Server runs stay in ET.</div>
-        </div>
-        <div class="card config-section">
-          <h4>Monitoring</h4>
-          <label for="cfg-monitor-enabled">Auto monitor</label>
-          <select id="cfg-monitor-enabled">
-            <option value="true">Enabled</option>
-            <option value="false">Disabled</option>
-          </select>
-          <label for="cfg-monitor-interval">Check interval (min)</label>
-          <input id="cfg-monitor-interval" type="number" min="30" max="720">
-          <label for="cfg-monitor-threshold">Trigger threshold (accounts)</label>
-          <input id="cfg-monitor-threshold" type="number" min="1" max="200">
-          <label for="cfg-monitor-gap">Min gap between full runs (min)</label>
-          <input id="cfg-monitor-gap" type="number" min="60" max="1440">
-          <label for="cfg-monitor-login">Monitor login</label>
-          <select id="cfg-monitor-login"></select>
-          <div class="config-help">Checks counts and triggers a full run on meaningful change.</div>
-        </div>
-        <div class="card config-section config-proxy">
-          <div class="proxy-header">
-            <div>
-              <h4>Proxy routing</h4>
-              <div class="config-help">Route all job traffic through Bright Data residential proxies.</div>
+      </div>
+      <div class="config-shell">
+        <section class="config-column">
+          <div class="config-card">
+            <h4>Run behavior</h4>
+            <div class="config-grid">
+              <div>
+                <label for="cfg-run-stall">Stall timeout (sec)</label>
+                <input id="cfg-run-stall" type="number" min="60" max="21600">
+                <div class="config-help">Cancel a run if no progress is detected.</div>
+              </div>
+              <div>
+                <label for="cfg-run-max">Max run duration (sec)</label>
+                <input id="cfg-run-max" type="number" min="600" max="43200">
+                <div class="config-help">Hard stop for any single snapshot run.</div>
+              </div>
+              <div>
+                <label for="cfg-run-request">Request timeout (sec)</label>
+                <input id="cfg-run-request" type="number" min="10" max="3600">
+                <div class="config-help">Network timeout while fetching data.</div>
+              </div>
+              <div>
+                <label for="cfg-run-delay-min">Per-account delay min (sec)</label>
+                <input id="cfg-run-delay-min" type="number" min="0" max="10" step="0.1">
+              </div>
+              <div>
+                <label for="cfg-run-delay-max">Per-account delay max (sec)</label>
+                <input id="cfg-run-delay-max" type="number" min="0" max="10" step="0.1">
+                <div class="config-help">Use 0 for fastest collection; add jitter if throttling.</div>
+              </div>
+              <div>
+                <label for="cfg-run-pause-every-min">Pause every min (items)</label>
+                <input id="cfg-run-pause-every-min" type="number" min="0" max="1000" step="1">
+              </div>
+              <div>
+                <label for="cfg-run-pause-every-max">Pause every max (items)</label>
+                <input id="cfg-run-pause-every-max" type="number" min="0" max="1000" step="1">
+              </div>
+              <div>
+                <label for="cfg-run-pause-seconds-min">Pause seconds min</label>
+                <input id="cfg-run-pause-seconds-min" type="number" min="0" max="300" step="0.5">
+              </div>
+              <div>
+                <label for="cfg-run-pause-seconds-max">Pause seconds max</label>
+                <input id="cfg-run-pause-seconds-max" type="number" min="0" max="300" step="0.5">
+                <div class="config-help">Longer pauses after N items to avoid spikes.</div>
+              </div>
             </div>
-            <span class="proxy-badge off" id="cfg-proxy-status">Proxy off</span>
           </div>
-          <label for="cfg-proxy-enabled">Proxy</label>
-          <select id="cfg-proxy-enabled">
-            <option value="true">Enabled</option>
-            <option value="false">Disabled</option>
-          </select>
-          <label for="cfg-proxy-provider">Provider</label>
-          <select id="cfg-proxy-provider">
-            <option value="brightdata">Bright Data (Residential)</option>
-          </select>
-          <label for="cfg-proxy-host">Proxy host</label>
-          <input id="cfg-proxy-host" type="text" placeholder="brd.superproxy.io">
-          <label for="cfg-proxy-port">Proxy port</label>
-          <input id="cfg-proxy-port" type="number" min="1" max="65535" placeholder="33335">
-          <label for="cfg-proxy-username">Username</label>
-          <input id="cfg-proxy-username" type="text" placeholder="brd-customer-...-zone-...">
-          <label for="cfg-proxy-password">Password</label>
-          <input id="cfg-proxy-password" type="password" placeholder="not set">
-          <label for="cfg-proxy-api-key">API key (optional)</label>
-          <input id="cfg-proxy-api-key" type="password" placeholder="optional">
-          <label for="cfg-proxy-sticky">Sticky session</label>
-          <select id="cfg-proxy-sticky">
-            <option value="true">Per run (recommended)</option>
-            <option value="false">Rotate per request</option>
-          </select>
-          <div class="config-help">Native proxying needs the zone username + password. API key is for Bright Data API access.</div>
-          <div class="proxy-actions">
-            <button class="secondary" id="cfg-proxy-test">Test proxy</button>
-            <div class="proxy-test-status" id="cfg-proxy-test-status">No proxy test yet.</div>
+          <div class="config-card">
+            <h4>Private session strategy</h4>
+            <div class="config-grid">
+              <div>
+                <label for="cfg-run-profile-only">Profile-only mode</label>
+                <select id="cfg-run-profile-only">
+                  <option value="false">Disabled (full lists)</option>
+                  <option value="true">Enabled (counts only)</option>
+                </select>
+                <div class="config-help">Keep disabled to collect full followers/following lists.</div>
+              </div>
+              <div>
+                <label for="cfg-run-login-mode">Login strategy</label>
+                <select id="cfg-run-login-mode">
+                  <option value="auto">Auto (reuse session, fallback to password)</option>
+                  <option value="session_only">Session only (no password prompt)</option>
+                  <option value="password">Password only (force fresh login)</option>
+                </select>
+                <div class="config-help">Private API uses a cached session file after the first successful run.</div>
+                <div class="config-help">Use Password only to force a new device login when no prompt appears.</div>
+              </div>
+              <div>
+                <label for="cfg-run-trace-enabled">Trace API timing</label>
+                <select id="cfg-run-trace-enabled">
+                  <option value="false">Disabled</option>
+                  <option value="true">Enabled</option>
+                </select>
+                <div class="config-help">Writes trace.jsonl inside each job folder.</div>
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
-      <div class="config-actions">
-        <button class="secondary" id="cfg-reset">Reset to defaults</button>
-        <button id="cfg-save">Save changes</button>
+          <div class="config-card">
+            <h4>Private API device profile</h4>
+            <div class="config-grid">
+              <div class="col-span-12">
+                <label for="cfg-private-device-settings">Device settings (JSON)</label>
+                <textarea id="cfg-private-device-settings" rows="5" placeholder='{"app_version":"414.0.0.40.83","android_version":28,"android_release":"9"}'></textarea>
+                <div class="config-help">Leave blank to use the built-in modern Android profile.</div>
+              </div>
+              <div class="col-span-12">
+                <label for="cfg-private-user-agent">User agent override (optional)</label>
+                <input id="cfg-private-user-agent" type="text" placeholder="Leave blank to auto-generate from device settings">
+                <div class="config-help">Advanced: override the generated app user-agent only if required.</div>
+              </div>
+            </div>
+          </div>
+          <div class="config-card">
+            <h4>Unfollow defaults</h4>
+            <div class="config-grid">
+              <div>
+                <label for="cfg-unfollow-max">Max unfollows per run</label>
+                <input id="cfg-unfollow-max" type="number" min="1" max="500">
+              </div>
+              <div>
+                <label for="cfg-unfollow-delay-min">Delay min (sec)</label>
+                <input id="cfg-unfollow-delay-min" type="number" min="1" max="600">
+              </div>
+              <div>
+                <label for="cfg-unfollow-delay-max">Delay max (sec)</label>
+                <input id="cfg-unfollow-delay-max" type="number" min="1" max="900">
+              </div>
+              <div>
+                <label for="cfg-unfollow-dry">Default mode</label>
+                <select id="cfg-unfollow-dry">
+                  <option value="false">Unfollow</option>
+                  <option value="true">Preview only</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="config-column">
+          <div class="config-card config-proxy">
+            <div class="proxy-header">
+              <div>
+                <h4>Proxy routing</h4>
+                <div class="config-help">Route all job traffic through Decodo proxies.</div>
+              </div>
+              <span class="proxy-badge off" id="cfg-proxy-status">Proxy off</span>
+            </div>
+            <div class="config-grid">
+              <div>
+                <label for="cfg-proxy-enabled">Proxy</label>
+                <select id="cfg-proxy-enabled">
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </div>
+              <div>
+                <label for="cfg-proxy-provider">Provider</label>
+                <select id="cfg-proxy-provider">
+                  <option value="decodo">Decodo</option>
+                </select>
+              </div>
+              <div>
+                <label for="cfg-proxy-access">Access mode</label>
+                <select id="cfg-proxy-access">
+                  <option value="native">Native proxy</option>
+                </select>
+              </div>
+              <div>
+                <label for="cfg-proxy-host">Proxy host</label>
+                <input id="cfg-proxy-host" type="text" placeholder="gate.decodo.com">
+              </div>
+              <div>
+                <label for="cfg-proxy-port">Proxy port</label>
+                <input id="cfg-proxy-port" type="number" min="1" max="65535" placeholder="7000">
+              </div>
+              <div>
+                <label for="cfg-proxy-username">Username</label>
+                <input id="cfg-proxy-username" type="text" placeholder="user-...">
+              </div>
+              <div>
+                <label for="cfg-proxy-password">Password</label>
+                <input id="cfg-proxy-password" type="password" placeholder="not set">
+              </div>
+            </div>
+            <div class="proxy-actions">
+              <button class="secondary" id="cfg-proxy-test">Test proxy</button>
+              <div class="proxy-test-status" id="cfg-proxy-test-status">No proxy test yet.</div>
+            </div>
+          </div>
+          <div class="config-card">
+            <h4>Monitoring</h4>
+            <div class="config-grid">
+              <div>
+                <label for="cfg-monitor-enabled">Auto monitor</label>
+                <select id="cfg-monitor-enabled">
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </div>
+              <div>
+                <label for="cfg-monitor-interval">Check interval (min)</label>
+                <input id="cfg-monitor-interval" type="number" min="30" max="720">
+              </div>
+              <div>
+                <label for="cfg-monitor-threshold">Trigger threshold (accounts)</label>
+                <input id="cfg-monitor-threshold" type="number" min="1" max="200">
+              </div>
+              <div>
+                <label for="cfg-monitor-gap">Min gap between full runs (min)</label>
+                <input id="cfg-monitor-gap" type="number" min="60" max="1440">
+              </div>
+              <div>
+                <label for="cfg-monitor-login">Monitor login</label>
+                <select id="cfg-monitor-login"></select>
+              </div>
+            </div>
+          </div>
+          <div class="config-card">
+            <h4>Schedule defaults</h4>
+            <div class="config-grid">
+              <div>
+                <label for="cfg-sch-frequency">Frequency</label>
+                <select id="cfg-sch-frequency">
+                  <option value="once_daily">Once daily</option>
+                  <option value="twice_daily">Twice daily</option>
+                  <option value="every_other_day">Every other day</option>
+                  <option value="weekly">Weekly</option>
+                </select>
+              </div>
+              <div>
+                <label for="cfg-sch-time1">Time</label>
+                <input id="cfg-sch-time1" type="time">
+              </div>
+              <div>
+                <label for="cfg-sch-time2">Second time</label>
+                <input id="cfg-sch-time2" type="time">
+              </div>
+              <div>
+                <label for="cfg-sch-weekday">Day of week</label>
+                <select id="cfg-sch-weekday">
+                  <option value="0">Sunday</option>
+                  <option value="1">Monday</option>
+                  <option value="2">Tuesday</option>
+                  <option value="3">Wednesday</option>
+                  <option value="4">Thursday</option>
+                  <option value="5">Friday</option>
+                  <option value="6">Saturday</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="config-card">
+            <h4>Display</h4>
+            <div class="config-grid">
+              <div>
+                <label for="cfg-ui-timezone">UI timezone</label>
+                <input id="cfg-ui-timezone" placeholder="America/New_York">
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   </div>
 
-  <div id="accounts-modal" class="modal">
-    <div class="modal-card wide">
-      <div class="row" style="justify-content: space-between; align-items: center;">
+
+    <div id="accounts-modal" class="modal">
+    <div class="modal-card luxe wide">
+      <div class="config-hero accounts-hero">
         <div>
-          <h3 style="margin: 0;">Account manager</h3>
-          <p class="muted" style="margin: 2px 0 0;">Add, reset, or remove collector logins.</p>
+          <div class="config-kicker">Collector Logins</div>
+          <h3>Account Vault</h3>
+          <p class="config-sub">Private API only. Sessions are cached after a successful run.</p>
         </div>
-        <div class="row" style="gap: 8px;">
+        <div class="config-hero-actions">
           <button class="secondary" id="accounts-refresh">Refresh</button>
-          <button class="secondary" id="close-accounts">Close</button>
+          <button class="ghost-btn" id="close-accounts">Close</button>
         </div>
       </div>
-      <div class="divider"></div>
-      <div class="accounts-grid">
-        <div class="card">
-          <div class="panel-header">
-            <div>
-              <h3>Accounts</h3>
-              <p class="muted">Session state + source (env or file).</p>
+      <div class="accounts-shell">
+        <section class="accounts-column">
+          <div class="config-card">
+            <div class="section-head">
+              <h4>Active logins</h4>
+              <p class="config-help">Session state + source (env or file).</p>
             </div>
+            <div class="accounts-list" id="accounts-list"></div>
+            <div class="config-help">Deleting an env-based login hides it from the UI. Re-add to restore.</div>
           </div>
-          <div class="rail-sessions" id="accounts-list"></div>
-          <div class="config-help">Deleting an env-based login hides it from the UI. Re-add to restore.</div>
-        </div>
-        <div class="card">
-          <div class="panel-header">
-            <div>
-              <h3>Add account</h3>
-              <p class="muted">Passwords are scrubbed once a session is saved.</p>
-            </div>
+        </section>
+        <section class="accounts-column">
+          <div class="config-card">
+            <h4>Add / update login</h4>
+            <form id="acct-add-form" onsubmit="return false;">
+              <label for="acct-new-login-username">Username</label>
+              <input id="acct-new-login-username" type="text" placeholder="instagram_username" autocomplete="username">
+              <label for="acct-new-login-password">Password</label>
+              <input id="acct-new-login-password" type="password" placeholder="password" autocomplete="current-password">
+              <div class="row" style="gap: 8px; margin-top: 12px;">
+                <button type="button" class="secondary" id="acct-add-login">Add / update account</button>
+              </div>
+            </form>
+            <div class="config-help">Use this to add new accounts or refresh a password.</div>
           </div>
-          <form id="acct-add-form" onsubmit="return false;">
-            <label for="acct-new-login-username">Username</label>
-            <input id="acct-new-login-username" type="text" placeholder="instagram_username" autocomplete="username">
-            <label for="acct-new-login-password">Password</label>
-            <input id="acct-new-login-password" type="password" placeholder="password" autocomplete="current-password">
-            <label for="acct-new-login-cookie">Cookie filename (optional)</label>
-            <input id="acct-new-login-cookie" type="text" placeholder="cookies_<username>.txt">
-            <div class="row" style="gap: 8px; margin-top: 8px;">
-              <button type="button" class="secondary" id="acct-add-login">Add / update account</button>
-            </div>
-          </form>
-          <div class="config-help">Use this to add new accounts or reauthorize after a reset.</div>
-        </div>
-        <div class="card login-launch">
-          <div class="panel-header">
-            <div>
-              <h3>Browser login</h3>
-              <p class="muted">Launch VNC login and capture cookies automatically.</p>
-            </div>
+          <div class="config-card">
+            <h4>TOTP / 2FA</h4>
+            <form id="totp-form" onsubmit="return false;">
+              <label for="totp-login">Login</label>
+              <select id="totp-login"></select>
+              <label for="totp-seed">Seed (from Instagram)</label>
+              <input id="totp-seed" type="text" placeholder="Base32 seed">
+              <label for="totp-verify">Verification code</label>
+              <input id="totp-verify" type="text" placeholder="123456" autocomplete="one-time-code">
+              <div class="row" style="gap: 8px; margin-top: 12px;">
+                <button type="button" class="secondary" id="totp-generate">Generate seed</button>
+                <button type="button" id="totp-enable">Enable TOTP</button>
+                <button type="button" class="secondary" id="totp-disable">Disable</button>
+              </div>
+            </form>
+            <div class="config-help">Seeds are stored in Postgres (encrypted) and used automatically for future logins.</div>
           </div>
-          <div class="login-launch-grid">
-            <label for="launch-login-username">Instagram username</label>
-            <input id="launch-login-username" type="text" placeholder="chasingthecolor">
-            <div class="launch-actions">
-              <button type="button" class="secondary" id="launch-login-btn">Launch VNC login</button>
-              <button type="button" class="secondary" id="finish-login-btn">I finished login</button>
-            </div>
-            <div class="login-launch-status" id="launch-login-status">No login session running.</div>
-            <div class="config-help">Open <span class="mono">http://192.168.4.30:7900/</span> in your browser to complete the login.</div>
+          <div class="config-card">
+            <h4>Challenge code (SMS/email)</h4>
+            <form id="challenge-form" onsubmit="return false;">
+              <label for="challenge-login-select">Login</label>
+              <select id="challenge-login-select"></select>
+              <label for="challenge-code-input">Code</label>
+              <input id="challenge-code-input" type="text" placeholder="123456" autocomplete="one-time-code">
+              <div class="row" style="gap: 8px; margin-top: 12px;">
+                <button type="button" id="challenge-save">Save code</button>
+              </div>
+            </form>
+            <div class="config-help">If a run hits a challenge, enter the code here and retry the run.</div>
           </div>
-        </div>
+          <div class="config-card">
+            <h4>Latest worker logs</h4>
+            <form id="logtail-form" onsubmit="return false;">
+              <label for="logtail-login">Login</label>
+              <select id="logtail-login"></select>
+              <div class="row" style="gap: 8px; margin-top: 12px;">
+                <button type="button" class="secondary" id="logtail-refresh">Fetch logs</button>
+              </div>
+            </form>
+            <div class="logtail-label">Worker out</div>
+            <pre id="logtail-out" class="logtail"></pre>
+            <div class="logtail-label">Worker err</div>
+            <pre id="logtail-err" class="logtail"></pre>
+            <div class="logtail-label">Trace (API request/response)</div>
+            <pre id="logtail-trace" class="logtail"></pre>
+            <div class="config-help">Shows the latest worker output plus request/response trace for this login.</div>
+          </div>
+          <div class="config-card">
+            <h4>Password reset</h4>
+            <form id="pwdreset-form" onsubmit="return false;">
+              <label for="pwdreset-login">Login</label>
+              <select id="pwdreset-login"></select>
+              <label for="pwdreset-password">New password</label>
+              <input id="pwdreset-password" type="password" placeholder="New password">
+              <div class="row" style="gap: 8px; margin-top: 12px;">
+                <button type="button" id="pwdreset-save">Save new password</button>
+              </div>
+            </form>
+            <div class="config-help">Used when Instagram forces a password change during a challenge.</div>
+          </div>
+          <div class="config-card">
+            <h4>Session notes</h4>
+            <div class="config-help">Private API sessions are stored per login in Postgres (with a fallback JSON cache on disk).</div>
+            <div class="config-help">If an account hits a challenge, clear the session and re-enter the password.</div>
+            <div class="config-help">No cookies or VNC steps required.</div>
+          </div>
+        </section>
       </div>
     </div>
   </div>
+
 
   <div class="floating-log" id="log-panel">
     <div class="row" style="justify-content: space-between; align-items: center;">
@@ -824,7 +1186,6 @@
     let configCache = { ui_timezone: 'America/New_York' };
     let configDefaults = {};
     let proxyTestState = { status: 'idle', message: 'No proxy test yet.', last: null };
-    let loginLaunchState = { active: false };
     let loginsList = [];
     let primaryLogin = '';
     let targetsCache = [];
@@ -835,6 +1196,7 @@
     let unfollowCache = null;
     let activeFilter = 'all';
     let focusLogin = '';
+    let logtailTimer = null;
     let toastTimer;
     let statusTimer;
 
@@ -1334,8 +1696,19 @@
       document.getElementById('cfg-run-stall').value = src.run_stall_seconds ?? 1200;
       document.getElementById('cfg-run-max').value = src.run_max_seconds ?? 10800;
       document.getElementById('cfg-run-request').value = src.run_request_timeout ?? 600;
-      document.getElementById('cfg-run-delay-min').value = src.run_item_delay_min ?? 0.25;
-      document.getElementById('cfg-run-delay-max').value = src.run_item_delay_max ?? 0.75;
+      document.getElementById('cfg-run-delay-min').value = src.run_item_delay_min ?? 0;
+      document.getElementById('cfg-run-delay-max').value = src.run_item_delay_max ?? 0;
+      document.getElementById('cfg-run-pause-every-min').value = src.run_pause_every_min ?? 0;
+      document.getElementById('cfg-run-pause-every-max').value = src.run_pause_every_max ?? 0;
+      document.getElementById('cfg-run-pause-seconds-min').value = src.run_pause_seconds_min ?? 0;
+      document.getElementById('cfg-run-pause-seconds-max').value = src.run_pause_seconds_max ?? 0;
+      document.getElementById('cfg-run-profile-only').value = (src.run_profile_only ?? false) ? 'true' : 'false';
+      document.getElementById('cfg-run-login-mode').value = src.run_login_mode ?? 'auto';
+      document.getElementById('cfg-run-trace-enabled').value = (src.run_trace_enabled ?? false) ? 'true' : 'false';
+      const deviceSettings = document.getElementById('cfg-private-device-settings');
+      if (deviceSettings) deviceSettings.value = src.private_device_settings_json ?? '';
+      const deviceUA = document.getElementById('cfg-private-user-agent');
+      if (deviceUA) deviceUA.value = src.private_user_agent ?? '';
       document.getElementById('cfg-unfollow-max').value = src.unfollow_max_per_run ?? 25;
       document.getElementById('cfg-unfollow-delay-min').value = src.unfollow_delay_min ?? 25;
       document.getElementById('cfg-unfollow-delay-max').value = src.unfollow_delay_max ?? 45;
@@ -1355,15 +1728,13 @@
         if (monSel) monSel.value = src.monitor_login_username;
       }
       document.getElementById('cfg-proxy-enabled').value = (src.proxy_enabled ?? false) ? 'true' : 'false';
-      document.getElementById('cfg-proxy-provider').value = src.proxy_provider ?? 'brightdata';
-      document.getElementById('cfg-proxy-host').value = src.proxy_host ?? 'brd.superproxy.io';
-      document.getElementById('cfg-proxy-port').value = src.proxy_port ?? 33335;
+      document.getElementById('cfg-proxy-provider').value = src.proxy_provider ?? 'decodo';
+      document.getElementById('cfg-proxy-access').value = src.proxy_access_mode ?? 'native';
+      document.getElementById('cfg-proxy-host').value = src.proxy_host ?? 'gate.decodo.com';
+      document.getElementById('cfg-proxy-port').value = src.proxy_port ?? 7000;
       document.getElementById('cfg-proxy-username').value = src.proxy_username ?? '';
-      document.getElementById('cfg-proxy-sticky').value = (src.proxy_sticky_enabled ?? true) ? 'true' : 'false';
       const proxyPass = document.getElementById('cfg-proxy-password');
-      const proxyKey = document.getElementById('cfg-proxy-api-key');
       if (proxyPass) proxyPass.value = '';
-      if (proxyKey) proxyKey.value = '';
       proxyTestState = { status: 'idle', message: 'No proxy test yet.', last: null };
       updateProxyConfigUI();
       updateProxyPill();
@@ -1386,11 +1757,13 @@
       if (!modal) return;
       modal.style.display = 'flex';
       renderLoginManager();
+      startLogtailAutoRefresh();
     }
 
     function closeAccountsModal() {
       const modal = document.getElementById('accounts-modal');
       if (modal) modal.style.display = 'none';
+      stopLogtailAutoRefresh();
     }
 
     async function saveConfig() {
@@ -1400,6 +1773,15 @@
         run_request_timeout: Number(document.getElementById('cfg-run-request').value || 0),
         run_item_delay_min: Number(document.getElementById('cfg-run-delay-min').value || 0),
         run_item_delay_max: Number(document.getElementById('cfg-run-delay-max').value || 0),
+        run_pause_every_min: Number(document.getElementById('cfg-run-pause-every-min').value || 0),
+        run_pause_every_max: Number(document.getElementById('cfg-run-pause-every-max').value || 0),
+        run_pause_seconds_min: Number(document.getElementById('cfg-run-pause-seconds-min').value || 0),
+        run_pause_seconds_max: Number(document.getElementById('cfg-run-pause-seconds-max').value || 0),
+        run_profile_only: document.getElementById('cfg-run-profile-only').value === 'true',
+        run_login_mode: document.getElementById('cfg-run-login-mode').value,
+        run_trace_enabled: document.getElementById('cfg-run-trace-enabled').value === 'true',
+        private_device_settings_json: document.getElementById('cfg-private-device-settings').value.trim(),
+        private_user_agent: document.getElementById('cfg-private-user-agent').value.trim(),
         unfollow_max_per_run: Number(document.getElementById('cfg-unfollow-max').value || 0),
         unfollow_delay_min: Number(document.getElementById('cfg-unfollow-delay-min').value || 0),
         unfollow_delay_max: Number(document.getElementById('cfg-unfollow-delay-max').value || 0),
@@ -1416,15 +1798,13 @@
         monitor_login_username: document.getElementById('cfg-monitor-login').value || '',
         proxy_enabled: document.getElementById('cfg-proxy-enabled').value === 'true',
         proxy_provider: document.getElementById('cfg-proxy-provider').value,
+        proxy_access_mode: document.getElementById('cfg-proxy-access').value,
         proxy_host: document.getElementById('cfg-proxy-host').value.trim(),
         proxy_port: Number(document.getElementById('cfg-proxy-port').value || 0),
         proxy_username: document.getElementById('cfg-proxy-username').value.trim(),
-        proxy_sticky_enabled: document.getElementById('cfg-proxy-sticky').value === 'true',
       };
       const proxyPass = document.getElementById('cfg-proxy-password')?.value.trim();
-      const proxyKey = document.getElementById('cfg-proxy-api-key')?.value.trim();
       if (proxyPass) payload.proxy_password = proxyPass;
-      if (proxyKey) payload.proxy_api_key = proxyKey;
       try {
         const res = await fetchJSON('/config', {method: 'PUT', body: JSON.stringify(payload)});
         configCache = res.config || configCache;
@@ -1443,7 +1823,16 @@
       const data = await fetchJSON('/logins');
       loginsList = data;
       primaryLogin = data && data.length ? data[0].login_username : '';
-      [document.getElementById('run-login'), document.getElementById('sch-login')].forEach(sel => {
+      const loginSelects = [
+        document.getElementById('run-login'),
+        document.getElementById('sch-login'),
+        document.getElementById('totp-login'),
+        document.getElementById('challenge-login-select'),
+        document.getElementById('logtail-login'),
+        document.getElementById('pwdreset-login'),
+      ].filter(Boolean);
+      loginSelects.forEach(sel => {
+        const current = sel.value;
         sel.innerHTML = '';
         data.forEach(item => {
           const opt = document.createElement('option');
@@ -1452,6 +1841,8 @@
           opt.textContent = `${item.login_username} • ${sessionTag}`;
           sel.appendChild(opt);
         });
+        if (current) sel.value = current;
+        if (!sel.value && data.length) sel.value = data[0].login_username;
       });
       const railSel = document.getElementById('rail-login');
       if (railSel) {
@@ -1495,7 +1886,7 @@
               <div>@${item.login_username}</div>
               <div class="meta">${status.tag}</div>
             </div>
-            <span class="chip ${status.chip}">${(item.session_exists || item.cookie_exists) ? 'Ready' : '2FA'}</span>
+            <span class="chip ${status.chip}">${item.private_session_exists ? 'Ready' : item.has_password ? 'Password' : 'Needs pass'}</span>
           `;
           row.onclick = () => setFocusLogin(item.login_username);
           railSessions.appendChild(row);
@@ -1507,82 +1898,79 @@
       updateMonitorConfigUI();
       renderLoginManager();
       updateRailSessionStatus();
-      refreshLoginLaunchStatus();
+      startLogtailAutoRefresh();
+    }
+
+    async function loadLatestWorkerLogs(opts = {}) {
+      const silent = !!opts.silent;
+      const login = document.getElementById('logtail-login')?.value || '';
+      const outEl = document.getElementById('logtail-out');
+      const errEl = document.getElementById('logtail-err');
+      const traceEl = document.getElementById('logtail-trace');
+      if (!outEl || !errEl || !traceEl) return;
+      if (!login) {
+        if (!silent) showToast('Select a login first.', 'neutral');
+        return;
+      }
+      if (!silent) {
+        outEl.textContent = 'Loading...';
+        errEl.textContent = '';
+        traceEl.textContent = '';
+      }
+      try {
+        const data = await fetchJSON(`/jobs/latest?login_username=${encodeURIComponent(login)}`);
+        const out = (data.worker_out_tail || '').trim();
+        const err = (data.worker_err_tail || '').trim();
+        const trace = (data.trace_tail || '').trim();
+        outEl.textContent = out || '(no stdout yet)';
+        errEl.textContent = err || '(no stderr yet)';
+        traceEl.textContent = trace || '(no trace yet)';
+      } catch (e) {
+        outEl.textContent = '';
+        errEl.textContent = e.message || 'Failed to fetch logs';
+        traceEl.textContent = '';
+        if (!silent) showToast(`Log fetch failed: ${e.message}`, 'bad');
+      }
+    }
+
+    function startLogtailAutoRefresh() {
+      stopLogtailAutoRefresh();
+      const modal = document.getElementById('accounts-modal');
+      if (!modal || modal.style.display !== 'flex') return;
+      const login = document.getElementById('logtail-login')?.value || '';
+      if (!login) return;
+      loadLatestWorkerLogs({silent: true});
+      logtailTimer = setInterval(() => loadLatestWorkerLogs({silent: true}), 5000);
+    }
+
+    function stopLogtailAutoRefresh() {
+      if (logtailTimer) {
+        clearInterval(logtailTimer);
+        logtailTimer = null;
+      }
     }
 
     async function addLoginFromConfig() {
       const userEl = document.getElementById('acct-new-login-username');
       const passEl = document.getElementById('acct-new-login-password');
-      const cookieEl = document.getElementById('acct-new-login-cookie');
       if (!userEl || !passEl) return;
       const login_username = (userEl.value || '').trim();
       const login_password = (passEl.value || '').trim();
-      const cookie_file = (cookieEl?.value || '').trim();
-      if (!login_username || (!login_password && !cookie_file)) {
-        showToast('Username + (password or cookie file) required', 'bad');
+      if (!login_username || !login_password) {
+        showToast('Username + password required', 'bad');
         return;
       }
       try {
-        await fetchJSON('/logins/add', {method: 'POST', body: JSON.stringify({login_username, login_password, cookie_file})});
-        showToast(`Added @${login_username}. Run once to create a session.`, 'good');
+        await fetchJSON('/logins/add', {method: 'POST', body: JSON.stringify({login_username, login_password})});
+        showToast(`Added @${login_username}. Run once to cache a session.`, 'good');
         userEl.value = '';
         passEl.value = '';
-        if (cookieEl) cookieEl.value = '';
         await loadLogins();
       } catch (e) {
         showToast('Add login failed: ' + e.message, 'bad');
       }
     }
 
-    async function refreshLoginLaunchStatus() {
-      try {
-        loginLaunchState = await fetchJSON('/logins/launch/status');
-      } catch (e) {
-        loginLaunchState = { active: false, error: e.message };
-      }
-      const statusEl = document.getElementById('launch-login-status');
-      if (!statusEl) return;
-      if (loginLaunchState && loginLaunchState.active) {
-        statusEl.textContent = `Login open for @${loginLaunchState.login_username}. Complete login in VNC, then click “I finished login.”`;
-        statusEl.className = 'login-launch-status active';
-      } else if (loginLaunchState && loginLaunchState.status === 'done') {
-        statusEl.textContent = 'Login captured and cookies saved.';
-        statusEl.className = 'login-launch-status ok';
-      } else if (loginLaunchState && loginLaunchState.error) {
-        statusEl.textContent = `Login status error: ${loginLaunchState.error}`;
-        statusEl.className = 'login-launch-status fail';
-      } else {
-        statusEl.textContent = 'No login session running.';
-        statusEl.className = 'login-launch-status';
-      }
-    }
-
-    async function launchLoginFlow() {
-      const userEl = document.getElementById('launch-login-username');
-      const username = (userEl?.value || '').trim();
-      if (!username) {
-        showToast('Username required to launch login', 'bad');
-        return;
-      }
-      try {
-        await fetchJSON('/logins/launch', {method: 'POST', body: JSON.stringify({login_username: username})});
-        showToast(`Login launched for @${username}.`, 'good');
-        await refreshLoginLaunchStatus();
-      } catch (e) {
-        showToast(`Launch failed: ${e.message}`, 'bad');
-      }
-    }
-
-    async function finishLoginFlow() {
-      try {
-        const res = await fetchJSON('/logins/launch/finish', {method: 'POST', body: JSON.stringify({})});
-        showToast(`Cookies saved for @${res.login_username}.`, 'good');
-        await loadLogins();
-        await refreshLoginLaunchStatus();
-      } catch (e) {
-        showToast(`Finish failed: ${e.message}`, 'bad');
-      }
-    }
 
     function renderLoginManager() {
       const listEl = document.getElementById('accounts-list');
@@ -1591,16 +1979,25 @@
       (loginsList || []).forEach(item => {
         const row = document.createElement('div');
         row.className = 'account-row';
-        const status = item.session_exists ? 'Session saved' : item.cookie_exists ? 'Cookie saved' : 'No session';
-        const chipTone = (item.session_exists || item.cookie_exists) ? 'good' : 'warn';
+        const status = getLoginStatus(item);
+        const chipTone = status.chip;
+        const chipLabel = item.private_session_exists
+          ? 'Ready'
+          : item.has_password
+            ? 'Password ready'
+            : 'Needs password';
+        const sourceLabel = item.source || 'db';
+        const totpLabel = item.has_totp_seed ? 'TOTP on' : 'TOTP off';
+        const lastErr = item.last_error ? `Last error: ${item.last_error}` : '';
         row.innerHTML = `
           <div>
             <div>@${item.login_username}</div>
-            <div class="meta">${status} • ${item.source === 'env' ? 'env' : 'file'}</div>
+            <div class="meta">${status.tag} • ${sourceLabel} • ${totpLabel}</div>
+            ${lastErr ? `<div class="meta">${lastErr}</div>` : ''}
           </div>
-          <span class="chip ${chipTone}">${(item.session_exists || item.cookie_exists) ? 'Ready' : '2FA'}</span>
+          <span class="chip ${chipTone}">${chipLabel}</span>
           <div class="account-actions">
-            ${item.session_exists ? '' : `<button class="secondary" data-action="reauth" data-login="${item.login_username}">Reauth (password)</button>`}
+            <button class="secondary" data-action="reauth" data-login="${item.login_username}">Update password</button>
             <button class="secondary" data-action="reset" data-login="${item.login_username}">Clear session</button>
             <button class="secondary" data-action="delete" data-login="${item.login_username}">Remove login</button>
           </div>
@@ -1632,7 +2029,7 @@
           if (userEl) userEl.value = login;
           if (passEl) passEl.value = '';
           if (passEl) passEl.focus();
-          showToast(`Enter password to reauthorize @${login}, then click Add / update account.`, 'neutral');
+          showToast(`Enter password for @${login}, then click Add / update account.`, 'neutral');
         };
       });
       listEl.querySelectorAll('button[data-action="delete"]').forEach(btn => {
@@ -1704,11 +2101,8 @@
         badge.className = `proxy-badge ${enabled ? 'on' : 'off'}`;
       }
       const passSet = getConfigValue('proxy_password_set', false);
-      const keySet = getConfigValue('proxy_api_key_set', false);
       const passEl = document.getElementById('cfg-proxy-password');
-      const keyEl = document.getElementById('cfg-proxy-api-key');
       if (passEl) passEl.placeholder = passSet ? '•••••• saved' : 'not set';
-      if (keyEl) keyEl.placeholder = keySet ? '•••••• saved' : 'optional';
     }
 
     function updateProxyPill() {
@@ -1781,15 +2175,26 @@
       return (loginsList || []).find(l => l.login_username === login) || null;
     }
 
+    function formatEpoch(epochSeconds) {
+      if (!epochSeconds) return '';
+      const dt = new Date(Number(epochSeconds) * 1000);
+      if (isNaN(dt)) return '';
+      return timeAgo(dt.toISOString()) || renderTime(dt.toISOString());
+    }
+
     function getLoginStatus(info) {
       if (!info) return {text: 'Session status: —', chip: 'warn', tag: 'No session'};
-      if (info.session_exists) {
-        return {text: 'Session status: Session saved', chip: 'good', tag: 'session saved'};
+      if (info.private_session_exists) {
+        const age = formatEpoch(info.private_session_mtime);
+        return {text: `Session status: Cached${age ? ` (${age})` : ''}`, chip: 'good', tag: 'session cached'};
       }
-      if (info.cookie_exists) {
-        return {text: 'Session status: Cookie saved', chip: 'good', tag: 'cookie saved'};
+      if (info.has_totp_seed) {
+        return {text: 'Session status: TOTP ready (auto login)', chip: 'good', tag: 'totp ready'};
       }
-      return {text: 'Session status: No session saved (2FA likely)', chip: 'warn', tag: '2FA likely'};
+      if (info.has_password) {
+        return {text: 'Session status: Password ready (run once to cache)', chip: 'warn', tag: 'password ready'};
+      }
+      return {text: 'Session status: Needs password', chip: 'bad', tag: 'needs password'};
     }
 
     function updateHeroFromTargets(rows) {
@@ -1864,6 +2269,7 @@
     let cancelHoldTimer = null;
     let cancelHoldEnabled = false;
     let twoFaPending = null;
+    let challengePending = null;
 
     function setRunLock(locked, reason) {
       runLocked = locked;
@@ -1903,8 +2309,23 @@
       return el ? (el.value || '').trim() : '';
     }
 
-    function isTwoFactorError(msg) {
-      return !!(msg && msg.toLowerCase().includes('2fa required'));
+    function isTwoFactorError(msg, code) {
+      if (code === 'two_factor_required') return true;
+      if (!msg) return false;
+      const needle = msg.toLowerCase();
+      return needle.includes('two_factor') || needle.includes('2fa');
+    }
+
+    function isChallengeError(msg, code) {
+      if (code === 'challenge_required') return true;
+      if (!msg) return false;
+      return msg.toLowerCase().includes('challenge');
+    }
+
+    function isPasswordResetError(msg, code) {
+      if (code === 'password_reset_required') return true;
+      if (!msg) return false;
+      return msg.toLowerCase().includes('password') && msg.toLowerCase().includes('change');
     }
 
     function openTwoFactorModal(opts) {
@@ -1935,6 +2356,36 @@
       if (modal) modal.style.display = 'none';
     }
 
+    function openChallengeModal(opts) {
+      challengePending = opts || null;
+      const modal = document.getElementById('challenge-modal');
+      if (!modal) return;
+      const loginEl = document.getElementById('challenge-login');
+      if (loginEl) loginEl.textContent = opts?.login ? `@${opts.login}` : 'this login';
+      const subtext = document.getElementById('challenge-subtext');
+      if (subtext) {
+        subtext.textContent = `Enter the SMS/email code for ${opts?.login ? '@' + opts.login : 'this login'} to continue the run.`;
+      }
+      const input = document.getElementById('challenge-code');
+      if (input) {
+        input.value = '';
+        setTimeout(() => input.focus(), 50);
+      }
+      modal.style.display = 'flex';
+    }
+
+    function closeChallengeModal() {
+      const modal = document.getElementById('challenge-modal');
+      if (modal) modal.style.display = 'none';
+    }
+
+    async function saveChallengeCode(login, code) {
+      await fetchJSON('/logins/challenge', {
+        method: 'POST',
+        body: JSON.stringify({login_username: login, code}),
+      });
+    }
+
     async function submitTwoFactor() {
       const input = document.getElementById('twofa-code');
       const code = input ? input.value.trim() : '';
@@ -1947,11 +2398,123 @@
       await triggerRun(pending.login, pending.target, pending.btn, pending.statusEl, code, {fromModal: true, suppressTwofaPrompt: true});
     }
 
+    async function submitChallengeCode() {
+      const input = document.getElementById('challenge-code');
+      const code = input ? input.value.trim() : '';
+      if (!code) { showToast('Enter the challenge code first.', 'neutral'); return; }
+      const pending = challengePending;
+      if (!pending?.login || !pending?.target) {
+        showToast('Missing run context; please retry.', 'bad');
+        return;
+      }
+      try {
+        await saveChallengeCode(pending.login, code);
+      } catch (e) {
+        showToast(`Failed to save challenge code: ${e.message}`, 'bad');
+        return;
+      }
+      await triggerRun(pending.login, pending.target, pending.btn, pending.statusEl, null, {
+        fromModal: true,
+        suppressTwofaPrompt: true,
+        challengeCode: code,
+      });
+    }
+
+    async function handleTotpGenerate() {
+      const login = document.getElementById('totp-login')?.value || '';
+      const twoFactor = (document.getElementById('totp-verify')?.value || '').trim();
+      if (!login) { showToast('Select a login first.', 'neutral'); return; }
+      try {
+        const res = await fetchJSON('/logins/totp/seed', {
+          method: 'POST',
+          body: JSON.stringify({login_username: login, two_factor_code: twoFactor || undefined}),
+        });
+        const seedEl = document.getElementById('totp-seed');
+        if (seedEl) seedEl.value = res.totp_seed || '';
+        showToast('TOTP seed generated.', 'good');
+      } catch (e) {
+        showToast(`Seed generation failed: ${e.message}`, 'bad');
+      }
+    }
+
+    async function handleTotpEnable() {
+      const login = document.getElementById('totp-login')?.value || '';
+      const seed = (document.getElementById('totp-seed')?.value || '').trim();
+      const code = (document.getElementById('totp-verify')?.value || '').trim();
+      if (!login || !seed) { showToast('Login + seed required.', 'neutral'); return; }
+      try {
+        const res = await fetchJSON('/logins/totp/enable', {
+          method: 'POST',
+          body: JSON.stringify({
+            login_username: login,
+            totp_seed: seed,
+            verification_code: code || undefined,
+            two_factor_code: code || undefined,
+          }),
+        });
+        if (res.backup_codes && res.backup_codes.length) {
+          alert(`Backup codes for @${login}:\n\n${res.backup_codes.join('\n')}`);
+        }
+        showToast('TOTP enabled.', 'good');
+        await loadLogins();
+      } catch (e) {
+        showToast(`Enable failed: ${e.message}`, 'bad');
+      }
+    }
+
+    async function handleTotpDisable() {
+      const login = document.getElementById('totp-login')?.value || '';
+      const code = (document.getElementById('totp-verify')?.value || '').trim();
+      if (!login) { showToast('Select a login first.', 'neutral'); return; }
+      try {
+        await fetchJSON('/logins/totp/disable', {
+          method: 'POST',
+          body: JSON.stringify({login_username: login, two_factor_code: code || undefined}),
+        });
+        showToast('TOTP disabled.', 'good');
+        await loadLogins();
+      } catch (e) {
+        showToast(`Disable failed: ${e.message}`, 'bad');
+      }
+    }
+
+    async function handleChallengeSave() {
+      const login = document.getElementById('challenge-login-select')?.value || '';
+      const code = (document.getElementById('challenge-code-input')?.value || '').trim();
+      if (!login || !code) { showToast('Login + code required.', 'neutral'); return; }
+      try {
+        await saveChallengeCode(login, code);
+        showToast('Challenge code saved.', 'good');
+        const input = document.getElementById('challenge-code-input');
+        if (input) input.value = '';
+      } catch (e) {
+        showToast(`Save failed: ${e.message}`, 'bad');
+      }
+    }
+
+    async function handlePasswordResetSave() {
+      const login = document.getElementById('pwdreset-login')?.value || '';
+      const password = (document.getElementById('pwdreset-password')?.value || '').trim();
+      if (!login || !password) { showToast('Login + new password required.', 'neutral'); return; }
+      try {
+        await fetchJSON('/logins/new-password', {
+          method: 'POST',
+          body: JSON.stringify({login_username: login, new_password: password}),
+        });
+        showToast('New password saved.', 'good');
+        const input = document.getElementById('pwdreset-password');
+        if (input) input.value = '';
+      } catch (e) {
+        showToast(`Save failed: ${e.message}`, 'bad');
+      }
+    }
+
     async function triggerRun(login, target, btn, statusEl, twoFactorCode, opts = {}) {
       const suppressTwofaPrompt = !!opts.suppressTwofaPrompt;
       const fromModal = !!opts.fromModal;
+      const challengeCode = (opts.challengeCode || '').trim();
       const loginInfo = getLoginInfo(login);
-      if (!twoFactorCode && !fromModal && !suppressTwofaPrompt && loginInfo && loginInfo.session_exists === false) {
+      if (!twoFactorCode && !fromModal && !suppressTwofaPrompt && loginInfo && loginInfo.private_session_exists === false && !loginInfo.has_totp_seed) {
         openTwoFactorModal({login, target, btn, statusEl, preflight: true});
         return false;
       }
@@ -1961,9 +2524,11 @@
       try {
         const payload = {login_username: login, target_username: target};
         if (twoFactorCode) payload.two_factor_code = twoFactorCode;
+        if (challengeCode) payload.challenge_code = challengeCode;
         const {job_id, error} = await fetchJSON('/run', {method:'POST', body: JSON.stringify(payload)});
         if (error) throw new Error(error);
         if (twoFactorCode && fromModal) closeTwoFactorModal();
+        if (challengeCode && fromModal) closeChallengeModal();
         showToast(`@${target} queued`, 'neutral');
         setRunStatus([{text: `Queued @${target}`, tone: 'warn'}]);
         pollJob(job_id, target, btn);
@@ -1976,6 +2541,13 @@
           if (statusEl) statusEl.textContent = '2FA required';
           setRunStatus([{text: '2FA required', tone: 'warn'}]);
           openTwoFactorModal({login, target, btn, statusEl, preflight: false});
+          return false;
+        }
+        if (isChallengeError(msg)) {
+          if (btn) { btn.disabled = false; btn.textContent = 'Run now'; btn.dataset.inflight = 'false'; }
+          if (statusEl) statusEl.textContent = 'Challenge required';
+          setRunStatus([{text: 'Challenge required', tone: 'warn'}]);
+          openChallengeModal({login, target, btn, statusEl, preflight: false});
           return false;
         }
         setRunStatus([{text: `Error: ${msg}`, tone: 'bad'}]);
@@ -2050,10 +2622,25 @@
           loadTargetsOverview(); loadLastStatus(); loadHistoryRuns();
           renderTimeline();
         } else {
-          log(`Run failed (${job_id}): ${res.payload.error}`);
           const statusEl = targetForDash ? document.querySelector(`[data-status-target="${targetForDash}"]`) : null;
-          if (statusEl) statusEl.innerHTML = `<span class="status-dot dot-error"></span>Failed`;
-          showToast(`@${targetForDash} failed: ${res.payload.error}`, 'bad');
+          const code = res.payload?.error_code || null;
+          const msg = res.payload?.error || 'Run failed';
+          if (isTwoFactorError(msg, code)) {
+            if (statusEl) statusEl.innerHTML = `<span class="status-dot dot-warn"></span>2FA required`;
+            showToast(`@${targetForDash} needs 2FA code`, 'warn');
+            openTwoFactorModal({login: res.meta?.login_username, target: res.meta?.target_username, btn: btnToReset, statusEl, preflight: false});
+          } else if (isChallengeError(msg, code)) {
+            if (statusEl) statusEl.innerHTML = `<span class="status-dot dot-warn"></span>Challenge required`;
+            showToast(`@${targetForDash} needs challenge code`, 'warn');
+            openChallengeModal({login: res.meta?.login_username, target: res.meta?.target_username, btn: btnToReset, statusEl, preflight: false});
+          } else if (isPasswordResetError(msg, code)) {
+            if (statusEl) statusEl.innerHTML = `<span class="status-dot dot-warn"></span>Password reset`;
+            showToast(`@${targetForDash} needs a password reset. Update the login password + retry.`, 'warn');
+          } else {
+            log(`Run failed (${job_id}): ${msg}`);
+            if (statusEl) statusEl.innerHTML = `<span class="status-dot dot-error"></span>Failed`;
+            showToast(`@${targetForDash} failed: ${msg}`, 'bad');
+          }
         }
         if (btnToReset) { btnToReset.disabled = false; btnToReset.textContent = 'Run now'; btnToReset.dataset.inflight = 'false'; btnToReset.onclick = (ev)=>runOneOffFromSchedule(ev.target, res.meta?.login_username, res.meta?.target_username); }
         fetchSystemStatus();
@@ -2557,6 +3144,8 @@
     }
 
     async function cancelRun(login, target, btn, statusEl, jobId) {
+      if (login === 'null' || login === 'undefined') login = '';
+      if (target === 'null' || target === 'undefined') target = '';
       if (!login || !target) {
         if (!jobId) { showToast('Cancel failed: missing job info', 'bad'); return; }
       }
@@ -2581,6 +3170,15 @@
         showToast('Cancel failed: ' + e.message, 'bad');
       }
     }
+
+    document.addEventListener('click', (event) => {
+      const btn = event.target.closest('button[data-action="cancel-run"]');
+      if (!btn) return;
+      const login = btn.dataset.login || '';
+      const target = btn.dataset.target || '';
+      const jobId = btn.dataset.job || '';
+      cancelRun(login, target, btn, null, jobId || null);
+    });
 
     function renderTargetsOverview() {
       const wrap = document.getElementById('targets-grid');
@@ -2746,9 +3344,9 @@
         const followers = formatProgress('Followers', j.followers_progress, j.followers_total);
         const following = formatProgress('Following', j.following_progress, j.following_total);
         const overallPct = progressPercentCombinedForJob(j);
-        const loginSafe = JSON.stringify(j.login_username || '');
-        const targetSafe = JSON.stringify(j.target_username || '');
-        const jobSafe = JSON.stringify(j.job_id || '');
+        const loginSafe = j.login_username ? j.login_username : '';
+        const targetSafe = j.target_username ? j.target_username : '';
+        const jobSafe = j.job_id ? j.job_id : '';
         return `
           <div class="run-card">
             <div class="run-meta">
@@ -2766,7 +3364,7 @@
               ${overallPct !== null ? `<div>Overall ${formatPct(overallPct)}</div><div class="progress-bar"><span style="width:${progressBarWidth(overallPct)}%"></span></div>` : ''}
             </div>
             <div class="run-actions">
-              <button class="ghost-btn" onclick="cancelRun(${loginSafe}, ${targetSafe}, this, null, ${jobSafe})">Cancel</button>
+              <button class="ghost-btn" data-action="cancel-run" data-login="${loginSafe}" data-target="${targetSafe}" data-job="${jobSafe}">Cancel</button>
             </div>
           </div>
         `;
@@ -3152,10 +3750,20 @@
         if (e.target.id === 'twofa-modal') closeTwoFactorModal();
       });
     }
+    const challengeModal = document.getElementById('challenge-modal');
+    if (challengeModal) {
+      challengeModal.addEventListener('click', (e) => {
+        if (e.target.id === 'challenge-modal') closeChallengeModal();
+      });
+    }
     const closeTwoFa = document.getElementById('close-2fa');
     if (closeTwoFa) closeTwoFa.onclick = closeTwoFactorModal;
+    const closeChallenge = document.getElementById('close-challenge');
+    if (closeChallenge) closeChallenge.onclick = closeChallengeModal;
     const twoFaSubmit = document.getElementById('twofa-submit');
     if (twoFaSubmit) twoFaSubmit.onclick = submitTwoFactor;
+    const challengeSubmit = document.getElementById('challenge-submit');
+    if (challengeSubmit) challengeSubmit.onclick = submitChallengeCode;
     const twoFaSkip = document.getElementById('twofa-skip');
     if (twoFaSkip) {
       twoFaSkip.onclick = async () => {
@@ -3170,6 +3778,12 @@
     if (twoFaInput) {
       twoFaInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') submitTwoFactor();
+      });
+    }
+    const challengeInput = document.getElementById('challenge-code');
+    if (challengeInput) {
+      challengeInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submitChallengeCode();
       });
     }
     const backHistoryBtn = document.getElementById('back-history');
@@ -3197,18 +3811,35 @@
     if (closeAccountsBtn) closeAccountsBtn.onclick = closeAccountsModal;
     const accountsRefreshBtn = document.getElementById('accounts-refresh');
     if (accountsRefreshBtn) accountsRefreshBtn.onclick = loadLogins;
-    const launchLoginBtn = document.getElementById('launch-login-btn');
-    if (launchLoginBtn) launchLoginBtn.onclick = launchLoginFlow;
     const finishLoginBtn = document.getElementById('finish-login-btn');
     if (finishLoginBtn) finishLoginBtn.onclick = finishLoginFlow;
+    const cancelLoginBtn = document.getElementById('cancel-login-btn');
+    if (cancelLoginBtn) cancelLoginBtn.onclick = cancelLoginFlow;
     const cfgSaveBtn = document.getElementById('cfg-save');
     if (cfgSaveBtn) cfgSaveBtn.onclick = saveConfig;
     const cfgProxyTestBtn = document.getElementById('cfg-proxy-test');
     if (cfgProxyTestBtn) cfgProxyTestBtn.onclick = testProxy;
+    const cfgProxyAccessSel = document.getElementById('cfg-proxy-access');
+    if (cfgProxyAccessSel) cfgProxyAccessSel.onchange = updateProxyConfigUI;
     const cfgResetBtn = document.getElementById('cfg-reset');
     if (cfgResetBtn) cfgResetBtn.onclick = () => fillConfigForm(true);
     const acctAddLoginBtn = document.getElementById('acct-add-login');
     if (acctAddLoginBtn) acctAddLoginBtn.onclick = addLoginFromConfig;
+    const totpGenerateBtn = document.getElementById('totp-generate');
+    if (totpGenerateBtn) totpGenerateBtn.onclick = handleTotpGenerate;
+    const totpEnableBtn = document.getElementById('totp-enable');
+    if (totpEnableBtn) totpEnableBtn.onclick = handleTotpEnable;
+    const totpDisableBtn = document.getElementById('totp-disable');
+    if (totpDisableBtn) totpDisableBtn.onclick = handleTotpDisable;
+    const challengeSaveBtn = document.getElementById('challenge-save');
+    if (challengeSaveBtn) challengeSaveBtn.onclick = handleChallengeSave;
+
+    const logtailBtn = document.getElementById('logtail-refresh');
+    if (logtailBtn) logtailBtn.onclick = () => loadLatestWorkerLogs({silent: false});
+    const logtailLogin = document.getElementById('logtail-login');
+    if (logtailLogin) logtailLogin.onchange = startLogtailAutoRefresh;
+    const pwdresetSaveBtn = document.getElementById('pwdreset-save');
+    if (pwdresetSaveBtn) pwdresetSaveBtn.onclick = handlePasswordResetSave;
     const configModal = document.getElementById('config-modal');
     if (configModal) {
       configModal.addEventListener('click', (e) => {

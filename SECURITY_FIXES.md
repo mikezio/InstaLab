@@ -25,21 +25,8 @@ if table not in VALID_TABLES:
 cur = conn.execute(f"PRAGMA table_info({table})")  # Now safe - table is validated
 ```
 
-#### Issue 2: migrate_sqlite_to_postgres.py lines 116, 122, 132-133
-- **Location**: `/app/scripts/migrate_sqlite_to_postgres.py`
-- **Problem**: Multiple SQL queries with unparameterized table names
-```python
-# BEFORE (VULNERABLE):
-rows = sconn.execute(f"SELECT * FROM {table}").fetchall()
-insert_sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
-```
-- **Fix**: Added whitelist validation and used `psycopg2.sql` for safe identifier quoting
-```python
-# AFTER (SECURE):
-VALID_TABLES = ["config", "runs", ...]
-for table in VALID_TABLES:
-    sql.SQL("INSERT INTO {} ...").format(sql.Identifier(table), ...)
-```
+#### Issue 2: Legacy migration scripts (archived)
+- **Status**: Archived; database migration tooling removed from active code paths.
 
 ### 2. Hardcoded Django Secret Key (CRITICAL)
 **Severity**: Critical  
@@ -120,7 +107,7 @@ if not re.match(r'^[a-zA-Z0-9/_-]+$', normalized_path):
 Fixed in multiple files:
 - `/app/server.py`: Replaced ~15 bare `except Exception:` with specific exceptions
 - `/app/unfollow_bot.py`: Replaced multiple bare exceptions with specific types
-- `/app/instaloader_tracker.py`: Improved exception handling with logging
+- `/app/private_api_tracker.py`: Improved exception handling with logging
 
 Examples:
 ```python
