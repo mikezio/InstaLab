@@ -12,18 +12,57 @@ This document describes the internal architecture, data flow, and runtime behavi
 
 **Execution model:**
 - API launches snapshot/count/unfollow workers via a **ThreadPoolExecutor**.
-- Jobs write their artifacts to `/data/instalab/job_runs/job_<id>/`.
+- Jobs write artifacts to `/data/instalab/job_runs/job_<id>/`.
 - UI polls `/api/status` for active jobs and `/api/jobs/latest` for log/trace tails.
+
+## System context diagram
+
+```mermaid
+flowchart LR
+  user[User/Operator] --> ui[Django UI]
+  ui --> api[Flask API]
+  api --> pg[(Postgres)]
+  api --> worker[Snapshot/Count/Unfollow Workers]
+  worker --> ig[Instagram Private API]
+  worker --> pg
+  worker --> files[/data/instalab/job_runs/]
+  ui <-- api
+```
 
 ## Data flow (snapshot run)
 
 1. **Run request** – `POST /api/run` with `login_username` + `target_username`.
 2. **Locks** – per‑login and per‑target locks prevent overlapping jobs.
 3. **Worker spawn** – `snapshot_worker.py` starts with env‑based configuration.
-4. **Login/session** – instagrapi client loads cached session settings (Postgres + file fallback) or performs login.
+4. **Login/session** – instagrapi loads cached session settings (Postgres + file fallback) or performs login.
 5. **Fetch** – private API calls fetch profile, followers, and followees.
 6. **Persist** – results written to Postgres (`runs`, `run_followers`, `run_followees`, history tables).
 7. **Artifacts** – `progress.json`, `result.json`, `worker.out`, `worker.err`, `trace.jsonl` saved in job dir.
+
+### Sequence diagram (run lifecycle)
+
+```mermaid
+sequenceDiagram
+  participant UI as Django UI
+  participant API as Flask API
+  participant W as snapshot_worker.py
+  participant P as Postgres
+  participant IG as Instagram Private API
+
+  UI->>API: POST /api/run (login_username, target_username)
+  API->>API: Acquire login + target locks
+  API->>W: spawn worker (env config)
+  W->>P: load login + session_settings
+  W->>IG: login or session validate
+  IG-->>W: session ok / challenge
+  W->>IG: fetch profile counts
+  W->>IG: fetch followers
+  W->>IG: fetch followees
+  W->>P: write runs + lists + history
+  W->>W: write progress.json/result.json
+  UI->>API: GET /api/run/<job_id>
+  API-->>UI: done + result
+```
 
 ## Components
 
@@ -104,6 +143,45 @@ Core behaviors:
 - Enforces batch size and delay settings.
 - Writes unfollow results to `unfollow_actions`.
 
+## Login + 2FA flow (detailed)
+
+```mermaid
+sequenceDiagram
+  participant W as snapshot_worker
+  participant T as private_api_tracker
+  participant P as Postgres
+  participant IG as Instagram
+
+  W->>T: snapshot_profile(login, target)
+  T->>P: load login + session_settings
+  alt session exists
+    T->>IG: validate session (timeline/usernameinfo)
+  else no session
+    T->>IG: password login
+  end
+  alt TwoFactorRequired
+    T->>P: poll challenge_code (TTL 2m)
+    T->>IG: accounts/two_factor_login (trust_this_device=1)
+  end
+  alt ChallengeRequired
+    T->>IG: challenge_resolve
+  end
+  T->>P: persist session_settings
+  T-->>W: authenticated client
+```
+
+## Job artifact flow
+
+```mermaid
+flowchart TB
+  start([Run started]) --> progress[write progress.json]
+  progress --> out[append worker.out]
+  progress --> err[append worker.err]
+  progress --> trace[append trace.jsonl]
+  progress --> result[write result.json]
+  result --> done([Run complete])
+```
+
 ## Storage & schema (Postgres)
 
 Key tables:
@@ -141,7 +219,7 @@ Important keys:
 
 ## Failure modes & debugging
 
-- **Run stuck in `login`** → check `trace.jsonl` and `worker.err` for 2FA/challenge.
+- **Run stuck in `login`** → check `trace.jsonl` + `worker.err` for 2FA/challenge.
 - **No active job in UI** → `/api/status` only shows active jobs; use `/api/jobs/latest` for finished job logs.
 - **Repeated “new device” logins** → ensure device profile persisted and `trust_this_device=1`.
 - **Proxy errors** → verify `/api/proxy/test` and required proxy credentials.
