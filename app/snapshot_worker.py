@@ -66,8 +66,16 @@ def main():
     parser.add_argument("--cookie-file", default="")
     parser.add_argument("--progress", required=True)
     parser.add_argument("--result", required=True)
-    parser.add_argument("--request-timeout", type=float, default=600.0)
+    # NOTE: instagrapi's `request_timeout` is a per-request sleep, not a network timeout.
+    # We keep `--request-timeout` as a deprecated alias for older callers.
+    parser.add_argument("--http-timeout", type=float, default=None)
+    parser.add_argument("--request-timeout", type=float, default=None)
+    parser.add_argument("--request-sleep", type=float, default=None)
     args = parser.parse_args()
+    if args.http_timeout is None and args.request_timeout is not None:
+        print("Warning: --request-timeout is deprecated; use --http-timeout", flush=True)
+    http_timeout_seconds = float(args.http_timeout if args.http_timeout is not None else (args.request_timeout if args.request_timeout is not None else 600.0))
+    request_sleep_seconds = float(args.request_sleep if args.request_sleep is not None else (os.environ.get("RUN_PRIVATE_REQUEST_SLEEP_SECONDS") or 0) or 0)
     backend_name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
     proxy_set = bool(os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"))
     proxy_enabled_flag = str(os.environ.get("INSTALAB_PROXY_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
@@ -147,7 +155,8 @@ def main():
                     login_password=password,
                     target_username=args.target,
                     cookie_file=cookie_file or None,
-                    request_timeout=args.request_timeout,
+                    http_timeout_seconds=http_timeout_seconds,
+                    request_sleep_seconds=request_sleep_seconds,
                     db_path=args.db_path,
                     profile_only=profile_only,
                     login_mode=login_mode,
