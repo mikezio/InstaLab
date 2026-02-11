@@ -8,7 +8,7 @@ InstaLab is an operations console for Instagram snapshot runs (followers/followi
 - **Web UI**: Django (Python 3.11) - admin and dashboard interface
 - **Workers**: Python workers for snapshots, counts, and unfollow operations
 - **Frontend**: Tailwind CSS 3.x for styling
-- **Database**: SQLite (default) or PostgreSQL (optional)
+- **Database**: PostgreSQL only
 - **Deployment**: Docker Compose with multi-container orchestration
 
 ## Tech Stack
@@ -125,7 +125,7 @@ npm run dev
 ## Testing
 - CI runs Python import smoke tests
 - Manual end-to-end testing is performed in dev environment
-- Verify both SQLite and PostgreSQL configurations when making DB changes
+- Verify PostgreSQL behavior for all DB changes
 
 ## Docker Services
 - **Flask API**: Serves backend endpoints
@@ -146,8 +146,8 @@ npm run dev
 - Node.js: Use `npm install --save-dev <package>` in `app/` directory
 
 ### Database Changes
-- Support both SQLite and PostgreSQL
-- Test migrations with both database backends
+- InstaLab is Postgres-only (`INSTALAB_DB_TYPE=postgres`)
+- Test schema and query changes against Postgres
 - Keep migration scripts in appropriate locations
 
 ## Important Notes
