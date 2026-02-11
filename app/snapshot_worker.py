@@ -110,8 +110,10 @@ def main():
 
     has_session, snapshot_profile = _select_backend()
     password = os.environ.get("RUN_LOGIN_PASSWORD")
+    login_mode = (os.environ.get("RUN_LOGIN_MODE") or "auto").strip().lower()
+    anonymous_mode = login_mode in {"anonymous", "public", "no_login", "no-login"}
     cookie_file = args.cookie_file or ""
-    if not password and not has_session(args.login):
+    if not anonymous_mode and not password and not has_session(args.login):
         with _trace_span(
             "instalab.snapshot",
             backend=backend_name,
@@ -139,7 +141,6 @@ def main():
     user_agent = os.environ.get("RUN_USER_AGENT")
     trace_path = os.environ.get("RUN_TRACE_PATH", "")
     profile_only = str(os.environ.get("RUN_PROFILE_ONLY", "")).strip().lower() in {"1", "true", "yes", "on"}
-    login_mode = (os.environ.get("RUN_LOGIN_MODE") or "auto").strip().lower()
     with _trace_span(
         "instalab.snapshot",
         backend=backend_name,

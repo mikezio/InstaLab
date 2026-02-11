@@ -894,9 +894,11 @@
                   <option value="auto">Auto (reuse session, fallback to password)</option>
                   <option value="session_only">Session only (no password prompt)</option>
                   <option value="password">Password only (force fresh login)</option>
+                  <option value="anonymous">Anonymous (public target only, no login)</option>
                 </select>
                 <div class="config-help">Private API uses a cached session file after the first successful run.</div>
                 <div class="config-help">Use Password only to force a new device login when no prompt appears.</div>
+                <div class="config-help">Anonymous mode uses public GraphQL endpoints and only works for public targets.</div>
               </div>
               <div>
                 <label for="cfg-run-trace-enabled">Trace API timing</label>
@@ -1265,6 +1267,14 @@
     }
     function getTimeZone() {
       return getConfigValue('ui_timezone', 'America/New_York');
+    }
+
+    function getRunLoginMode() {
+      return String(getConfigValue('run_login_mode', 'auto') || 'auto').toLowerCase();
+    }
+
+    function isAnonymousRunMode() {
+      return ['anonymous', 'public', 'no_login', 'no-login'].includes(getRunLoginMode());
     }
 
     function parseTs(tstr){
@@ -1907,7 +1917,7 @@
               <div>@${item.login_username}</div>
               <div class="meta">${status.tag}</div>
             </div>
-            <span class="chip ${status.chip}">${item.private_session_exists ? 'Ready' : item.has_password ? 'Password' : 'Needs pass'}</span>
+            <span class="chip ${status.chip}">${isAnonymousRunMode() ? 'Public' : item.private_session_exists ? 'Ready' : item.has_password ? 'Password' : 'Needs pass'}</span>
           `;
           row.onclick = () => setFocusLogin(item.login_username);
           railSessions.appendChild(row);
@@ -2002,11 +2012,13 @@
         row.className = 'account-row';
         const status = getLoginStatus(item);
         const chipTone = status.chip;
-        const chipLabel = item.private_session_exists
-          ? 'Ready'
-          : item.has_password
-            ? 'Password ready'
-            : 'Needs password';
+        const chipLabel = isAnonymousRunMode()
+          ? 'Public mode'
+          : item.private_session_exists
+            ? 'Ready'
+            : item.has_password
+              ? 'Password ready'
+              : 'Needs password';
         const sourceLabel = item.source || 'db';
         const totpLabel = item.has_totp_seed ? 'TOTP on' : 'TOTP off';
         const lastErr = item.last_error ? `Last error: ${item.last_error}` : '';
@@ -2204,6 +2216,9 @@
     }
 
     function getLoginStatus(info) {
+      if (isAnonymousRunMode()) {
+        return {text: 'Session status: Anonymous mode (login optional)', chip: 'neutral', tag: 'anonymous mode'};
+      }
       if (!info) return {text: 'Session status: —', chip: 'warn', tag: 'No session'};
       if (info.private_session_exists) {
         const age = formatEpoch(info.private_session_mtime);
@@ -2535,7 +2550,15 @@
       const fromModal = !!opts.fromModal;
       const challengeCode = (opts.challengeCode || '').trim();
       const loginInfo = getLoginInfo(login);
-      if (!twoFactorCode && !fromModal && !suppressTwofaPrompt && loginInfo && loginInfo.private_session_exists === false && !loginInfo.has_totp_seed) {
+      if (
+        !isAnonymousRunMode()
+        && !twoFactorCode
+        && !fromModal
+        && !suppressTwofaPrompt
+        && loginInfo
+        && loginInfo.private_session_exists === false
+        && !loginInfo.has_totp_seed
+      ) {
         openTwoFactorModal({login, target, btn, statusEl, preflight: true});
         return false;
       }

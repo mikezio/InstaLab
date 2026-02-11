@@ -209,6 +209,30 @@ def _private_session_exists(login_username: str) -> bool:
         return True
     return _private_settings_path(login_username).exists()
 
+
+RUN_LOGIN_MODE_ALLOWED = {"auto", "session_only", "password", "anonymous"}
+RUN_LOGIN_MODE_ALIASES = {
+    "session": "session_only",
+    "session-only": "session_only",
+    "password-only": "password",
+    "anon": "anonymous",
+    "public": "anonymous",
+    "no_login": "anonymous",
+    "no-login": "anonymous",
+}
+
+
+def _normalize_run_login_mode(value: str | None) -> str:
+    mode = str(value or "auto").strip().lower()
+    mode = RUN_LOGIN_MODE_ALIASES.get(mode, mode)
+    if mode not in RUN_LOGIN_MODE_ALLOWED:
+        return "auto"
+    return mode
+
+
+def _is_anonymous_run_login_mode(value: str | None) -> bool:
+    return _normalize_run_login_mode(value) == "anonymous"
+
 CONFIG_DEFAULTS = {
     "run_stall_seconds": int(os.getenv("RUN_STALL_SECONDS", "1200")),
     "run_max_seconds": int(os.getenv("RUN_MAX_SECONDS", "10800")),
@@ -226,7 +250,7 @@ CONFIG_DEFAULTS = {
     "run_pause_seconds_max": float(os.getenv("RUN_PAUSE_SECONDS_MAX", "0")),
     "run_trace_enabled": os.getenv("RUN_TRACE_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
     "run_profile_only": os.getenv("RUN_PROFILE_ONLY", "false").lower() in {"1", "true", "yes", "on"},
-    "run_login_mode": os.getenv("RUN_LOGIN_MODE", "auto"),
+    "run_login_mode": _normalize_run_login_mode(os.getenv("RUN_LOGIN_MODE", "auto")),
     "private_device_settings_json": os.getenv("INSTALAB_PRIVATE_DEVICE_SETTINGS_JSON", ""),
     "private_user_agent": os.getenv("INSTALAB_PRIVATE_USER_AGENT", ""),
     "proxy_enabled": os.getenv("INSTALAB_PROXY_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
@@ -265,7 +289,7 @@ CONFIG_SCHEMA = {
     "run_pause_seconds_max": {"type": "float", "min": 0.0, "max": 300.0},
     "run_trace_enabled": {"type": "bool"},
     "run_profile_only": {"type": "bool"},
-    "run_login_mode": {"type": "str", "allowed": {"auto", "session_only", "password"}},
+    "run_login_mode": {"type": "str", "allowed": RUN_LOGIN_MODE_ALLOWED},
     "private_device_settings_json": {"type": "str"},
     "private_user_agent": {"type": "str"},
     "proxy_enabled": {"type": "bool"},
@@ -925,7 +949,10 @@ def _coerce_config_value(key, value, strict=False):
         if ctype == "time":
             return _validate_time(value)
         if ctype == "str":
-            sv = str(value).strip()
+            if key == "run_login_mode":
+                sv = _normalize_run_login_mode(value)
+            else:
+                sv = str(value).strip()
             allowed = schema.get("allowed")
             if allowed and sv not in allowed:
                 raise ValueError(f"{key} must be one of {', '.join(sorted(allowed))}")
@@ -1684,7 +1711,8 @@ def _record_count_check(
 
 
 def _run_count_check(login_username, target_username):
-    creds = _get_credentials(login_username)
+    login_mode = _normalize_run_login_mode(_get_config_value("run_login_mode", "auto"))
+    creds = _get_credentials(login_username, require_auth=not _is_anonymous_run_login_mode(login_mode))
     job_dir = JOB_TMP_DIR / f"count_{uuid4().hex}"
     job_dir.mkdir(parents=True, exist_ok=True)
     result_path = job_dir / "result.json"
@@ -1694,7 +1722,11 @@ def _run_count_check(login_username, target_username):
     env = os.environ.copy()
     env["INSTALAB_SCRAPER_BACKEND"] = "private"
     env["SCRAPER_BACKEND"] = "private"
-    env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
+    env["RUN_LOGIN_MODE"] = login_mode
+    if creds.get("login_password"):
+        env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
+    else:
+        env.pop("RUN_LOGIN_PASSWORD", None)
     if creds.get("totp_seed"):
         env["RUN_TOTP_SEED"] = str(creds["totp_seed"]).strip()
     else:
@@ -2008,7 +2040,7 @@ def _restore_run(run_id):
     return True, "restored"
 
 
-def _get_credentials(login_username):
+def _get_credentials(login_username, *, require_auth: bool = True):
     if _is_blocked_login(login_username):
         raise ValueError(f"Login is blocked: {login_username}")
     profile = _get_login_lookup().get(login_username)
@@ -2020,7 +2052,7 @@ def _get_credentials(login_username):
         prefix = profile.get("prefix")
         if prefix:
             password = os.getenv(f"{prefix}_LOGIN_PASSWORD", "")
-    if not password and not _private_session_exists(login_username):
+    if require_auth and not password and not _private_session_exists(login_username):
         raise ValueError(f"Missing password or private session for login: {login_username}")
     return {
         "login_username": login_username,
@@ -2101,7 +2133,8 @@ def _stream_worker_output(proc: subprocess.Popen, out_path: Path, err_path: Path
 
 def run_snapshot(login_username, target_username, job_id=None, two_factor_code=None, challenge_code=None):
     _ensure_job_tmp_dir()
-    creds = _get_credentials(login_username)
+    login_mode = _normalize_run_login_mode(_get_config_value("run_login_mode", "auto"))
+    creds = _get_credentials(login_username, require_auth=not _is_anonymous_run_login_mode(login_mode))
     job = ACTIVE_JOBS.get(login_username)
     run_id = job_id or uuid4().hex
     job_dir = JOB_TMP_DIR / f"job_{run_id}"
@@ -2114,7 +2147,11 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     env = os.environ.copy()
     env["INSTALAB_SCRAPER_BACKEND"] = "private"
     env["SCRAPER_BACKEND"] = "private"
-    env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
+    env["RUN_LOGIN_MODE"] = login_mode
+    if creds.get("login_password"):
+        env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
+    else:
+        env.pop("RUN_LOGIN_PASSWORD", None)
     session_id = _generate_proxy_session_id(login_username=login_username)
     _apply_proxy_env(env, session_id=session_id)
     if two_factor_code or challenge_code:
@@ -2157,7 +2194,6 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     pause_seconds_max = float(_get_config_value("run_pause_seconds_max", 0) or 0)
     trace_enabled = _parse_bool(_get_config_value("run_trace_enabled", False))
     profile_only = _parse_bool(_get_config_value("run_profile_only", False))
-    login_mode = str(_get_config_value("run_login_mode", "auto") or "auto").strip().lower()
     stall_seconds = int(_get_config_value("run_stall_seconds", 1200))
     max_seconds = int(_get_config_value("run_max_seconds", 10800))
     env["RUN_ITEM_DELAY_MIN"] = str(item_delay_min)
@@ -2172,7 +2208,6 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     if trace_enabled:
         env["RUN_TRACE_PATH"] = str(job_dir / "trace.jsonl")
     env["RUN_PROFILE_ONLY"] = "true" if profile_only else "false"
-    env["RUN_LOGIN_MODE"] = login_mode
     cmd = [
         sys.executable,
         str(BASE_DIR / "snapshot_worker.py"),
