@@ -78,6 +78,22 @@ def _init_db(conn):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS relationship_events (
+            id SERIAL PRIMARY KEY,
+            target_username TEXT NOT NULL,
+            login_username TEXT NOT NULL,
+            username TEXT NOT NULL,
+            relation_type TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            run_id INTEGER NOT NULL,
+            prev_run_id INTEGER,
+            UNIQUE(run_id, relation_type, event_type, username)
+        )
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_target_time ON runs(target_username, timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_run_followers_run ON run_followers(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_run_followees_run ON run_followees(run_id)")
@@ -93,6 +109,19 @@ def _init_db(conn):
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_followees_hist_target_first ON followees_history(target_username, first_seen)"
     )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_relationship_events_target_time
+        ON relationship_events(target_username, relation_type, observed_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_relationship_events_user_time
+        ON relationship_events(target_username, relation_type, username, observed_at)
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_events_run ON relationship_events(run_id)")
     cols = get_columns(conn, "followers_history")
     if "first_seen_known" not in cols:
         conn.execute("ALTER TABLE followers_history ADD COLUMN first_seen_known INTEGER DEFAULT 1")
@@ -213,6 +242,154 @@ def _get_previous_run(conn, target_username):
     return run_id, timestamp, prev_followers, prev_followees
 
 
+def _get_run_members(conn, run_id):
+    followers = {
+        r[0] for r in conn.execute("SELECT username FROM run_followers WHERE run_id = ?", (run_id,))
+    }
+    followees = {
+        r[0] for r in conn.execute("SELECT username FROM run_followees WHERE run_id = ?", (run_id,))
+    }
+    return followers, followees
+
+
+def _insert_relationship_events(
+    conn,
+    *,
+    target_username,
+    login_username,
+    run_id,
+    prev_run_id,
+    timestamp,
+    followers_added,
+    followers_removed,
+    followees_added,
+    followees_removed,
+):
+    rows = []
+    rows.extend(
+        (
+            target_username,
+            login_username,
+            username,
+            "followers",
+            "added",
+            timestamp,
+            run_id,
+            prev_run_id,
+        )
+        for username in followers_added
+    )
+    rows.extend(
+        (
+            target_username,
+            login_username,
+            username,
+            "followers",
+            "removed",
+            timestamp,
+            run_id,
+            prev_run_id,
+        )
+        for username in followers_removed
+    )
+    rows.extend(
+        (
+            target_username,
+            login_username,
+            username,
+            "following",
+            "added",
+            timestamp,
+            run_id,
+            prev_run_id,
+        )
+        for username in followees_added
+    )
+    rows.extend(
+        (
+            target_username,
+            login_username,
+            username,
+            "following",
+            "removed",
+            timestamp,
+            run_id,
+            prev_run_id,
+        )
+        for username in followees_removed
+    )
+    if not rows:
+        return 0
+    conn.executemany(
+        insert_ignore_sql(
+            "relationship_events",
+            [
+                "target_username",
+                "login_username",
+                "username",
+                "relation_type",
+                "event_type",
+                "observed_at",
+                "run_id",
+                "prev_run_id",
+            ],
+        ),
+        rows,
+    )
+    return len(rows)
+
+
+def backfill_relationship_events(conn):
+    _init_db(conn)
+    existing_count = conn.execute("SELECT COUNT(*) FROM relationship_events").fetchone()[0]
+    if int(existing_count or 0) > 0:
+        return 0
+    runs = conn.execute(
+        """
+        SELECT id, target_username, login_username, timestamp
+        FROM runs
+        ORDER BY target_username ASC, timestamp ASC, id ASC
+        """
+    ).fetchall()
+    if not runs:
+        return 0
+    created = 0
+    prev_by_target = {}
+    for run in runs:
+        run_id = run["id"]
+        target_username = run["target_username"]
+        login_username = run["login_username"]
+        timestamp = run["timestamp"]
+        followers, followees = _get_run_members(conn, run_id)
+        prev = prev_by_target.get(target_username)
+        if prev is None:
+            prev_followers = followers
+            prev_followees = followees
+            prev_run_id = None
+        else:
+            prev_followers = prev["followers"]
+            prev_followees = prev["followees"]
+            prev_run_id = prev["run_id"]
+        created += _insert_relationship_events(
+            conn,
+            target_username=target_username,
+            login_username=login_username,
+            run_id=run_id,
+            prev_run_id=prev_run_id,
+            timestamp=timestamp,
+            followers_added=sorted(followers - prev_followers),
+            followers_removed=sorted(prev_followers - followers),
+            followees_added=sorted(followees - prev_followees),
+            followees_removed=sorted(prev_followees - followees),
+        )
+        prev_by_target[target_username] = {
+            "run_id": run_id,
+            "followers": followers,
+            "followees": followees,
+        }
+    return created
+
+
 def write_run_metadata(
     *,
     db_path,
@@ -310,6 +487,18 @@ def write_run_metadata(
             insert_ignore_sql("run_followees", ["run_id", "username"]),
             [(run_id, username) for username in followees],
         )
+        relationship_events_recorded = _insert_relationship_events(
+            conn,
+            target_username=target_username,
+            login_username=login_username,
+            run_id=run_id,
+            prev_run_id=prev_run_id,
+            timestamp=timestamp,
+            followers_added=followers_added,
+            followers_removed=followers_removed,
+            followees_added=followees_added,
+            followees_removed=followees_removed,
+        )
         if prev_run_id is None:
             _update_history_table(
                 conn,
@@ -361,6 +550,7 @@ def write_run_metadata(
             "previous_timestamp": prev_timestamp,
             "followers": {"added": followers_added, "removed": followers_removed},
             "followees": {"added": followees_added, "removed": followees_removed},
+            "relationship_events_recorded": relationship_events_recorded,
         },
         run_id,
     )

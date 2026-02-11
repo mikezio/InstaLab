@@ -521,28 +521,42 @@
                         <div class="card" style="margin-top:12px;">
                           <div class="panel-header">
                             <div>
-                              <h4 style="margin:0;">Recent follow changes</h4>
-                              <p class="muted" style="margin:2px 0 0;">New follows in the window plus recent unfollows.</p>
+                              <h4 style="margin:0;">Relationship Events</h4>
+                              <p class="muted" style="margin:2px 0 0;">Observed follows/unfollows for this target.</p>
                             </div>
                             <div class="row" style="gap:8px;">
-                              <select id="detail-cohort-kind">
-                                <option value="followers">Followers</option>
-                                <option value="following">Following</option>
-                              </select>
-                              <select id="detail-cohort-window">
-                                <option value="7">7d</option>
-                                <option value="14">14d</option>
-                                <option value="30">30d</option>
-                              </select>
+                              <button class="secondary" id="events-refresh">Refresh</button>
+                              <button class="secondary" id="events-clear">Clear filters</button>
                             </div>
                           </div>
-                          <div class="chip-row" style="margin-top:6px;">
-                            <span class="chip good" id="detail-cohort-active">0 still following</span>
-                            <span class="chip warn" id="detail-cohort-churned">0 unfollowed</span>
+                          <div class="row" style="gap:8px; margin-top:8px; flex-wrap:wrap;">
+                            <select id="events-scope">
+                              <option value="target">All runs</option>
+                              <option value="run">Current run only</option>
+                            </select>
+                            <select id="events-relation">
+                              <option value="">Followers + Following</option>
+                              <option value="followers">Followers</option>
+                              <option value="following">Following</option>
+                            </select>
+                            <select id="events-type">
+                              <option value="">Added + Removed</option>
+                              <option value="added">Added only</option>
+                              <option value="removed">Removed only</option>
+                            </select>
+                            <select id="events-window">
+                              <option value="7">Last 7 days</option>
+                              <option value="1">Last 24 hours</option>
+                              <option value="30">Last 30 days</option>
+                              <option value="90">Last 90 days</option>
+                              <option value="0">All time</option>
+                            </select>
+                            <input id="events-user" placeholder="Username contains…" style="min-width: 170px;">
                           </div>
-                          <details class="card-toggle" id="detail-cohort-toggle">
-                            <summary>Show list</summary>
-                            <ul class="list" id="detail-cohort-list"></ul>
+                          <div class="chip-row" style="margin-top:8px;" id="events-summary"></div>
+                          <details class="card-toggle" id="events-toggle" open>
+                            <summary id="events-toggle-summary">Show events</summary>
+                            <ul class="list" id="events-list"></ul>
                           </details>
                         </div>
                       </div>
@@ -2850,6 +2864,25 @@
       items.forEach(u => { const li = document.createElement('li'); li.textContent = u; frag.appendChild(li); });
       el.appendChild(frag);
     }
+    function renderRelationshipDetails(el, items) {
+      el.innerHTML = '';
+      if (!items || !items.length) { el.innerHTML = '<li class="muted">None</li>'; return; }
+      const frag = document.createDocumentFragment();
+      items.forEach(item => {
+        const li = document.createElement('li');
+        const first = item?.first_seen ? renderTime(item.first_seen) : 'unknown';
+        const firstKind = Number(item?.first_seen_known || 0) === 1 ? 'observed' : 'baseline';
+        const ended = item?.unfollowed_at ? ` · ended ${renderTime(item.unfollowed_at)}` : '';
+        li.innerHTML = `
+          <div class="row" style="justify-content: space-between; gap:8px;">
+            <span>@${item?.username || ''}</span>
+            <span class="muted">${first} · ${firstKind}${ended}</span>
+          </div>
+        `;
+        frag.appendChild(li);
+      });
+      el.appendChild(frag);
+    }
     function downloadCSVArr(filename, arr) {
       if (!arr || !arr.length) { alert('No data'); return; }
       const csv = 'username\n' + arr.join('\n');
@@ -2889,67 +2922,134 @@
       const detailExpand = document.getElementById('detail-expand');
       if (detailExpand) detailExpand.removeAttribute('open');
       document.querySelectorAll('.run-pill').forEach(item => item.classList.remove('active'));
-      currentHistoryTarget = null;
-      resetCohortUI();
+      currentHistoryTarget = document.getElementById('hist-target')?.value || null;
+      resetRelationshipEventsUI('Select filters and refresh events.');
     }
 
     let currentHistoryTarget = null;
 
-    function cohortLabels(kind) {
-      const isFollowers = kind === 'followers';
-      return {
-        active: isFollowers ? 'still following' : 'still followed',
-        churned: isFollowers ? 'unfollowed' : 'target unfollowed',
-      };
+    function toApiTs(dt) {
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}_${pad(dt.getHours())}-${pad(dt.getMinutes())}-${pad(dt.getSeconds())}`;
     }
 
-    function resetCohortUI() {
-      const kindSel = document.getElementById('detail-cohort-kind');
-      const labels = cohortLabels(kindSel?.value || 'followers');
-      const activeEl = document.getElementById('detail-cohort-active');
-      const churnEl = document.getElementById('detail-cohort-churned');
-      const listEl = document.getElementById('detail-cohort-list');
-      const toggle = document.querySelector('#detail-cohort-toggle summary');
-      if (activeEl) activeEl.textContent = `0 ${labels.active}`;
-      if (churnEl) churnEl.textContent = `0 ${labels.churned}`;
-      if (listEl) listEl.innerHTML = '<li class="muted">No data yet.</li>';
-      if (toggle) toggle.textContent = 'Show list';
+    function relationshipEventLabel(item) {
+      const rel = item?.relation_type;
+      const type = item?.event_type;
+      if (rel === 'followers' && type === 'added') return 'followed target';
+      if (rel === 'followers' && type === 'removed') return 'unfollowed target';
+      if (rel === 'following' && type === 'added') return 'target followed';
+      if (rel === 'following' && type === 'removed') return 'target unfollowed';
+      return `${type || 'changed'} (${rel || 'unknown'})`;
     }
 
-    async function loadCohortInsights(target) {
-      currentHistoryTarget = target || currentHistoryTarget;
-      const kindSel = document.getElementById('detail-cohort-kind');
-      const windowSel = document.getElementById('detail-cohort-window');
-      const activeEl = document.getElementById('detail-cohort-active');
-      const churnEl = document.getElementById('detail-cohort-churned');
-      const listEl = document.getElementById('detail-cohort-list');
-      const toggle = document.querySelector('#detail-cohort-toggle summary');
-      if (!currentHistoryTarget || !kindSel || !windowSel || !listEl) return;
-      const kind = kindSel.value || 'followers';
-      const labels = cohortLabels(kind);
-      const days = windowSel.value || '7';
-      try {
-        const res = await fetchJSON(`/insights/followers?target=${encodeURIComponent(currentHistoryTarget)}&days=${days}&kind=${kind}`);
-        if (activeEl) activeEl.textContent = `${res.active_count || 0} ${labels.active}`;
-        if (churnEl) churnEl.textContent = `${res.churned_count || 0} ${labels.churned}`;
-        const rows = [];
-        const fmt = (item, status) => {
-          const daysLabel = item.days_followed != null ? `${item.days_followed}d` : '—';
-          const statusLabel = status === 'active' ? labels.active : labels.churned;
-          const tone = status === 'active' ? 'good' : 'warn';
-          return `<li class="row" style="justify-content: space-between;">
-            <span>@${item.username}</span>
-            <span class="chip ${tone}">${daysLabel} · ${statusLabel}</span>
-          </li>`;
-        };
-        (res.active || []).slice(0, 15).forEach(item => rows.push(fmt(item, 'active')));
-        (res.churned || []).slice(0, 10).forEach(item => rows.push(fmt(item, 'churned')));
-        if (!rows.length) rows.push('<li class="muted">No follow changes in this window.</li>');
-        listEl.innerHTML = rows.join('');
-        if (toggle) toggle.textContent = `Show list (${(res.active_count || 0) + (res.churned_count || 0)})`;
-      } catch (e) {
-        if (listEl) listEl.innerHTML = `<li class="muted">Insights unavailable: ${e.message}</li>`;
+    function resetRelationshipEventsUI(message = 'Select a tracked account.') {
+      const summary = document.getElementById('events-summary');
+      const list = document.getElementById('events-list');
+      const toggleSummary = document.getElementById('events-toggle-summary');
+      if (summary) summary.innerHTML = '<span class="chip neutral">No event data loaded</span>';
+      if (list) list.innerHTML = `<li class="muted">${message}</li>`;
+      if (toggleSummary) toggleSummary.textContent = 'Show events';
+    }
+
+    function buildRelationshipEventsPath(target) {
+      const relation = document.getElementById('events-relation')?.value || '';
+      const eventType = document.getElementById('events-type')?.value || '';
+      const scope = document.getElementById('events-scope')?.value || 'target';
+      const user = (document.getElementById('events-user')?.value || '').trim();
+      const days = Number(document.getElementById('events-window')?.value || '7');
+      const params = new URLSearchParams();
+      params.set('target', target);
+      params.set('limit', days === 0 ? '1000' : '400');
+      if (relation) params.set('relation_type', relation);
+      if (eventType) params.set('event_type', eventType);
+      if (scope === 'run' && currentRunDetail?.id) params.set('run_id', String(currentRunDetail.id));
+      if (days > 0) {
+        const cutoff = new Date(Date.now() - (days * 24 * 60 * 60 * 1000));
+        params.set('observed_from', toApiTs(cutoff));
       }
+      if (user) params.set('username', user);
+      return `/relationship_events?${params.toString()}`;
+    }
+
+    function renderRelationshipEvents(items, target) {
+      const summary = document.getElementById('events-summary');
+      const list = document.getElementById('events-list');
+      const toggleSummary = document.getElementById('events-toggle-summary');
+      if (!summary || !list) return;
+      const total = items.length;
+      const added = items.filter(i => i?.event_type === 'added').length;
+      const removed = items.filter(i => i?.event_type === 'removed').length;
+      const followerEvents = items.filter(i => i?.relation_type === 'followers').length;
+      const followingEvents = items.filter(i => i?.relation_type === 'following').length;
+      summary.innerHTML = `
+        <span class="chip neutral">${total} events</span>
+        <span class="chip good">${added} added</span>
+        <span class="chip warn">${removed} removed</span>
+        <span class="chip neutral">${followerEvents} follower events</span>
+        <span class="chip neutral">${followingEvents} following events</span>
+      `;
+      if (toggleSummary) toggleSummary.textContent = `Show events (${total})`;
+      if (!items.length) {
+        list.innerHTML = '<li class="muted">No events matched your filters.</li>';
+        return;
+      }
+      list.innerHTML = items.map(item => {
+        const tone = item?.event_type === 'added' ? 'good' : 'warn';
+        const runId = item?.run_id ? `Run #${item.run_id}` : 'Run n/a';
+        return `
+          <li>
+            <div class="row" style="justify-content: space-between; align-items: center; gap:8px;">
+              <div style="min-width:0;">
+                <div><strong>@${item?.username || ''}</strong> <span class="muted">• ${relationshipEventLabel(item)}</span></div>
+                <div class="muted">${renderTime(item?.observed_at)} · ${runId} · via @${item?.login_username || 'unknown'}</div>
+              </div>
+              <div class="row" style="gap:6px;">
+                <span class="chip ${tone}">${item?.event_type || 'change'}</span>
+                <button class="secondary" data-event-run="${item?.run_id || ''}" data-event-target="${target}">Open run</button>
+              </div>
+            </div>
+          </li>
+        `;
+      }).join('');
+      list.querySelectorAll('button[data-event-run]').forEach(btn => {
+        btn.onclick = (e) => {
+          const runId = e.currentTarget?.dataset?.eventRun;
+          const runTarget = e.currentTarget?.dataset?.eventTarget || target;
+          if (!runId) return;
+          loadRunDetail(runId, runTarget);
+        };
+      });
+    }
+
+    async function loadRelationshipEvents(target) {
+      const resolvedTarget = target || currentHistoryTarget || document.getElementById('hist-target')?.value || '';
+      currentHistoryTarget = resolvedTarget || null;
+      if (!resolvedTarget) {
+        resetRelationshipEventsUI('Select a tracked account.');
+        return;
+      }
+      const list = document.getElementById('events-list');
+      if (list) list.innerHTML = '<li class="muted">Loading events…</li>';
+      try {
+        const rows = await fetchJSON(buildRelationshipEventsPath(resolvedTarget));
+        renderRelationshipEvents(rows || [], resolvedTarget);
+      } catch (e) {
+        resetRelationshipEventsUI(`Events unavailable: ${e.message}`);
+      }
+    }
+
+    function clearRelationshipEventFilters() {
+      const setValue = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.value = value;
+      };
+      setValue('events-scope', 'target');
+      setValue('events-relation', '');
+      setValue('events-type', '');
+      setValue('events-window', '7');
+      setValue('events-user', '');
+      loadRelationshipEvents(currentHistoryTarget);
     }
     async function loadRunDetail(runId, target) {
       try {
@@ -3038,12 +3138,12 @@
         renderList(document.getElementById('detail-nfb'), r.non_followbacks);
         renderList(document.getElementById('detail-followers'), r.followers);
         renderList(document.getElementById('detail-followees'), r.followees);
-        renderList(document.getElementById('detail-fadd'), r.followers_added_list);
-        renderList(document.getElementById('detail-frem'), r.followers_removed_list);
-        renderList(document.getElementById('detail-feadd'), r.followees_added_list);
-        renderList(document.getElementById('detail-ferem'), r.followees_removed_list);
+        renderRelationshipDetails(document.getElementById('detail-fadd'), r.followers_added_details || []);
+        renderRelationshipDetails(document.getElementById('detail-frem'), r.followers_removed_details || []);
+        renderRelationshipDetails(document.getElementById('detail-feadd'), r.followees_added_details || []);
+        renderRelationshipDetails(document.getElementById('detail-ferem'), r.followees_removed_details || []);
         bindDetailDownloads(target);
-        loadCohortInsights(target);
+        loadRelationshipEvents(target);
       } catch (e) {
         log('Run detail error: ' + e.message);
       }
@@ -3063,7 +3163,12 @@
       if (title) title.textContent = target ? `Run Explorer · @${target}` : 'Run Explorer';
       if (sub) sub.textContent = target ? 'Snapshots for this tracked account (collected via your login).' : 'Select a tracked account to view history.';
       clearHistoryDetail();
-      if (!target) { if (listEl) listEl.innerHTML = '<div class="muted">Select a tracked account.</div>'; return; }
+      if (!target) {
+        resetRelationshipEventsUI('Select a tracked account.');
+        if (listEl) listEl.innerHTML = '<div class="muted">Select a tracked account.</div>';
+        return;
+      }
+      loadRelationshipEvents(target);
       try {
         const rows = await fetchJSON(`/runs?target=${encodeURIComponent(target)}&limit=${limit}`);
         if (!rows.length) { if (listEl) listEl.innerHTML = '<div class="muted">No runs yet.</div>'; return; }
@@ -3794,7 +3899,10 @@
       });
     }
     const backHistoryBtn = document.getElementById('back-history');
-    if (backHistoryBtn) backHistoryBtn.onclick = clearHistoryDetail;
+    if (backHistoryBtn) backHistoryBtn.onclick = () => {
+      clearHistoryDetail();
+      loadRelationshipEvents(currentHistoryTarget);
+    };
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.onclick = () => setActiveHistoryTab(btn.dataset.tab || 'summary');
     });
@@ -3859,10 +3967,21 @@
         if (e.target.id === 'accounts-modal') closeAccountsModal();
       });
     }
-    const cohortKindSel = document.getElementById('detail-cohort-kind');
-    if (cohortKindSel) cohortKindSel.onchange = () => loadCohortInsights(currentHistoryTarget);
-    const cohortWindowSel = document.getElementById('detail-cohort-window');
-    if (cohortWindowSel) cohortWindowSel.onchange = () => loadCohortInsights(currentHistoryTarget);
+    const eventsRefreshBtn = document.getElementById('events-refresh');
+    if (eventsRefreshBtn) eventsRefreshBtn.onclick = () => loadRelationshipEvents(currentHistoryTarget);
+    const eventsClearBtn = document.getElementById('events-clear');
+    if (eventsClearBtn) eventsClearBtn.onclick = clearRelationshipEventFilters;
+    ['events-scope', 'events-relation', 'events-type', 'events-window'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.onchange = () => loadRelationshipEvents(currentHistoryTarget);
+    });
+    const eventsUserInput = document.getElementById('events-user');
+    if (eventsUserInput) {
+      eventsUserInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') loadRelationshipEvents(currentHistoryTarget);
+      });
+      eventsUserInput.addEventListener('blur', () => loadRelationshipEvents(currentHistoryTarget));
+    }
 
     function showAPIError(show = true) {
       const banner = document.getElementById('api-error-banner');
