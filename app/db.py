@@ -147,6 +147,7 @@ def get_columns(conn: DBConn, table: str):
         "runs",
         "run_followers",
         "run_followees",
+        "relationship_events",
         "followers_history",
         "followees_history",
         "schedules",

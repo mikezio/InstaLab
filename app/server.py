@@ -33,7 +33,12 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, jsonify, request, send_from_directory, redirect
 
-from tracker_db import update_run_duration, write_run_metadata, _init_db as _init_run_db
+from tracker_db import (
+    backfill_relationship_events,
+    update_run_duration,
+    write_run_metadata,
+    _init_db as _init_run_db,
+)
 from unfollow_bot import AuthRequiredError, ensure_auth_state, unfollow_users, init_login
 from db import get_db, get_columns, ddl, is_postgres
 from login_store import (
@@ -580,6 +585,9 @@ def _health_check_db():
             "runs",
             "run_followers",
             "run_followees",
+            "followers_history",
+            "followees_history",
+            "relationship_events",
             "schedules",
             "count_checks",
             "unfollow_actions",
@@ -1127,6 +1135,7 @@ def _init_run_tables():
     conn = _get_db()
     try:
         _init_run_db(conn)
+        backfill_relationship_events(conn)
         conn.commit()
     finally:
         conn.close()
@@ -3142,7 +3151,211 @@ def api_run_detail(run_id):
         run["followers_removed_list"] = sorted(prev_followers - cur_f)
         run["followees_added_list"] = sorted(cur_fe - prev_followees)
         run["followees_removed_list"] = sorted(prev_followees - cur_fe)
+        follower_change_names = sorted(set(run["followers_added_list"]) | set(run["followers_removed_list"]))
+        followee_change_names = sorted(set(run["followees_added_list"]) | set(run["followees_removed_list"]))
+        follower_hist = _load_relationship_history_rows(
+            conn,
+            table="followers_history",
+            target_username=run["target_username"],
+            usernames=follower_change_names,
+        )
+        followee_hist = _load_relationship_history_rows(
+            conn,
+            table="followees_history",
+            target_username=run["target_username"],
+            usernames=followee_change_names,
+        )
+        run["followers_added_details"] = _build_relationship_change_details(
+            run["followers_added_list"],
+            follower_hist,
+            relation_type="followers",
+            event_type="added",
+            observed_at=run["timestamp"],
+            run_id=run_id,
+        )
+        run["followers_removed_details"] = _build_relationship_change_details(
+            run["followers_removed_list"],
+            follower_hist,
+            relation_type="followers",
+            event_type="removed",
+            observed_at=run["timestamp"],
+            run_id=run_id,
+        )
+        run["followees_added_details"] = _build_relationship_change_details(
+            run["followees_added_list"],
+            followee_hist,
+            relation_type="following",
+            event_type="added",
+            observed_at=run["timestamp"],
+            run_id=run_id,
+        )
+        run["followees_removed_details"] = _build_relationship_change_details(
+            run["followees_removed_list"],
+            followee_hist,
+            relation_type="following",
+            event_type="removed",
+            observed_at=run["timestamp"],
+            run_id=run_id,
+        )
+        run["relationship_events"] = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT id, target_username, login_username, username,
+                       relation_type, event_type, observed_at, run_id, prev_run_id
+                FROM relationship_events
+                WHERE run_id = ?
+                ORDER BY relation_type, event_type, username
+                """,
+                (run_id,),
+            ).fetchall()
+        ]
         return jsonify(run)
+    finally:
+        conn.close()
+
+
+def _load_relationship_history_rows(conn, *, table, target_username, usernames):
+    if not usernames:
+        return {}
+    names = sorted({u for u in usernames if u})
+    if not names:
+        return {}
+    placeholders = ",".join(["?"] * len(names))
+    query = f"""
+        SELECT username, first_seen, last_seen, first_seen_run_id, last_seen_run_id,
+               first_seen_known, active, unfollowed_at
+        FROM {table}
+        WHERE target_username = ? AND username IN ({placeholders})
+    """
+    rows = conn.execute(query, (target_username, *names)).fetchall()
+    return {row["username"]: dict(row) for row in rows}
+
+
+def _build_relationship_change_details(usernames, history_map, *, relation_type, event_type, observed_at, run_id):
+    details = []
+    for username in usernames:
+        row = history_map.get(username) or {}
+        details.append(
+            {
+                "username": username,
+                "relation_type": relation_type,
+                "event_type": event_type,
+                "observed_at": observed_at,
+                "run_id": run_id,
+                "first_seen": row.get("first_seen"),
+                "last_seen": row.get("last_seen"),
+                "first_seen_run_id": row.get("first_seen_run_id"),
+                "last_seen_run_id": row.get("last_seen_run_id"),
+                "first_seen_known": row.get("first_seen_known"),
+                "active": row.get("active"),
+                "unfollowed_at": row.get("unfollowed_at"),
+            }
+        )
+    return details
+
+
+@app.route("/api/relationship_events", methods=["GET"])
+def api_relationship_events():
+    target = (request.args.get("target") or "").strip()
+    if not target:
+        return jsonify({"error": "target is required"}), 400
+    relation_type = (request.args.get("relation_type") or "").strip().lower()
+    if relation_type and relation_type not in {"followers", "following"}:
+        return jsonify({"error": "relation_type must be followers or following"}), 400
+    event_type = (request.args.get("event_type") or "").strip().lower()
+    if event_type and event_type not in {"added", "removed"}:
+        return jsonify({"error": "event_type must be added or removed"}), 400
+    username = (request.args.get("username") or "").strip()
+    run_id_raw = (request.args.get("run_id") or "").strip()
+    observed_from = (request.args.get("observed_from") or "").strip()
+    observed_to = (request.args.get("observed_to") or "").strip()
+    run_id = None
+    if run_id_raw:
+        try:
+            run_id = int(run_id_raw)
+        except Exception:
+            return jsonify({"error": "run_id must be an integer"}), 400
+    try:
+        limit = max(1, min(int(request.args.get("limit", 200)), 1000))
+    except Exception:
+        limit = 200
+    where = ["target_username = ?"]
+    params = [target]
+    if relation_type:
+        where.append("relation_type = ?")
+        params.append(relation_type)
+    if event_type:
+        where.append("event_type = ?")
+        params.append(event_type)
+    if username:
+        where.append("LOWER(username) LIKE ?")
+        params.append(f"%{username.lower()}%")
+    if run_id is not None:
+        where.append("run_id = ?")
+        params.append(run_id)
+    if observed_from:
+        where.append("observed_at >= ?")
+        params.append(observed_from)
+    if observed_to:
+        where.append("observed_at <= ?")
+        params.append(observed_to)
+    params.append(limit)
+    conn = _get_db()
+    try:
+        query = f"""
+            SELECT id, target_username, login_username, username,
+                   relation_type, event_type, observed_at, run_id, prev_run_id
+            FROM relationship_events
+            WHERE {' AND '.join(where)}
+            ORDER BY observed_at DESC, id DESC
+            LIMIT ?
+        """
+        rows = [dict(r) for r in conn.execute(query, tuple(params)).fetchall()]
+        return jsonify(rows)
+    finally:
+        conn.close()
+
+
+@app.route("/api/relationship_history", methods=["GET"])
+def api_relationship_history():
+    target = (request.args.get("target") or "").strip()
+    if not target:
+        return jsonify({"error": "target is required"}), 400
+    relation_type = (request.args.get("relation_type") or "").strip().lower()
+    table_map = {"followers": "followers_history", "following": "followees_history"}
+    table = table_map.get(relation_type)
+    if not table:
+        return jsonify({"error": "relation_type must be followers or following"}), 400
+    username = (request.args.get("username") or "").strip()
+    active_filter = (request.args.get("active") or "").strip().lower()
+    try:
+        limit = max(1, min(int(request.args.get("limit", 500)), 5000))
+    except Exception:
+        limit = 500
+    where = ["target_username = ?"]
+    params = [target]
+    if username:
+        where.append("username = ?")
+        params.append(username)
+    if active_filter in {"1", "true", "yes", "on"}:
+        where.append("active = 1")
+    elif active_filter in {"0", "false", "no", "off"}:
+        where.append("active = 0")
+    params.append(limit)
+    conn = _get_db()
+    try:
+        query = f"""
+            SELECT target_username, username, first_seen, last_seen,
+                   first_seen_run_id, last_seen_run_id, first_seen_known,
+                   active, unfollowed_at
+            FROM {table}
+            WHERE {' AND '.join(where)}
+            ORDER BY last_seen DESC, username ASC
+            LIMIT ?
+        """
+        rows = [dict(r) for r in conn.execute(query, tuple(params)).fetchall()]
+        return jsonify(rows)
     finally:
         conn.close()
 
