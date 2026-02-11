@@ -1566,24 +1566,27 @@ def _get_non_followbacks_for(conn, target_username):
 def _persist_schedule(login_username, target_username, cron_expr):
     conn = _get_db()
     try:
+        created_at = datetime.now(LOCAL_TZ).isoformat()
         if SCHEMA_HAS_INTERVAL_MINUTES:
-            cur = conn.execute(
-                """
+            sql = """
                 INSERT INTO schedules (login_username, target_username, interval_minutes, interval, created_at)
                 VALUES (?, ?, 0, ?, ?)
-                """,
-                (login_username, target_username, cron_expr, datetime.now(LOCAL_TZ).isoformat()),
-            )
+            """
+            params = (login_username, target_username, cron_expr, created_at)
         else:
-            cur = conn.execute(
-                """
+            sql = """
                 INSERT INTO schedules (login_username, target_username, interval, created_at)
                 VALUES (?, ?, ?, ?)
-                """,
-                (login_username, target_username, cron_expr, datetime.now(LOCAL_TZ).isoformat()),
-            )
+            """
+            params = (login_username, target_username, cron_expr, created_at)
+        if is_postgres():
+            cur = conn.execute(sql + " RETURNING id", params)
+            schedule_id = cur.fetchone()[0]
+        else:
+            cur = conn.execute(sql, params)
+            schedule_id = cur.lastrowid
         conn.commit()
-        return cur.lastrowid
+        return int(schedule_id)
     finally:
         conn.close()
 
