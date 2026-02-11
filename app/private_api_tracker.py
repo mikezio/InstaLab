@@ -55,6 +55,7 @@ TWO_FACTOR_POLL_SECONDS = int(os.getenv("RUN_2FA_POLL_SECONDS", "180") or 180)
 TWO_FACTOR_POLL_INTERVAL = float(os.getenv("RUN_2FA_POLL_INTERVAL", "5") or 5)
 REQUEST_SLEEP_MAX = float(os.getenv("INSTALAB_PRIVATE_REQUEST_SLEEP_MAX", "2.0") or 2.0)
 REQUEST_SLEEP_FALLBACK = float(os.getenv("INSTALAB_PRIVATE_REQUEST_SLEEP", "1.0") or 1.0)
+ANONYMOUS_LOGIN_MODES = {"anonymous", "public", "no_login", "no-login", "anon"}
 
 DEFAULT_DEVICE_SETTINGS = {
     "app_version": "414.0.0.40.83",
@@ -74,6 +75,23 @@ class PrivateAPIError(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+def _normalize_login_mode(login_mode: str | None) -> str:
+    mode = (login_mode or "auto").strip().lower()
+    if mode in {"session", "session-only"}:
+        return "session_only"
+    if mode == "password-only":
+        return "password"
+    if mode in ANONYMOUS_LOGIN_MODES:
+        return "anonymous"
+    if mode in {"auto", "session_only", "password"}:
+        return mode
+    return "auto"
+
+
+def _is_anonymous_login_mode(login_mode: str | None) -> bool:
+    return _normalize_login_mode(login_mode) == "anonymous"
 
 
 def _trace_span(name, **tags):
@@ -552,6 +570,40 @@ def _apply_device_settings(
     return True
 
 
+def _build_public_client(
+    proxy_url: str | None,
+    *,
+    http_timeout_seconds: float | None = None,
+    request_sleep_seconds: float | None = None,
+    request_timeout: float = 120.0,
+    delay_min: float | None = None,
+    delay_max: float | None = None,
+):
+    cl = Client()
+    if http_timeout_seconds is None:
+        http_timeout_seconds = request_timeout
+    _wrap_requests_timeout(getattr(cl, "public", None), http_timeout_seconds)
+    if request_sleep_seconds is None:
+        request_sleep_seconds = REQUEST_SLEEP_FALLBACK
+    try:
+        sleep_seconds = float(request_sleep_seconds or 0.0)
+    except Exception:
+        sleep_seconds = 0.0
+    if sleep_seconds < 0:
+        sleep_seconds = 0.0
+    cl.request_timeout = min(sleep_seconds, REQUEST_SLEEP_MAX)
+    if delay_min is not None or delay_max is not None:
+        min_delay = float(delay_min or 0.0)
+        max_delay = float(delay_max or 0.0)
+        if max_delay and min_delay > max_delay:
+            min_delay, max_delay = max_delay, min_delay
+        if min_delay > 0 or max_delay > 0:
+            cl.delay_range = [min_delay, max_delay or min_delay]
+    if proxy_url:
+        cl.set_proxy(proxy_url)
+    return cl
+
+
 def _build_client(
     login_username: str,
     login_password: str,
@@ -777,8 +829,8 @@ def _build_client(
             pass
 
     try:
-        mode = (login_mode or "auto").strip().lower()
-        if mode in {"session_only", "session-only"}:
+        mode = _normalize_login_mode(login_mode)
+        if mode == "session_only":
             mode = "session"
         if settings:
             cl.set_settings(settings)
@@ -994,32 +1046,51 @@ def fetch_counts(
     device_settings_json=None,
     user_agent=None,
 ):
-    _ = (cookie_file, login_mode)
+    _ = cookie_file
+    mode = _normalize_login_mode(login_mode)
     proxy = load_proxy_from_env()
     proxy_url = proxy.get("url") if proxy else None
-    client = _build_client(
-        login_username,
-        login_password or "",
-        proxy_url,
-        http_timeout_seconds=http_timeout_seconds,
-        request_sleep_seconds=request_sleep_seconds,
-        request_timeout=request_timeout,
-        two_factor_code=two_factor_code,
-        challenge_code=challenge_code,
-        totp_seed=totp_seed,
-        login_mode=login_mode,
-        delay_min=delay_min,
-        delay_max=delay_max,
-        device_settings_json=device_settings_json,
-        user_agent=user_agent,
-    )
+    if _is_anonymous_login_mode(mode):
+        client = _build_public_client(
+            proxy_url,
+            http_timeout_seconds=http_timeout_seconds,
+            request_sleep_seconds=request_sleep_seconds,
+            request_timeout=request_timeout,
+            delay_min=delay_min,
+            delay_max=delay_max,
+        )
+        with _trace_span(
+            "instalab.public_api.username_info",
+            login_username=login_username,
+            target_username=target_username,
+        ):
+            user = client.user_info_by_username_gql(target_username)
+        if getattr(user, "is_private", False):
+            raise RuntimeError("anonymous mode only supports public target accounts")
+    else:
+        client = _build_client(
+            login_username,
+            login_password or "",
+            proxy_url,
+            http_timeout_seconds=http_timeout_seconds,
+            request_sleep_seconds=request_sleep_seconds,
+            request_timeout=request_timeout,
+            two_factor_code=two_factor_code,
+            challenge_code=challenge_code,
+            totp_seed=totp_seed,
+            login_mode=mode,
+            delay_min=delay_min,
+            delay_max=delay_max,
+            device_settings_json=device_settings_json,
+            user_agent=user_agent,
+        )
 
-    with _trace_span(
-        "instalab.private_api.username_info",
-        login_username=login_username,
-        target_username=target_username,
-    ):
-        user = _user_info_private_first(client, target_username)
+        with _trace_span(
+            "instalab.private_api.username_info",
+            login_username=login_username,
+            target_username=target_username,
+        ):
+            user = _user_info_private_first(client, target_username)
     return {
         "followers_count": int(getattr(user, "follower_count", 0) or 0),
         "followees_count": int(getattr(user, "following_count", 0) or 0),
@@ -1056,6 +1127,8 @@ def snapshot_profile(
     user_agent=None,
 ):
     tz = ZoneInfo("America/New_York")
+    mode = _normalize_login_mode(login_mode)
+    anonymous_mode = _is_anonymous_login_mode(mode)
 
     proxy = load_proxy_from_env()
     proxy_url = proxy.get("url") if proxy else None
@@ -1066,31 +1139,49 @@ def snapshot_profile(
         except Exception:
             pass
 
-    client = _build_client(
-        login_username,
-        login_password or "",
-        proxy_url,
-        http_timeout_seconds=http_timeout_seconds,
-        request_sleep_seconds=request_sleep_seconds,
-        request_timeout=request_timeout,
-        two_factor_code=two_factor_code,
-        challenge_code=challenge_code,
-        totp_seed=totp_seed,
-        login_mode=login_mode,
-        delay_min=item_delay_min,
-        delay_max=item_delay_max,
-        device_settings_json=device_settings_json,
-        user_agent=user_agent,
-        trace_enabled=trace_enabled,
-        trace_path=trace_path,
-    )
+    if anonymous_mode:
+        client = _build_public_client(
+            proxy_url,
+            http_timeout_seconds=http_timeout_seconds,
+            request_sleep_seconds=request_sleep_seconds,
+            request_timeout=request_timeout,
+            delay_min=item_delay_min,
+            delay_max=item_delay_max,
+        )
+        with _trace_span(
+            "instalab.public_api.username_info",
+            login_username=login_username,
+            target_username=target_username,
+        ):
+            user = client.user_info_by_username_gql(target_username)
+        if getattr(user, "is_private", False):
+            raise RuntimeError("anonymous mode only supports public target accounts")
+    else:
+        client = _build_client(
+            login_username,
+            login_password or "",
+            proxy_url,
+            http_timeout_seconds=http_timeout_seconds,
+            request_sleep_seconds=request_sleep_seconds,
+            request_timeout=request_timeout,
+            two_factor_code=two_factor_code,
+            challenge_code=challenge_code,
+            totp_seed=totp_seed,
+            login_mode=mode,
+            delay_min=item_delay_min,
+            delay_max=item_delay_max,
+            device_settings_json=device_settings_json,
+            user_agent=user_agent,
+            trace_enabled=trace_enabled,
+            trace_path=trace_path,
+        )
 
-    with _trace_span(
-        "instalab.private_api.username_info",
-        login_username=login_username,
-        target_username=target_username,
-    ):
-        user = _user_info_private_first(client, target_username)
+        with _trace_span(
+            "instalab.private_api.username_info",
+            login_username=login_username,
+            target_username=target_username,
+        ):
+            user = _user_info_private_first(client, target_username)
 
     target_id = getattr(user, "pk", None)
     if not target_id:
@@ -1137,7 +1228,7 @@ def snapshot_profile(
         raise RuntimeError("cancelled")
 
     page_progress_state = None
-    if progress:
+    if progress and not anonymous_mode:
         page_progress_state = {
             "target_id": str(target_id),
             "callback": progress,
@@ -1155,14 +1246,24 @@ def snapshot_profile(
             except Exception:
                 pass
 
-        with _trace_span(
-            "instalab.private_api.user_followers",
-            login_username=login_username,
-            target_username=target_username,
-            target_id=target_id,
-        ):
-            followers_map = client.user_followers(target_id, amount=0)
-        followers = [u.username for u in followers_map.values() if getattr(u, "username", None)]
+        if anonymous_mode:
+            with _trace_span(
+                "instalab.public_api.user_followers",
+                login_username=login_username,
+                target_username=target_username,
+                target_id=target_id,
+            ):
+                follower_items = client.user_followers_gql(str(target_id), amount=0)
+            followers = [u.username for u in follower_items if getattr(u, "username", None)]
+        else:
+            with _trace_span(
+                "instalab.private_api.user_followers",
+                login_username=login_username,
+                target_username=target_username,
+                target_id=target_id,
+            ):
+                followers_map = client.user_followers(target_id, amount=0)
+            followers = [u.username for u in followers_map.values() if getattr(u, "username", None)]
         followers_fetch_seconds = int(time.time() - t0)
         if progress:
             try:
@@ -1183,14 +1284,24 @@ def snapshot_profile(
             except Exception:
                 pass
 
-        with _trace_span(
-            "instalab.private_api.user_following",
-            login_username=login_username,
-            target_username=target_username,
-            target_id=target_id,
-        ):
-            followees_map = client.user_following(target_id, amount=0)
-        followees = [u.username for u in followees_map.values() if getattr(u, "username", None)]
+        if anonymous_mode:
+            with _trace_span(
+                "instalab.public_api.user_following",
+                login_username=login_username,
+                target_username=target_username,
+                target_id=target_id,
+            ):
+                followee_items = client.user_following_gql(str(target_id), amount=0)
+            followees = [u.username for u in followee_items if getattr(u, "username", None)]
+        else:
+            with _trace_span(
+                "instalab.private_api.user_following",
+                login_username=login_username,
+                target_username=target_username,
+                target_id=target_id,
+            ):
+                followees_map = client.user_following(target_id, amount=0)
+            followees = [u.username for u in followees_map.values() if getattr(u, "username", None)]
         followees_fetch_seconds = int(time.time() - t1)
         if progress:
             try:

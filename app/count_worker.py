@@ -54,6 +54,8 @@ def main():
 
     fetch_counts, has_session = _select_backend()
     password = os.environ.get("RUN_LOGIN_PASSWORD")
+    login_mode = (os.environ.get("RUN_LOGIN_MODE") or "auto").strip().lower()
+    anonymous_mode = login_mode in {"anonymous", "public", "no_login", "no-login"}
     two_factor_code = os.environ.get("RUN_2FA_CODE")
     challenge_code = os.environ.get("RUN_CHALLENGE_CODE")
     totp_seed = os.environ.get("RUN_TOTP_SEED")
@@ -62,12 +64,12 @@ def main():
     delay_min = float(os.environ.get("RUN_ITEM_DELAY_MIN", "0") or 0)
     delay_max = float(os.environ.get("RUN_ITEM_DELAY_MAX", "0") or 0)
     cookie_file = args.cookie_file or ""
-    if not password and not has_session(args.login):
+    if not anonymous_mode and not password and not has_session(args.login):
         with _trace_span(
             "instalab.count_check",
             backend=(os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower(),
             proxy_enabled=bool(os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")),
-            login_mode=(os.environ.get("RUN_LOGIN_MODE") or "auto").strip().lower(),
+            login_mode=login_mode,
         ) as span:
             if span:
                 span.set_tag("instalab.status", "error")
@@ -77,7 +79,6 @@ def main():
     password = password or ""
 
     backend_name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
-    login_mode = (os.environ.get("RUN_LOGIN_MODE") or "auto").strip().lower()
     proxy_enabled = bool(os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"))
     with _trace_span(
         "instalab.count_check",
