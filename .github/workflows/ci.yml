@@ -9,12 +9,31 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: instalab_ci
+          POSTGRES_USER: instalab_ci
+          POSTGRES_PASSWORD: instalab_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U instalab_ci -d instalab_ci"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     env:
       INSTALAB_ENV: /tmp/instalab.env
-      INSTALAB_DB_TYPE: sqlite
-      INSTALAB_SQLITE_PATH: /tmp/instalab.db
+      INSTALAB_DB_TYPE: postgres
+      INSTALAB_DB_HOST: 127.0.0.1
+      INSTALAB_DB_PORT: "5432"
+      INSTALAB_DB_NAME: instalab_ci
+      INSTALAB_DB_USER: instalab_ci
+      INSTALAB_DB_PASS: instalab_ci
       INSTALAB_COOKIE_DIR: /tmp/instalab-cookies
       INSTALAB_LOGINS_FILE: /tmp/instalab-logins.json
+      INSTALAB_PRIVATE_SETTINGS_DIR: /tmp/instalab-private
       INSTALAB_API_BASE: http://127.0.0.1:5000/
       DD_TRACE_ENABLED: "false"
       DD_RUNTIME_METRICS_ENABLED: "false"
@@ -32,9 +51,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r app/requirements.txt
 
+      - name: Wait for Postgres
+        run: |
+          python - <<'PY'
+          import os
+          import time
+
+          import psycopg2
+
+          host = os.environ["INSTALAB_DB_HOST"]
+          port = int(os.environ["INSTALAB_DB_PORT"])
+          name = os.environ["INSTALAB_DB_NAME"]
+          user = os.environ["INSTALAB_DB_USER"]
+          password = os.environ["INSTALAB_DB_PASS"]
+
+          deadline = time.time() + 90
+          while time.time() < deadline:
+            try:
+              conn = psycopg2.connect(
+                host=host,
+                port=port,
+                dbname=name,
+                user=user,
+                password=password,
+              )
+              conn.close()
+              print("postgres ready")
+              break
+            except Exception:
+              time.sleep(2)
+          else:
+            raise SystemExit("Postgres did not become ready in time")
+          PY
+
       - name: Python smoke import
         run: |
-          python -c "import server; import instaloader_tracker; print('python ok')"
+          python -c "import server; import private_api_tracker; import validation; print('python ok')"
         working-directory: app
 
       - name: Set up Node

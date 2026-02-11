@@ -11,14 +11,19 @@ This document describes the Flask API endpoints available in InstaLab.
 ## Table of Contents
 
 - [Health & Status](#health--status)
+- [Run Lifecycle](#run-lifecycle)
 - [Runs](#runs)
+- [Jobs](#jobs)
 - [Targets](#targets)
 - [Logins](#logins)
 - [Insights](#insights)
 - [Unfollow](#unfollow)
 - [Monitor](#monitor)
+- [Summary](#summary)
 - [Configuration](#configuration)
+- [Schedules](#schedules)
 - [Import](#import)
+- [Error Responses](#error-responses)
 
 ---
 
@@ -26,40 +31,67 @@ This document describes the Flask API endpoints available in InstaLab.
 
 ### GET `/api/health`
 
-System health check endpoint.
-
 **Response:**
 ```json
 {
   "status": "ok",
-  "db_type": "sqlite",
-  "db_connected": true,
-  "scheduler_running": true,
-  "active_jobs": 0,
-  "timestamp": "2024-01-15T10:30:00Z"
+  "checks": {
+    "db": {"status": "ok"},
+    "files": {"status": "ok"},
+    "scheduler": {"status": "ok"}
+  }
 }
 ```
 
+### GET `/api/health/detail`
+
+Includes extra checks (sessions, scraper, runs, unfollow).
+
 ### GET `/api/status`
 
-Real-time job queue status.
+Real‑time run status **for active jobs only**. Completed jobs are not listed here.
 
 **Response:**
 ```json
 {
-  "active_jobs": {
-    "job_abc123": {
-      "job_id": "job_abc123",
-      "target": "target_username",
-      "login": "login_username",
-      "started_at": "2024-01-15T10:25:00Z",
-      "status": "running"
+  "state": "running",
+  "active_jobs": [
+    {
+      "job_id": "<job_id>",
+      "login_username": "login",
+      "target_username": "target",
+      "phase": "followers",
+      "followers_progress": 120,
+      "following_progress": 0,
+      "followers_total": 500,
+      "following_total": 300,
+      "elapsed_seconds": 42,
+      "eta_seconds": 180
     }
-  },
-  "completed_count": 42,
-  "failed_count": 3
+  ],
+  "queued_jobs": [],
+  "active_logins": ["login"],
+  "queued_logins": [],
+  "unfollow": {"state": "idle"}
 }
 ```
+
+---
+
+## Run Lifecycle
+
+### Typical flow
+1. Add login (`/api/logins/add`) or ensure existing login has password/session.
+2. Start run (`/api/run`).
+3. If 2FA/challenge required, submit code via `/api/logins/challenge` or include `two_factor_code` / `challenge_code` in the run request.
+4. Poll `/api/run/<job_id>` until `done=true`.
+5. Use `/api/jobs/latest?login_username=...` for logs/trace tail.
+6. View run history via `/api/runs` and `/api/run/<run_id>`.
+
+### Locking behavior
+- Per‑login run lock: only one active run per login.
+- Per‑target run lock: only one active run per target.
+- If locked, API returns **429**.
 
 ---
 
@@ -67,114 +99,95 @@ Real-time job queue status.
 
 ### POST `/api/run`
 
-Queue a new snapshot run.
+Queue a snapshot run.
 
-**Request Body:**
+**Request:**
 ```json
 {
-  "target": "target_username",
-  "login": "login_username",
-  "scraper_backend": "instaloader"  // optional: "instaloader" or "selenium"
+  "login_username": "login",
+  "target_username": "target",
+  "two_factor_code": "123456",
+  "challenge_code": "123456"
 }
 ```
 
-**Response (202 Accepted):**
+**Response:**
 ```json
-{
-  "job_id": "job_abc123",
-  "status": "queued",
-  "poll_url": "/api/run/job_abc123"
-}
+{ "job_id": "<job_id>" }
 ```
 
 ### GET `/api/run/<job_id>`
 
-Poll the status of a queued/running job.
+Poll job status.
 
-**Response (still running):**
+**Response (running):**
 ```json
-{
-  "job_id": "job_abc123",
-  "status": "running",
-  "progress": {
-    "stage": "fetching_followers",
-    "followers_fetched": 1250,
-    "followees_fetched": 0
-  }
-}
+{ "done": false, "meta": {"login_username": "login", "target_username": "target"} }
 ```
 
 **Response (completed):**
 ```json
 {
-  "job_id": "job_abc123",
-  "status": "done",
-  "run_id": 42,
-  "result": {
-    "run_id": 42,
-    "target_username": "target_username",
-    "login_username": "login_username",
-    "followers_count": 5432,
-    "followees_count": 1234,
-    "non_followbacks_count": 890,
-    "created_at": "2024-01-15T10:30:00Z",
-    "duration_seconds": 125
+  "done": true,
+  "meta": {"login_username": "login", "target_username": "target"},
+  "payload": {
+    "status": "success",
+    "started_at": "...",
+    "finished_at": "...",
+    "result": {
+      "run_id": 143,
+      "followers_count": 2,
+      "followees_count": 3,
+      "non_followbacks_count": 3,
+      "followers_fetch_seconds": 5,
+      "followees_fetch_seconds": 4
+    }
   }
 }
 ```
 
-**Response (failed):**
+### GET `/api/runs?target=<user>&limit=<n>`
+
+List run history for a target.
+
+### GET `/api/run/<int:run_id>`
+
+Full run detail including follower/followee lists and deltas.
+
+### POST `/api/run/cancel`
+
+Cancel a running job.
+
+**Request:**
 ```json
-{
-  "job_id": "job_abc123",
-  "status": "failed",
-  "error": "Authentication failed: Invalid credentials"
-}
+{ "login_username": "login", "target_username": "target" }
 ```
 
-### GET `/api/runs`
+### DELETE `/api/run/<int:run_id>`
 
-List historical runs for a target.
+Delete a run (soft delete).
 
-**Query Parameters:**
-- `target` (required): Target username
-- `limit` (optional): Max results (default: 50)
+### POST `/api/run/undo/<int:run_id>`
 
-**Response:**
-```json
-{
-  "runs": [
-    {
-      "id": 42,
-      "target_username": "target_username",
-      "login_username": "login_username",
-      "created_at": "2024-01-15T10:30:00Z",
-      "followers_count": 5432,
-      "followees_count": 1234,
-      "duration_seconds": 125
-    }
-  ]
-}
-```
+Restore a deleted run.
 
-### GET `/api/run/<run_id>`
+---
 
-Get detailed run data including follower/followee lists.
+## Jobs
 
-**Response:**
-```json
-{
-  "run": {
-    "id": 42,
-    "target_username": "target_username",
-    "created_at": "2024-01-15T10:30:00Z",
-    "followers_count": 5432,
-    "followees_count": 1234
-  },
-  "followers": ["user1", "user2", "..."],
-  "followees": ["user3", "user4", "..."]
-}
-```
+### GET `/api/jobs/<job_id>/detail`
+
+Returns progress/result plus log tails.
+
+### GET `/api/jobs/latest?login_username=<login>`
+
+Returns the latest job for a login (progress/result/log tails + trace tail).
+
+**Response keys:**
+- `progress` – current phase/count
+- `result` – final success/error payload if finished
+- `worker_out_tail` / `worker_err_tail`
+- `trace_tail` – private API request/response trace (JSONL tail)
 
 ---
 
@@ -182,63 +195,15 @@ Get detailed run data including follower/followee lists.
 
 ### GET `/api/targets`
 
-List all tracked targets.
-
-**Response:**
-```json
-{
-  "targets": [
-    {
-      "username": "target1",
-      "run_count": 15,
-      "first_run": "2023-12-01T10:00:00Z",
-      "last_run": "2024-01-15T10:30:00Z"
-    }
-  ]
-}
-```
+List targets with latest run timestamps.
 
 ### GET `/api/targets_summary`
 
-Summary of latest metrics for all targets with weekly deltas.
-
-**Response:**
-```json
-{
-  "targets": [
-    {
-      "username": "target1",
-      "latest_followers": 5432,
-      "latest_followees": 1234,
-      "latest_run": "2024-01-15T10:30:00Z",
-      "delta_followers_7d": 45,
-      "delta_followees_7d": -12,
-      "trend": "growing"
-    }
-  ]
-}
-```
+Aggregate summary per target (latest run + deltas + week aggregates).
 
 ### GET `/api/last_status`
 
-Most recent runs across all targets or for a specific target.
-
-**Query Parameters:**
-- `target` (optional): Filter to specific target
-
-**Response:**
-```json
-{
-  "last_runs": [
-    {
-      "id": 42,
-      "target_username": "target1",
-      "created_at": "2024-01-15T10:30:00Z",
-      "followers_count": 5432
-    }
-  ]
-}
-```
+Latest run per target plus overall latest run.
 
 ---
 
@@ -246,207 +211,94 @@ Most recent runs across all targets or for a specific target.
 
 ### GET `/api/logins`
 
-List available login accounts.
+List available logins (masked fields only).
 
-**Response:**
-```json
-{
-  "logins": [
-    {
-      "username": "login1",
-      "has_password": true,
-      "has_cookie": true,
-      "cookie_file": "/data/instalab/cookies/login1_session.json",
-      "last_used": "2024-01-15T10:30:00Z"
-    }
-  ]
-}
-```
-
-⚠️ **Security:** This endpoint may expose password status. Should be restricted in production.
+**Fields include:**
+- `login_username`
+- `has_password`, `has_totp_seed`
+- `private_session_exists`, `private_session_mtime`
+- `last_login_at`, `last_error`
 
 ### POST `/api/logins/add`
 
-Add or update a login account.
+Add or update a login.
 
-**Request Body:**
+**Request:**
 ```json
 {
-  "username": "new_login",
-  "password": "instagram_password",
-  "cookie_file": "/path/to/session.json"  // optional
+  "login_username": "login",
+  "login_password": "password",
+  "totp_seed": "BASE32"
 }
 ```
 
-**Response:**
-```json
-{
-  "success": true,
-  "username": "new_login",
-  "message": "Login added successfully"
-}
-```
+### POST `/api/logins/reset`
+
+Clear cached session for a login.
 
 ### POST `/api/logins/delete`
 
-Remove a login account.
+Delete a login.
 
-**Request Body:**
-```json
-{
-  "username": "login_to_remove"
-}
-```
+### POST `/api/logins/challenge`
 
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Login deleted"
-}
-```
+Store an SMS/email challenge code for the next run.
+Codes are consumed once and expire after ~2 minutes.
+
+### POST `/api/logins/new-password`
+
+Store a forced‑reset password.
+
+### POST `/api/logins/totp/seed`
+
+Generate a new TOTP seed (returns `totp_seed`).
+
+### POST `/api/logins/totp/enable`
+
+Enable TOTP (returns backup codes if provided by Instagram).
+
+### POST `/api/logins/totp/disable`
+
+Disable TOTP.
+
+### POST `/api/logins/totp/code`
+
+Generate a TOTP code from stored seed.
 
 ---
 
 ## Insights
 
-### GET `/api/insights/followers`
+### GET `/api/insights/followers?target=<user>&kind=followers|following&days=7`
 
-Follower churn analysis (new, active, churned followers).
-
-**Query Parameters:**
-- `target` (required): Target username
-- `limit` (optional): Max results (default: 100)
-
-**Response:**
-```json
-{
-  "new_followers": [
-    {
-      "username": "user1",
-      "first_seen": "2024-01-15T10:30:00Z",
-      "days_following": 5
-    }
-  ],
-  "churned_followers": [
-    {
-      "username": "user2",
-      "first_seen": "2023-12-01T10:00:00Z",
-      "last_seen": "2024-01-10T08:00:00Z",
-      "days_followed": 40
-    }
-  ],
-  "active_followers": 5432,
-  "total_historical": 5678
-}
-```
-
-### GET `/api/insights/followees`
-
-Similar to `/api/insights/followers` but for accounts the target follows.
+Returns active + churned follower/following insights for the time window.
 
 ---
 
 ## Unfollow
 
-### GET `/api/unfollow/status`
+### GET `/api/unfollow/status?login_username=<login>`
 
-Current unfollow operation status.
-
-**Query Parameters:**
-- `login` (required): Login username
-
-**Response (idle):**
-```json
-{
-  "status": "idle",
-  "login": "login1",
-  "eligible_count": 150,
-  "last_run": "2024-01-10T14:30:00Z"
-}
-```
-
-**Response (running):**
-```json
-{
-  "status": "running",
-  "login": "login1",
-  "progress": {
-    "completed": 12,
-    "total": 25,
-    "current": "user123",
-    "success_count": 11,
-    "fail_count": 1
-  }
-}
-```
-
-### GET `/api/unfollow/preview`
-
-Preview list of users eligible for unfollowing.
-
-**Query Parameters:**
-- `login` (required): Login username
-- `limit` (optional): Max results (default: 25)
-
-**Response:**
-```json
-{
-  "eligible": [
-    {
-      "username": "user1",
-      "not_following_back": true,
-      "days_since_follow": 45
-    }
-  ],
-  "total_eligible": 150
-}
-```
+### GET `/api/unfollow/preview?login_username=<login>`
 
 ### POST `/api/unfollow/start`
 
-Begin batch unfollow operation.
-
-**Request Body:**
+**Request:**
 ```json
 {
-  "login": "login1",
-  "max_count": 25,
+  "login_username": "login",
+  "max_actions": 25,
   "dry_run": false,
   "delay_min": 25,
   "delay_max": 45
 }
 ```
 
-**Response:**
-```json
-{
-  "success": true,
-  "job_id": "unfollow_xyz789",
-  "estimated_duration_seconds": 750,
-  "message": "Unfollow started for 25 users"
-}
-```
-
 ### POST `/api/unfollow/cancel`
 
-Cancel a running unfollow operation.
+### POST `/api/unfollow/init`
 
-**Request Body:**
-```json
-{
-  "login": "login1"
-}
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Unfollow cancelled",
-  "completed_count": 12
-}
-```
+Starts interactive login for unfollow flow (used only if required).
 
 ---
 
@@ -454,25 +306,15 @@ Cancel a running unfollow operation.
 
 ### GET `/api/monitor/status`
 
-Status of automated monitoring jobs.
+Status for automated count checks (per target + overall).
 
-**Response:**
-```json
-{
-  "enabled": true,
-  "interval_minutes": 120,
-  "last_check": "2024-01-15T09:00:00Z",
-  "next_check": "2024-01-15T11:00:00Z",
-  "recent_checks": [
-    {
-      "target": "target1",
-      "timestamp": "2024-01-15T09:00:00Z",
-      "delta": 3,
-      "triggered_run": false
-    }
-  ]
-}
-```
+---
+
+## Summary
+
+### GET `/api/summary`
+
+High‑level totals and performance stats.
 
 ---
 
@@ -480,38 +322,29 @@ Status of automated monitoring jobs.
 
 ### GET `/api/config`
 
-Get current system configuration.
-
-**Response:**
-```json
-{
-  "run_stall_seconds": 1200,
-  "run_max_seconds": 10800,
-  "monitor_interval_minutes": 120,
-  "monitor_threshold_delta": 4,
-  "unfollow_max_per_run": 25
-}
-```
+Returns current config + defaults (masked for sensitive values).
 
 ### PUT `/api/config`
 
-Update system configuration.
+Update config values. If `proxy_enabled` is true, host/port/user/pass are required.
 
-**Request Body:**
-```json
-{
-  "monitor_threshold_delta": 5,
-  "unfollow_max_per_run": 30
-}
-```
+---
 
-**Response:**
-```json
-{
-  "success": true,
-  "updated": ["monitor_threshold_delta", "unfollow_max_per_run"]
-}
-```
+## Schedules
+
+### GET `/api/schedules`
+
+List schedules.
+
+### POST `/api/schedules`
+
+Create schedule with cron expression.
+
+### PUT `/api/schedules/<id>`
+
+Update target or cron.
+
+### DELETE `/api/schedules/<id>`
 
 ---
 
@@ -519,85 +352,35 @@ Update system configuration.
 
 ### POST `/api/import/osintgraph`
 
-Bulk import follower/followee data from external source.
+Bulk import follower/followee lists.
 
-**Request Body:**
+**Request:**
 ```json
 {
-  "target": "target_username",
-  "login": "login_username",
-  "followers": ["user1", "user2", "user3"],
-  "followees": ["user4", "user5"],
-  "timestamp": "2024-01-15T10:30:00Z"
+  "target_username": "target",
+  "login_username": "login",
+  "followers": ["user1"],
+  "followees": ["user2"],
+  "timestamp": "2026-02-04_12-08-23"
 }
 ```
 
 **Response:**
 ```json
-{
-  "success": true,
-  "run_id": 43,
-  "imported_followers": 3,
-  "imported_followees": 2
-}
+{ "ok": true, "run_id": 123, "changes": {"followers": {"added": [], "removed": []}} }
 ```
 
 ---
 
 ## Error Responses
 
-All endpoints may return error responses:
+**400:** `{"error": "..."}`
 
-**400 Bad Request:**
-```json
-{
-  "error": "Missing required parameter: target"
-}
-```
+**404:** `{"error": "not found"}`
 
-**404 Not Found:**
-```json
-{
-  "error": "Run not found: 999"
-}
-```
+**429:** `{"error": "another run is already in progress for this login"}`
 
-**500 Internal Server Error:**
-```json
-{
-  "error": "Database connection failed"
-}
-```
-
----
-
-## Rate Limiting
-
-Currently, there is **no rate limiting** implemented. In production:
-
-- Implement per-IP rate limits at reverse proxy level
-- Add API key authentication with per-key quotas
-- Consider request queuing for expensive operations
-
----
-
-## Webhooks (Future)
-
-Not currently implemented. Future enhancement ideas:
-
-- POST webhook on run completion
-- POST webhook on monitor threshold exceeded
-- POST webhook on unfollow batch completion
-
----
-
-## WebSockets (Future)
-
-Not currently implemented. Future enhancement for real-time updates:
-
-- Live job progress updates
-- Real-time follower count changes
-- Active user presence indicators
+**500:** `{"error": "..."}`
 
 ---
 

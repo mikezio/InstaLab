@@ -15,7 +15,7 @@ for _p in _env_paths:
     if _p.exists():
         load_dotenv(_p)
 
-DB_TYPE = os.getenv("INSTALAB_DB_TYPE", "sqlite").strip().lower()
+DB_TYPE = os.getenv("INSTALAB_DB_TYPE", "postgres").strip().lower()
 
 # Simple connection pool for PostgreSQL
 _pg_pool = None
@@ -28,7 +28,7 @@ def is_postgres() -> bool:
 
 def _adapt_sql(sql: str) -> str:
     if is_postgres():
-        # sqlite uses ?, psycopg2 uses %s
+        # psycopg2 uses %s placeholders
         return sql.replace("?", "%s")
     return sql
 
@@ -78,87 +78,66 @@ class DBConn:
 
 
 def get_db():
-    if is_postgres():
-        import psycopg2
-        import psycopg2.extras
-        from psycopg2 import pool
+    if not is_postgres():
+        raise RuntimeError("SQLite is disabled. Set INSTALAB_DB_TYPE=postgres.")
 
-        global _pg_pool, _pg_pool_lock
-        
-        # Initialize pool on first use (lazy initialization)
-        if _pg_pool is None:
-            with _pg_pool_lock:
-                if _pg_pool is None:  # Double-check pattern
-                    host = os.getenv("INSTALAB_DB_HOST", "127.0.0.1")
-                    port = int(os.getenv("INSTALAB_DB_PORT", "5432"))
-                    name = os.getenv("INSTALAB_DB_NAME", "instalab")
-                    user = os.getenv("INSTALAB_DB_USER", "instalab")
-                    password = os.getenv("INSTALAB_DB_PASS", "")
-                    
-                    # Create a threaded connection pool (min 2, max 10 connections)
-                    # ThreadedConnectionPool is thread-safe for Flask multi-threaded apps
-                    try:
-                        _pg_pool = pool.ThreadedConnectionPool(
-                            minconn=2,
-                            maxconn=10,
-                            host=host,
-                            port=port,
-                            dbname=name,
-                            user=user,
-                            password=password,
-                            cursor_factory=psycopg2.extras.DictCursor,
-                        )
-                    except Exception:
-                        # If pool creation fails, fall back to direct connection
-                        _pg_pool = None
-        
-        # Try to get connection from pool
-        if _pg_pool:
-            try:
-                conn = _pg_pool.getconn()
-                return DBConn(conn, "postgres", pooled=True)
-            except Exception:
-                pass
-        
-        # Fallback to direct connection if pool unavailable
-        host = os.getenv("INSTALAB_DB_HOST", "127.0.0.1")
-        port = int(os.getenv("INSTALAB_DB_PORT", "5432"))
-        name = os.getenv("INSTALAB_DB_NAME", "instalab")
-        user = os.getenv("INSTALAB_DB_USER", "instalab")
-        password = os.getenv("INSTALAB_DB_PASS", "")
+    import psycopg2
+    import psycopg2.extras
+    from psycopg2 import pool
 
-        conn = psycopg2.connect(
-            host=host,
-            port=port,
-            dbname=name,
-            user=user,
-            password=password,
-            cursor_factory=psycopg2.extras.DictCursor,
-        )
-        return DBConn(conn, "postgres")
+    global _pg_pool, _pg_pool_lock
 
-    import sqlite3
+    # Initialize pool on first use (lazy initialization)
+    if _pg_pool is None:
+        with _pg_pool_lock:
+            if _pg_pool is None:  # Double-check pattern
+                host = os.getenv("INSTALAB_DB_HOST", "127.0.0.1")
+                port = int(os.getenv("INSTALAB_DB_PORT", "5432"))
+                name = os.getenv("INSTALAB_DB_NAME", "instalab")
+                user = os.getenv("INSTALAB_DB_USER", "instalab")
+                password = os.getenv("INSTALAB_DB_PASS", "")
 
-    db_path = os.getenv("INSTALAB_SQLITE_PATH", str(BASE_DIR / "instaloader.db"))
-    # Ensure parent directory exists for the database file
-    db_path_obj = Path(db_path)
-    try:
-        db_path_obj.parent.mkdir(parents=True, exist_ok=True)
-    except (PermissionError, OSError) as e:
-        # If we can't create the configured directory (e.g., /data/instalab),
-        # fall back to using a local directory in the app folder
-        import sys
-        print(f"[db] Cannot create directory {db_path_obj.parent}: {e}", file=sys.stderr)
-        print(f"[db] Falling back to local database in app directory", file=sys.stderr)
-        db_path = str(BASE_DIR / "instaloader.db")
-        db_path_obj = Path(db_path)
-        db_path_obj.parent.mkdir(parents=True, exist_ok=True)
-    
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    # Set busy timeout for better concurrency under load
-    conn.execute("PRAGMA busy_timeout = 30000")
-    return DBConn(conn, "sqlite")
+                # Create a threaded connection pool (min 2, max 10 connections)
+                # ThreadedConnectionPool is thread-safe for Flask multi-threaded apps
+                try:
+                    _pg_pool = pool.ThreadedConnectionPool(
+                        minconn=2,
+                        maxconn=10,
+                        host=host,
+                        port=port,
+                        dbname=name,
+                        user=user,
+                        password=password,
+                        cursor_factory=psycopg2.extras.DictCursor,
+                    )
+                except Exception:
+                    # If pool creation fails, fall back to direct connection
+                    _pg_pool = None
+
+    # Try to get connection from pool
+    if _pg_pool:
+        try:
+            conn = _pg_pool.getconn()
+            return DBConn(conn, "postgres", pooled=True)
+        except Exception:
+            pass
+
+    # Fallback to direct connection if pool unavailable
+    host = os.getenv("INSTALAB_DB_HOST", "127.0.0.1")
+    port = int(os.getenv("INSTALAB_DB_PORT", "5432"))
+    name = os.getenv("INSTALAB_DB_NAME", "instalab")
+    user = os.getenv("INSTALAB_DB_USER", "instalab")
+    password = os.getenv("INSTALAB_DB_PASS", "")
+
+    conn = psycopg2.connect(
+        host=host,
+        port=port,
+        dbname=name,
+        user=user,
+        password=password,
+        cursor_factory=psycopg2.extras.DictCursor,
+    )
+    return DBConn(conn, "postgres")
 
 
 def get_columns(conn: DBConn, table: str):
@@ -173,6 +152,7 @@ def get_columns(conn: DBConn, table: str):
         "schedules",
         "unfollow_actions",
         "count_checks",
+        "login_accounts",
     }
     if table not in VALID_TABLES:
         raise ValueError(f"Invalid table name: {table}")
@@ -193,8 +173,8 @@ def get_columns(conn: DBConn, table: str):
     return {row[1] for row in cur.fetchall()}
 
 
-def ddl(sqlite_sql: str, pg_sql: str) -> str:
-    return pg_sql if is_postgres() else sqlite_sql
+def ddl(pg_sql: str) -> str:
+    return pg_sql
 
 
 def insert_ignore_sql(table: str, columns: list):

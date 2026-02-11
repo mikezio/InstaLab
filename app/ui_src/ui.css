@@ -173,6 +173,32 @@
   .config-grid { @apply grid gap-4 md:grid-cols-2; }
   .config-section h4 { @apply text-xs uppercase tracking-wide text-muted font-semibold; }
   .config-actions { @apply flex flex-wrap gap-2 justify-end; }
+  .config-proxy { @apply relative overflow-hidden; background: linear-gradient(135deg, #fffaf0 0%, #ffffff 65%); }
+  .config-proxy::after { content: ""; position: absolute; inset: -40% -20% auto auto; width: 140px; height: 140px; border-radius: 999px; background: radial-gradient(circle at 30% 30%, rgba(251, 191, 36, 0.18), transparent 70%); pointer-events: none; }
+  .proxy-header { @apply flex items-center justify-between gap-3; }
+  .proxy-badge { @apply text-[10px] uppercase tracking-wide font-semibold px-2 py-1 rounded-full border; }
+  .proxy-badge.on { background: #ecfdf3; border-color: #bbf7d0; color: #047857; }
+  .proxy-badge.off { background: #f8fafc; border-color: #e2e8f0; color: #64748b; }
+  .proxy-actions { @apply mt-3 flex flex-wrap items-center gap-3; }
+  .proxy-test-status { @apply text-xs text-gray-500; }
+  .proxy-test-status.ok { @apply text-emerald-700; }
+  .proxy-test-status.fail { @apply text-rose-600; }
+  .proxy-test-status.testing { @apply text-amber-700; }
+  .proxy-chip { @apply border border-black/10 uppercase tracking-wide text-[10px] font-semibold px-3 py-1 rounded-full; }
+  .proxy-chip.off { background: #f8fafc; color: #64748b; }
+  .proxy-chip.idle { background: #fffbeb; color: #92400e; border-color: #fcd34d; }
+  .proxy-chip.ok { background: #ecfdf3; color: #047857; border-color: #bbf7d0; }
+  .proxy-chip.warn { background: #fff1f2; color: #be123c; border-color: #fecdd3; }
+  .login-launch { @apply relative overflow-hidden; background: linear-gradient(140deg, #f8fafc 0%, #ffffff 65%); }
+  .login-launch::after { content: ""; position: absolute; inset: -40% auto auto -20%; width: 140px; height: 140px; border-radius: 999px; background: radial-gradient(circle at 30% 30%, rgba(59, 130, 246, 0.15), transparent 70%); pointer-events: none; }
+  .login-launch-grid { @apply grid gap-3; }
+  .login-launch-grid label { @apply text-xs uppercase tracking-wide font-semibold text-gray-500; }
+  .login-launch-grid input { @apply w-full px-3 py-2 rounded-xl border border-gray-200 bg-white text-gray-700; }
+  .launch-actions { @apply flex flex-wrap gap-2; }
+  .login-launch-status { @apply text-xs text-gray-500; }
+  .login-launch-status.active { @apply text-amber-700; }
+  .login-launch-status.ok { @apply text-emerald-700; }
+  .login-launch-status.fail { @apply text-rose-600; }
 
   .explorer-grid { @apply grid gap-6 lg:grid-cols-[280px_minmax(0,1fr)]; }
   .explorer-rail { @apply space-y-4; }
