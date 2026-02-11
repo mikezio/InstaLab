@@ -11,6 +11,7 @@ InstaLab is an operations console for Instagram snapshot runs (followers/followi
 
 ## Repo layout
 - `docker-compose.yml` / `docker-compose.preview.yml`
+- `docker-compose.staging.yml` (apps VM isolated staging stack)
 - `docker-compose.local.yml` + `docker-compose.local-postgres.yml`
 - `Dockerfile`
 - `app/` (Flask API, Django UI, workers, scripts, UI build pipeline)
@@ -62,6 +63,21 @@ If you already have Postgres running, set the `INSTALAB_DB_*` values in `.env` a
 ## Branching
 - `dev`: active development
 - `main`: stable / public-ready
+
+## Apps VM staging isolation
+Use the dedicated staging checkout and stack when building risky/new features (for example WhatsApp commands):
+- Worktree: `/srv/apps/instalab-staging` (branch: `feature/whatsapp-commands`)
+- Compose file: `/srv/apps/instalab-staging/docker-compose.staging.yml`
+- API: `http://192.168.4.30:5100`
+- UI direct: `http://127.0.0.1:8102`
+- Secrets: `/srv/secrets/instalab-staging.env`
+- Data: `/srv/data/instalab-staging`
+- Database: `instalab_staging` (user: `instalab_staging`)
+
+Helper commands:
+- Up: `/srv/apps/instalab-staging/scripts/staging-up.sh`
+- Status: `/srv/apps/instalab-staging/scripts/staging-status.sh`
+- Down: `/srv/apps/instalab-staging/scripts/staging-down.sh`
 
 ## Release checklist
 - Update version / changelog (if you keep one)
