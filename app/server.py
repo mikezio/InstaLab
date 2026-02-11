@@ -69,6 +69,9 @@ except (AttributeError, OSError) as e:
     print(f"Warning: Could not set timezone: {e}", file=sys.stderr)
 LOCAL_TZ = ZoneInfo("America/New_York")
 
+if not is_postgres():
+    raise RuntimeError("InstaLab is Postgres-only. Set INSTALAB_DB_TYPE=postgres.")
+
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH_DEFAULT = BASE_DIR / "instalab_runs.db"
 # Environment variables are already loaded by db module
@@ -575,7 +578,16 @@ def _merge_health_status(checks: dict) -> str:
 
 
 def _health_check_db():
-    payload = {"status": "ok", "details": {}}
+    payload = {
+        "status": "ok",
+        "details": {
+            "backend": "postgres" if is_postgres() else "unsupported",
+        },
+    }
+    if not is_postgres():
+        payload["status"] = "fail"
+        payload["error"] = "unsupported DB backend (Postgres required)"
+        return payload
     conn = None
     try:
         conn = _get_db()
@@ -1579,12 +1591,8 @@ def _persist_schedule(login_username, target_username, cron_expr):
                 VALUES (?, ?, ?, ?)
             """
             params = (login_username, target_username, cron_expr, created_at)
-        if is_postgres():
-            cur = conn.execute(sql + " RETURNING id", params)
-            schedule_id = cur.fetchone()[0]
-        else:
-            cur = conn.execute(sql, params)
-            schedule_id = cur.lastrowid
+        cur = conn.execute(sql + " RETURNING id", params)
+        schedule_id = cur.fetchone()[0]
         conn.commit()
         return int(schedule_id)
     finally:
