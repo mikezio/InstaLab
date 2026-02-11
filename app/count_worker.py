@@ -50,7 +50,7 @@ def main():
     if args.http_timeout is None and args.request_timeout is not None:
         print("Warning: --request-timeout is deprecated; use --http-timeout", flush=True)
     http_timeout_seconds = float(args.http_timeout if args.http_timeout is not None else (args.request_timeout if args.request_timeout is not None else 120.0))
-    request_sleep_seconds = float(args.request_sleep if args.request_sleep is not None else (os.environ.get("RUN_PRIVATE_REQUEST_SLEEP_SECONDS") or 0) or 0)
+    request_sleep_seconds = float(args.request_sleep if args.request_sleep is not None else (os.environ.get("RUN_PRIVATE_REQUEST_SLEEP_SECONDS") or 0))
 
     fetch_counts, has_session = _select_backend()
     password = os.environ.get("RUN_LOGIN_PASSWORD")

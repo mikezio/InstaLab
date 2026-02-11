@@ -555,6 +555,7 @@ def _build_client(
     try:
         _wrap_requests_timeout(getattr(cl, "public", None), http_timeout_seconds)
     except Exception:
+        # Best-effort: if wrapping timeouts for the public client fails, continue without modifying it.
         pass
 
     if request_sleep_seconds is None:
