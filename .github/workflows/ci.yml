@@ -86,7 +86,7 @@ jobs:
 
       - name: Python smoke import
         run: |
-          python -c "import server; import instaloader_tracker; print('python ok')"
+          python -c "import server; import private_api_tracker; import validation; print('python ok')"
         working-directory: app
 
       - name: Set up Node
