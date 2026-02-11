@@ -109,6 +109,9 @@ SENSITIVE_TRACE_KEYS = {
     "email",
     "email_code",
 }
+PAGINATED_FRIENDSHIPS_ENDPOINT_RE = re.compile(
+    r"^friendships/(?P<target_id>\d+)/(?P<kind>followers|following)/?$"
+)
 
 
 def _truncate(value, limit=2000):
@@ -154,6 +157,100 @@ def _append_trace(trace_path: str, payload: dict) -> None:
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+def _extract_progress_user_ids(last_json) -> set[str]:
+    if not isinstance(last_json, dict):
+        return set()
+    users = last_json.get("users")
+    if not isinstance(users, list):
+        return set()
+    user_ids: set[str] = set()
+    for user in users:
+        if not isinstance(user, dict):
+            continue
+        value = user.get("pk")
+        if value is None:
+            value = user.get("id")
+        if value is None:
+            continue
+        user_id = str(value).strip()
+        if user_id:
+            user_ids.add(user_id)
+    return user_ids
+
+
+def _emit_paginated_progress(client: Client, endpoint) -> None:
+    state = getattr(client, "_instalab_page_progress", None)
+    if not isinstance(state, dict):
+        return
+    callback = state.get("callback")
+    if not callable(callback):
+        return
+
+    endpoint_value = str(endpoint or "").strip().lstrip("/")
+    endpoint_value = endpoint_value.split("?", 1)[0]
+    match = PAGINATED_FRIENDSHIPS_ENDPOINT_RE.match(endpoint_value)
+    if not match:
+        return
+
+    target_id = str(state.get("target_id") or "").strip()
+    if target_id and match.group("target_id") != target_id:
+        return
+
+    kind = match.group("kind")
+    seen_key = f"{kind}_seen"
+    seen = state.get(seen_key)
+    if not isinstance(seen, set):
+        seen = set()
+        state[seen_key] = seen
+
+    user_ids = _extract_progress_user_ids(getattr(client, "last_json", None))
+    if not user_ids:
+        return
+
+    before = len(seen)
+    seen.update(user_ids)
+    if len(seen) <= before:
+        return
+    try:
+        callback(kind, len(seen))
+    except Exception:
+        pass
+
+
+def _enable_progress_private_request(client: Client) -> None:
+    if getattr(client, "_instalab_progress_hook_enabled", False):
+        return
+
+    original_private_request = client.private_request
+
+    def _wrapped_private_request(
+        endpoint,
+        data=None,
+        params=None,
+        login=False,
+        with_signature=True,
+        headers=None,
+        extra_sig=None,
+        domain: str | None = None,
+    ):
+        try:
+            return original_private_request(
+                endpoint,
+                data=data,
+                params=params,
+                login=login,
+                with_signature=with_signature,
+                headers=headers,
+                extra_sig=extra_sig,
+                domain=domain,
+            )
+        finally:
+            _emit_paginated_progress(client, endpoint)
+
+    client.private_request = _wrapped_private_request
+    client._instalab_progress_hook_enabled = True
 
 
 def _enable_trace(client: Client, login_username: str, trace_path: str | None) -> None:
@@ -1039,89 +1136,104 @@ def snapshot_profile(
     if cancel_check and cancel_check():
         raise RuntimeError("cancelled")
 
-    t0 = time.time()
+    page_progress_state = None
     if progress:
-        try:
-            progress("followers", 0)
-        except Exception:
-            pass
+        page_progress_state = {
+            "target_id": str(target_id),
+            "callback": progress,
+            "followers_seen": set(),
+            "following_seen": set(),
+        }
+        client._instalab_page_progress = page_progress_state
+        _enable_progress_private_request(client)
 
-    with _trace_span(
-        "instalab.private_api.user_followers",
-        login_username=login_username,
-        target_username=target_username,
-        target_id=target_id,
-    ):
-        followers_map = client.user_followers(target_id, amount=0)
-    followers = [u.username for u in followers_map.values() if getattr(u, "username", None)]
-    followers_fetch_seconds = int(time.time() - t0)
-    if progress:
-        try:
-            progress("followers", len(followers))
-        except Exception:
-            pass
+    try:
+        t0 = time.time()
+        if progress:
+            try:
+                progress("followers", 0)
+            except Exception:
+                pass
 
-    _sleep_jitter(item_delay_min, item_delay_max)
-    _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
-
-    if cancel_check and cancel_check():
-        raise RuntimeError("cancelled")
-
-    t1 = time.time()
-    if progress:
-        try:
-            progress("following", 0)
-        except Exception:
-            pass
-
-    with _trace_span(
-        "instalab.private_api.user_following",
-        login_username=login_username,
-        target_username=target_username,
-        target_id=target_id,
-    ):
-        followees_map = client.user_following(target_id, amount=0)
-    followees = [u.username for u in followees_map.values() if getattr(u, "username", None)]
-    followees_fetch_seconds = int(time.time() - t1)
-    if progress:
-        try:
-            progress("following", len(followees))
-        except Exception:
-            pass
-
-    non_followbacks = sorted(set(followees) - set(followers))
-    followers_rate = round(len(followers) / followers_fetch_seconds, 3) if followers_fetch_seconds else None
-    followees_rate = round(len(followees) / followees_fetch_seconds, 3) if followees_fetch_seconds else None
-
-    changes = None
-    run_id = None
-    if db_path:
-        changes, run_id = write_run_metadata(
-            db_path=db_path,
+        with _trace_span(
+            "instalab.private_api.user_followers",
             login_username=login_username,
             target_username=target_username,
-            timestamp=timestamp,
-            followers=followers,
-            followees=followees,
-            non_followbacks_count=len(non_followbacks),
-            followers_fetch_seconds=followers_fetch_seconds,
-            followees_fetch_seconds=followees_fetch_seconds,
-            followers_rate=followers_rate,
-            followees_rate=followees_rate,
-        )
+            target_id=target_id,
+        ):
+            followers_map = client.user_followers(target_id, amount=0)
+        followers = [u.username for u in followers_map.values() if getattr(u, "username", None)]
+        followers_fetch_seconds = int(time.time() - t0)
+        if progress:
+            try:
+                progress("followers", len(followers))
+            except Exception:
+                pass
 
-    return {
-        "timestamp": timestamp,
-        "followers_count": followers_total,
-        "followees_count": following_total,
-        "followers": followers,
-        "followees": followees,
-        "non_followbacks": non_followbacks,
-        "non_followbacks_count": len(non_followbacks),
-        "changes": changes,
-        "run_id": run_id,
-        "followers_fetch_seconds": followers_fetch_seconds,
-        "followees_fetch_seconds": followees_fetch_seconds,
-        "followers_rate": followers_rate,
-        "followees_rate": followees_rate,
-    }
+        _sleep_jitter(item_delay_min, item_delay_max)
+        _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
+
+        if cancel_check and cancel_check():
+            raise RuntimeError("cancelled")
+
+        t1 = time.time()
+        if progress:
+            try:
+                progress("following", 0)
+            except Exception:
+                pass
+
+        with _trace_span(
+            "instalab.private_api.user_following",
+            login_username=login_username,
+            target_username=target_username,
+            target_id=target_id,
+        ):
+            followees_map = client.user_following(target_id, amount=0)
+        followees = [u.username for u in followees_map.values() if getattr(u, "username", None)]
+        followees_fetch_seconds = int(time.time() - t1)
+        if progress:
+            try:
+                progress("following", len(followees))
+            except Exception:
+                pass
+
+        non_followbacks = sorted(set(followees) - set(followers))
+        followers_rate = round(len(followers) / followers_fetch_seconds, 3) if followers_fetch_seconds else None
+        followees_rate = round(len(followees) / followees_fetch_seconds, 3) if followees_fetch_seconds else None
+
+        changes = None
+        run_id = None
+        if db_path:
+            changes, run_id = write_run_metadata(
+                db_path=db_path,
+                login_username=login_username,
+                target_username=target_username,
+                timestamp=timestamp,
+                followers=followers,
+                followees=followees,
+                non_followbacks_count=len(non_followbacks),
+                followers_fetch_seconds=followers_fetch_seconds,
+                followees_fetch_seconds=followees_fetch_seconds,
+                followers_rate=followers_rate,
+                followees_rate=followees_rate,
+            )
+
+        return {
+            "timestamp": timestamp,
+            "followers_count": followers_total,
+            "followees_count": following_total,
+            "followers": followers,
+            "followees": followees,
+            "non_followbacks": non_followbacks,
+            "non_followbacks_count": len(non_followbacks),
+            "changes": changes,
+            "run_id": run_id,
+            "followers_fetch_seconds": followers_fetch_seconds,
+            "followees_fetch_seconds": followees_fetch_seconds,
+            "followers_rate": followers_rate,
+            "followees_rate": followees_rate,
+        }
+    finally:
+        if page_progress_state is not None:
+            client._instalab_page_progress = None
