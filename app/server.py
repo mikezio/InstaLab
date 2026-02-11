@@ -246,7 +246,7 @@ CONFIG_SCHEMA = {
     "run_stall_seconds": {"type": "int", "min": 60, "max": 21600},
     "run_max_seconds": {"type": "int", "min": 600, "max": 43200},
     "run_http_timeout_seconds": {"type": "float", "min": 5, "max": 3600},
-    "run_private_request_sleep_seconds": {"type": "float", "min": 0.0, "max": 10.0},
+    "run_private_request_sleep_seconds": {"type": "float", "min": 0.0, "max": 2.0},
     "run_request_timeout": {"type": "float", "min": 10, "max": 3600},
     "run_item_delay_min": {"type": "float", "min": 0.0, "max": 10.0},
     "run_item_delay_max": {"type": "float", "min": 0.0, "max": 10.0},
@@ -950,6 +950,8 @@ def _get_config(force=False):
                 strict=False,
             )
         except Exception:
+            # Best-effort legacy conversion; on any error keep the default
+            # value for run_http_timeout_seconds from CONFIG_DEFAULTS.
             pass
     CONFIG_CACHE["data"] = merged
     CONFIG_CACHE["ts"] = now
@@ -1676,7 +1678,7 @@ def _run_count_check(login_username, target_username):
     http_timeout_seconds = float(
         _get_config_value("run_http_timeout_seconds", _get_config_value("run_request_timeout", 120))
     )
-    request_sleep_seconds = float(_get_config_value("run_private_request_sleep_seconds", 0) or 0)
+    request_sleep_seconds = float(_get_config_value("run_private_request_sleep_seconds", 0))
 
     cmd = [
         sys.executable,
@@ -2110,7 +2112,7 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     http_timeout_seconds = float(
         _get_config_value("run_http_timeout_seconds", _get_config_value("run_request_timeout", 600))
     )
-    request_sleep_seconds = float(_get_config_value("run_private_request_sleep_seconds", 0) or 0)
+    request_sleep_seconds = float(_get_config_value("run_private_request_sleep_seconds", 0))
     item_delay_min = float(_get_config_value("run_item_delay_min", 0.25))
     item_delay_max = float(_get_config_value("run_item_delay_max", 0.75))
     pause_every_min = int(_get_config_value("run_pause_every_min", 0) or 0)
