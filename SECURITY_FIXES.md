@@ -6,7 +6,7 @@ This document summarizes key security and hardening changes currently in the cod
 
 ## Highlights
 
-- **Postgres only**: SQLite backend removed from active code paths.
+- **Postgres-only runtime**: legacy local DB backend removed from active code paths.
 - **Encrypted secrets**: Login passwords, TOTP seeds, and challenge codes are encrypted at rest using `INSTALAB_ENCRYPTION_KEY`.
 - **API proxy hardening**: Path normalization + strict validation to prevent traversal.
 - **Django security**: `DJANGO_SECRET_KEY`, `DJANGO_DEBUG`, and `DJANGO_ALLOWED_HOSTS` are read from env.

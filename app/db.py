@@ -79,7 +79,7 @@ class DBConn:
 
 def get_db():
     if not is_postgres():
-        raise RuntimeError("SQLite is disabled. Set INSTALAB_DB_TYPE=postgres.")
+        raise RuntimeError("Unsupported DB type. Set INSTALAB_DB_TYPE=postgres.")
 
     import psycopg2
     import psycopg2.extras
@@ -167,8 +167,9 @@ def get_columns(conn: DBConn, table: str):
             (table,),
         )
         return {row[0] for row in cur.fetchall()}
-    # For SQLite, use parameterized query with quote_identifier pattern
-    # SQLite doesn't support parameterized table names in PRAGMA, so we validate first
+    # Fallback for non-Postgres adapters used in local tooling/tests.
+    # Some adapters don't support parameterized table names in PRAGMA-style introspection,
+    # so we validate first.
     cur = conn.execute(f"PRAGMA table_info({table})")
     return {row[1] for row in cur.fetchall()}
 

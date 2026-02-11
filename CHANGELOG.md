@@ -32,7 +32,7 @@ All notable changes to this project will be documented in this file.
 - Architecture doc with run lifecycle + internal flows
 
 ### Breaking Changes
-- SQLite backend removed (Postgres only)
+- Legacy local DB backend removed (Postgres only)
 - Selenium/Instaloader/VNC flows removed from active code paths
 
 ## [0.2.0](https://github.com/mikezio/InstaLab/compare/v0.1.2...v0.2.0) (2026-02-01)

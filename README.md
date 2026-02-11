@@ -39,7 +39,7 @@ If you already have Postgres running, set the `INSTALAB_DB_*` values in `.env` a
 - See [SECURITY.md](SECURITY.md) for security best practices and deployment guidelines.
 
 ## Database
-- **Postgres only.** SQLite is not supported.
+- **Postgres only.** Set `INSTALAB_DB_TYPE=postgres`.
 - Default DB name/user: `instalab` (see `docker-compose.local-postgres.yml`).
 
 ## Authentication flow (private API)

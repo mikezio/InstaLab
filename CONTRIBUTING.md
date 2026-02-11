@@ -48,8 +48,6 @@ If you already have Postgres running, set `INSTALAB_DB_*` in `.env` and run:
 docker compose -f docker-compose.local.yml up -d --build
 ```
 
-> Note: SQLite is not supported.
-
 ## Making Changes
 
 ### Branch Naming
