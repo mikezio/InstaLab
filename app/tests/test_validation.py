@@ -58,12 +58,12 @@ class TestValidateRunRequest:
         data = {
             "target": "target_user",
             "login": "login_user",
-            "scraper_backend": "instaloader",
+            "scraper_backend": "private",
         }
         result = validate_run_request(data)
         assert result["target"] == "target_user"
         assert result["login"] == "login_user"
-        assert result["scraper_backend"] == "instaloader"
+        assert result["scraper_backend"] == "private"
     
     def test_missing_target(self):
         """Missing target should raise error."""
@@ -82,10 +82,10 @@ class TestValidateRunRequest:
             validate_run_request(data)
     
     def test_default_scraper_backend(self):
-        """Default scraper backend should be instaloader."""
+        """Default scraper backend should be private."""
         data = {"target": "user1", "login": "user2"}
         result = validate_run_request(data)
-        assert result["scraper_backend"] == "instaloader"
+        assert result["scraper_backend"] == "private"
 
 
 class TestValidateLoginAdd:

@@ -22,6 +22,7 @@ services:
       - /srv/apps/instalab/app:/app
       - /srv/secrets/instalab.env:/srv/secrets/instalab.env:ro
       - /srv/secrets/instalab-logins.json:/srv/secrets/instalab-logins.json
+      - /srv/secrets/instalab-proxy-zones.json:/srv/secrets/instalab-proxy-zones.json:ro
       - /srv/secrets/instalab-cookies:/data/instalab/cookies
       - /srv/data/instalab:/data/instalab
     ports:
