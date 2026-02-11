@@ -20,6 +20,7 @@ from urllib.parse import quote
 import ssl
 import secrets
 import re
+import hashlib
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -1030,6 +1031,15 @@ def _get_proxy_config(session_id: str | None = None):
     port = int(_get_config_value("proxy_port", 7000) or 7000)
     username = str(_get_config_value("proxy_username", "") or "").strip()
     password = str(_get_config_value("proxy_password", "") or "").strip()
+    # Decodo sticky sessions are controlled via username suffix.
+    # Example: user-<zone>-country-us-session-<token>
+    if provider == "decodo" and username and session_id:
+        sid = re.sub(r"[^A-Za-z0-9_-]", "", str(session_id)).strip()
+        if sid:
+            if "{session}" in username:
+                username = username.replace("{session}", sid)
+            elif "-session-" not in username:
+                username = f"{username}-session-{sid}"
     if not enabled:
         return {"enabled": False}
     if not host or not port:
@@ -1046,8 +1056,14 @@ def _get_proxy_config(session_id: str | None = None):
     }
 
 
-def _generate_proxy_session_id(length: int = 16) -> str:
-    return secrets.token_hex(max(4, int(length) // 2))
+def _generate_proxy_session_id(*, login_username: str | None = None, length: int = 16) -> str:
+    target_len = max(8, int(length))
+    if login_username:
+        # Keep proxy identity stable per login account across runs.
+        normalized = str(login_username).strip().lower()
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        return digest[:target_len]
+    return secrets.token_hex(max(4, target_len // 2))
 
 
 def _apply_proxy_env(env: dict, *, session_id: str | None = None):
@@ -1387,7 +1403,7 @@ def _unfollow_worker(usernames, login_username, target_username, dry_run, max_ac
         return UNFOLLOW_CANCEL.is_set()
 
     try:
-        session_id = _generate_proxy_session_id()
+        session_id = _generate_proxy_session_id(login_username=login_username)
         proxy = _get_proxy_config(session_id=session_id)
         result = unfollow_users(
             usernames,
@@ -1673,7 +1689,7 @@ def _run_count_check(login_username, target_username):
         env["RUN_USER_AGENT"] = user_agent
     else:
         env.pop("RUN_USER_AGENT", None)
-    session_id = _generate_proxy_session_id()
+    session_id = _generate_proxy_session_id(login_username=creds["login_username"])
     _apply_proxy_env(env, session_id=session_id)
     http_timeout_seconds = float(
         _get_config_value("run_http_timeout_seconds", _get_config_value("run_request_timeout", 120))
@@ -2079,7 +2095,7 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     env["INSTALAB_SCRAPER_BACKEND"] = "private"
     env["SCRAPER_BACKEND"] = "private"
     env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
-    session_id = _generate_proxy_session_id()
+    session_id = _generate_proxy_session_id(login_username=login_username)
     _apply_proxy_env(env, session_id=session_id)
     if two_factor_code or challenge_code:
         try:
