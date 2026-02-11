@@ -42,8 +42,15 @@ def main():
     parser.add_argument("--target", required=True)
     parser.add_argument("--cookie-file", default="")
     parser.add_argument("--result", required=True)
-    parser.add_argument("--request-timeout", type=float, default=120.0)
+    # Keep `--request-timeout` as a deprecated alias for older callers.
+    parser.add_argument("--http-timeout", type=float, default=None)
+    parser.add_argument("--request-timeout", type=float, default=None)
+    parser.add_argument("--request-sleep", type=float, default=None)
     args = parser.parse_args()
+    if args.http_timeout is None and args.request_timeout is not None:
+        print("Warning: --request-timeout is deprecated; use --http-timeout", flush=True)
+    http_timeout_seconds = float(args.http_timeout if args.http_timeout is not None else (args.request_timeout if args.request_timeout is not None else 120.0))
+    request_sleep_seconds = float(args.request_sleep if args.request_sleep is not None else (os.environ.get("RUN_PRIVATE_REQUEST_SLEEP_SECONDS") or 0))
 
     fetch_counts, has_session = _select_backend()
     password = os.environ.get("RUN_LOGIN_PASSWORD")
@@ -85,7 +92,8 @@ def main():
                     login_password=password,
                     target_username=args.target,
                     cookie_file=cookie_file or None,
-                    request_timeout=args.request_timeout,
+                    http_timeout_seconds=http_timeout_seconds,
+                    request_sleep_seconds=request_sleep_seconds,
                     login_mode=login_mode,
                     two_factor_code=two_factor_code,
                     challenge_code=challenge_code,

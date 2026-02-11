@@ -354,6 +354,41 @@ def _raise_login_error(exc: Exception) -> None:
     raise PrivateAPIError("private_api_error", f"private API error: {exc}")
 
 
+def _wrap_requests_timeout(session, timeout_seconds: float | None) -> None:
+    """Inject a default requests timeout for instagrapi HTTP calls.
+
+    instagrapi's `Client.request_timeout` is used as a *sleep* in the private API
+    request loop, so we must not use it as a network timeout.
+    """
+
+    if session is None or timeout_seconds is None:
+        return
+    try:
+        timeout_seconds = float(timeout_seconds)
+    except Exception:
+        return
+    if timeout_seconds <= 0:
+        return
+    if getattr(session, "_instalab_timeout_wrapped", False):
+        return
+
+    try:
+        original_request = session.request
+    except Exception:
+        return
+
+    def _wrapped_request(method, url, *args, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = timeout_seconds
+        return original_request(method, url, *args, **kwargs)
+
+    try:
+        session.request = _wrapped_request
+        session._instalab_timeout_wrapped = True
+    except Exception:
+        return
+
+
 def _load_device_settings(device_settings_json: str | None) -> dict:
     raw = (device_settings_json or os.getenv(DEVICE_SETTINGS_ENV) or os.getenv(DEVICE_SETTINGS_GLOBAL_ENV) or "").strip()
     if raw:
@@ -425,6 +460,9 @@ def _build_client(
     login_password: str,
     proxy_url: str | None,
     *,
+    http_timeout_seconds: float | None = None,
+    request_sleep_seconds: float | None = None,
+    # Back-compat: older callsites used `request_timeout` but instagrapi uses it as a sleep.
     request_timeout: float = 120.0,
     two_factor_code: str | None = None,
     challenge_code: str | None = None,
@@ -511,8 +549,24 @@ def _build_client(
         raise exc
 
     cl.handle_exception = _handle_exception
-    base_timeout = float(request_timeout or REQUEST_SLEEP_FALLBACK)
-    cl.request_timeout = min(base_timeout, REQUEST_SLEEP_MAX)
+    if http_timeout_seconds is None:
+        http_timeout_seconds = request_timeout
+    _wrap_requests_timeout(getattr(cl, "private", None), http_timeout_seconds)
+    try:
+        _wrap_requests_timeout(getattr(cl, "public", None), http_timeout_seconds)
+    except Exception:
+        # Best-effort: if wrapping timeouts for the public client fails, continue without modifying it.
+        pass
+
+    if request_sleep_seconds is None:
+        request_sleep_seconds = REQUEST_SLEEP_FALLBACK
+    try:
+        sleep_seconds = float(request_sleep_seconds or 0.0)
+    except Exception:
+        sleep_seconds = 0.0
+    if sleep_seconds < 0:
+        sleep_seconds = 0.0
+    cl.request_timeout = min(sleep_seconds, REQUEST_SLEEP_MAX)
     if delay_min is not None or delay_max is not None:
         min_delay = float(delay_min or 0.0)
         max_delay = float(delay_max or 0.0)
@@ -725,6 +779,8 @@ def generate_totp_seed(
     *,
     login_username,
     login_password,
+    http_timeout_seconds=None,
+    request_sleep_seconds=None,
     request_timeout=120.0,
     two_factor_code=None,
     challenge_code=None,
@@ -737,6 +793,8 @@ def generate_totp_seed(
         login_username,
         login_password or "",
         proxy_url,
+        http_timeout_seconds=http_timeout_seconds,
+        request_sleep_seconds=request_sleep_seconds,
         request_timeout=request_timeout,
         two_factor_code=two_factor_code,
         challenge_code=challenge_code,
@@ -753,6 +811,8 @@ def enable_totp(
     login_password,
     totp_seed,
     verification_code=None,
+    http_timeout_seconds=None,
+    request_sleep_seconds=None,
     request_timeout=120.0,
     two_factor_code=None,
     challenge_code=None,
@@ -765,6 +825,8 @@ def enable_totp(
         login_username,
         login_password or "",
         proxy_url,
+        http_timeout_seconds=http_timeout_seconds,
+        request_sleep_seconds=request_sleep_seconds,
         request_timeout=request_timeout,
         two_factor_code=two_factor_code,
         challenge_code=challenge_code,
@@ -783,6 +845,8 @@ def disable_totp(
     *,
     login_username,
     login_password,
+    http_timeout_seconds=None,
+    request_sleep_seconds=None,
     request_timeout=120.0,
     two_factor_code=None,
     challenge_code=None,
@@ -795,6 +859,8 @@ def disable_totp(
         login_username,
         login_password or "",
         proxy_url,
+        http_timeout_seconds=http_timeout_seconds,
+        request_sleep_seconds=request_sleep_seconds,
         request_timeout=request_timeout,
         two_factor_code=two_factor_code,
         challenge_code=challenge_code,
@@ -819,6 +885,8 @@ def fetch_counts(
     login_password,
     target_username,
     cookie_file=None,
+    http_timeout_seconds=None,
+    request_sleep_seconds=None,
     request_timeout=120.0,
     login_mode="auto",
     two_factor_code=None,
@@ -836,6 +904,8 @@ def fetch_counts(
         login_username,
         login_password or "",
         proxy_url,
+        http_timeout_seconds=http_timeout_seconds,
+        request_sleep_seconds=request_sleep_seconds,
         request_timeout=request_timeout,
         two_factor_code=two_factor_code,
         challenge_code=challenge_code,
@@ -866,6 +936,8 @@ def snapshot_profile(
     login_password,
     target_username,
     cookie_file=None,
+    http_timeout_seconds=None,
+    request_sleep_seconds=None,
     request_timeout=600.0,
     db_path=None,
     cancel_check=None,
@@ -901,6 +973,8 @@ def snapshot_profile(
         login_username,
         login_password or "",
         proxy_url,
+        http_timeout_seconds=http_timeout_seconds,
+        request_sleep_seconds=request_sleep_seconds,
         request_timeout=request_timeout,
         two_factor_code=two_factor_code,
         challenge_code=challenge_code,
