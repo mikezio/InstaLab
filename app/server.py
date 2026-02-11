@@ -203,6 +203,11 @@ def _private_session_exists(login_username: str) -> bool:
 CONFIG_DEFAULTS = {
     "run_stall_seconds": int(os.getenv("RUN_STALL_SECONDS", "1200")),
     "run_max_seconds": int(os.getenv("RUN_MAX_SECONDS", "10800")),
+    # Legacy: run_request_timeout used to be treated as a request timeout, but instagrapi uses
+    # Client.request_timeout as a per-request sleep. We keep the legacy key, but the pipeline now
+    # uses run_http_timeout_seconds (real HTTP timeout) + run_private_request_sleep_seconds (sleep).
+    "run_http_timeout_seconds": float(os.getenv("RUN_HTTP_TIMEOUT_SECONDS", os.getenv("RUN_REQUEST_TIMEOUT", "30"))),
+    "run_private_request_sleep_seconds": float(os.getenv("RUN_PRIVATE_REQUEST_SLEEP_SECONDS", "0")),
     "run_request_timeout": float(os.getenv("RUN_REQUEST_TIMEOUT", "600")),
     "run_item_delay_min": float(os.getenv("RUN_ITEM_DELAY_MIN", "0")),
     "run_item_delay_max": float(os.getenv("RUN_ITEM_DELAY_MAX", "0")),
@@ -240,6 +245,8 @@ CONFIG_DEFAULTS = {
 CONFIG_SCHEMA = {
     "run_stall_seconds": {"type": "int", "min": 60, "max": 21600},
     "run_max_seconds": {"type": "int", "min": 600, "max": 43200},
+    "run_http_timeout_seconds": {"type": "float", "min": 5, "max": 3600},
+    "run_private_request_sleep_seconds": {"type": "float", "min": 0.0, "max": 2.0},
     "run_request_timeout": {"type": "float", "min": 10, "max": 3600},
     "run_item_delay_min": {"type": "float", "min": 0.0, "max": 10.0},
     "run_item_delay_max": {"type": "float", "min": 0.0, "max": 10.0},
@@ -933,6 +940,19 @@ def _get_config(force=False):
     for key, val in raw.items():
         if key in CONFIG_DEFAULTS:
             merged[key] = _coerce_config_value(key, val, strict=False)
+    # Back-compat: old installs only have run_request_timeout stored. Treat it as the HTTP timeout
+    # unless the new key is explicitly present.
+    if "run_request_timeout" in raw and "run_http_timeout_seconds" not in raw:
+        try:
+            merged["run_http_timeout_seconds"] = _coerce_config_value(
+                "run_http_timeout_seconds",
+                raw.get("run_request_timeout"),
+                strict=False,
+            )
+        except Exception:
+            # Best-effort legacy conversion; on any error keep the default
+            # value for run_http_timeout_seconds from CONFIG_DEFAULTS.
+            pass
     CONFIG_CACHE["data"] = merged
     CONFIG_CACHE["ts"] = now
     return merged
@@ -1655,6 +1675,10 @@ def _run_count_check(login_username, target_username):
         env.pop("RUN_USER_AGENT", None)
     session_id = _generate_proxy_session_id()
     _apply_proxy_env(env, session_id=session_id)
+    http_timeout_seconds = float(
+        _get_config_value("run_http_timeout_seconds", _get_config_value("run_request_timeout", 120))
+    )
+    request_sleep_seconds = float(_get_config_value("run_private_request_sleep_seconds", 0))
 
     cmd = [
         sys.executable,
@@ -1667,8 +1691,10 @@ def _run_count_check(login_username, target_username):
         str(creds.get("cookie_file") or ""),
         "--result",
         str(result_path),
-        "--request-timeout",
-        "120",
+        "--http-timeout",
+        str(http_timeout_seconds),
+        "--request-sleep",
+        str(request_sleep_seconds),
     ]
     cmd, env = _wrap_with_ddtrace(cmd, env, service="instalab-worker")
     proc = subprocess.Popen(
@@ -2083,7 +2109,10 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     else:
         env.pop("RUN_USER_AGENT", None)
 
-    request_timeout = float(_get_config_value("run_request_timeout", 600))
+    http_timeout_seconds = float(
+        _get_config_value("run_http_timeout_seconds", _get_config_value("run_request_timeout", 600))
+    )
+    request_sleep_seconds = float(_get_config_value("run_private_request_sleep_seconds", 0))
     item_delay_min = float(_get_config_value("run_item_delay_min", 0.25))
     item_delay_max = float(_get_config_value("run_item_delay_max", 0.75))
     pause_every_min = int(_get_config_value("run_pause_every_min", 0) or 0)
@@ -2101,6 +2130,8 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     env["RUN_PAUSE_EVERY_MAX"] = str(pause_every_max)
     env["RUN_PAUSE_SECONDS_MIN"] = str(pause_seconds_min)
     env["RUN_PAUSE_SECONDS_MAX"] = str(pause_seconds_max)
+    env["RUN_HTTP_TIMEOUT_SECONDS"] = str(http_timeout_seconds)
+    env["RUN_PRIVATE_REQUEST_SLEEP_SECONDS"] = str(request_sleep_seconds)
     env["RUN_TRACE_ENABLED"] = "true" if trace_enabled else "false"
     if trace_enabled:
         env["RUN_TRACE_PATH"] = str(job_dir / "trace.jsonl")
@@ -2121,8 +2152,10 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
         str(progress_path),
         "--result",
         str(result_path),
-        "--request-timeout",
-        str(request_timeout),
+        "--http-timeout",
+        str(http_timeout_seconds),
+        "--request-sleep",
+        str(request_sleep_seconds),
     ]
     cmd, env = _wrap_with_ddtrace(cmd, env, service="instalab-worker")
 
@@ -3458,6 +3491,11 @@ def api_config_update():
             if key in SENSITIVE_CONFIG_KEYS and (value is None or str(value).strip() == ""):
                 continue
             cleaned[key] = value
+        # Keep legacy + new timeout keys aligned for older callers.
+        if "run_request_timeout" in cleaned and "run_http_timeout_seconds" not in cleaned:
+            cleaned["run_http_timeout_seconds"] = cleaned["run_request_timeout"]
+        if "run_http_timeout_seconds" in cleaned and "run_request_timeout" not in cleaned:
+            cleaned["run_request_timeout"] = cleaned["run_http_timeout_seconds"]
         if _parse_bool(cleaned.get("proxy_enabled", _get_config_value("proxy_enabled", False))):
             host = cleaned.get("proxy_host") or _get_config_value("proxy_host", "")
             port = cleaned.get("proxy_port") or _get_config_value("proxy_port", 0)

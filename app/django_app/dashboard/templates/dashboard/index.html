@@ -826,9 +826,14 @@
                 <div class="config-help">Hard stop for any single snapshot run.</div>
               </div>
               <div>
-                <label for="cfg-run-request">Request timeout (sec)</label>
-                <input id="cfg-run-request" type="number" min="10" max="3600">
-                <div class="config-help">Network timeout while fetching data.</div>
+                <label for="cfg-run-http-timeout">HTTP timeout (sec)</label>
+                <input id="cfg-run-http-timeout" type="number" min="5" max="3600" step="1">
+                <div class="config-help">Network timeout for Instagram API calls.</div>
+              </div>
+              <div>
+                <label for="cfg-run-request-sleep">Base sleep per request (sec)</label>
+                <input id="cfg-run-request-sleep" type="number" min="0" max="10" step="0.1">
+                <div class="config-help">Usually keep 0; use delay/pause knobs for pacing.</div>
               </div>
               <div>
                 <label for="cfg-run-delay-min">Per-account delay min (sec)</label>
@@ -1695,7 +1700,8 @@
       if (!src) return;
       document.getElementById('cfg-run-stall').value = src.run_stall_seconds ?? 1200;
       document.getElementById('cfg-run-max').value = src.run_max_seconds ?? 10800;
-      document.getElementById('cfg-run-request').value = src.run_request_timeout ?? 600;
+      document.getElementById('cfg-run-http-timeout').value = src.run_http_timeout_seconds ?? src.run_request_timeout ?? 30;
+      document.getElementById('cfg-run-request-sleep').value = src.run_private_request_sleep_seconds ?? 0;
       document.getElementById('cfg-run-delay-min').value = src.run_item_delay_min ?? 0;
       document.getElementById('cfg-run-delay-max').value = src.run_item_delay_max ?? 0;
       document.getElementById('cfg-run-pause-every-min').value = src.run_pause_every_min ?? 0;
@@ -1770,7 +1776,8 @@
       const payload = {
         run_stall_seconds: Number(document.getElementById('cfg-run-stall').value || 0),
         run_max_seconds: Number(document.getElementById('cfg-run-max').value || 0),
-        run_request_timeout: Number(document.getElementById('cfg-run-request').value || 0),
+        run_http_timeout_seconds: Number(document.getElementById('cfg-run-http-timeout').value || 0),
+        run_private_request_sleep_seconds: Number(document.getElementById('cfg-run-request-sleep').value || 0),
         run_item_delay_min: Number(document.getElementById('cfg-run-delay-min').value || 0),
         run_item_delay_max: Number(document.getElementById('cfg-run-delay-max').value || 0),
         run_pause_every_min: Number(document.getElementById('cfg-run-pause-every-min').value || 0),
