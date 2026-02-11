@@ -2,113 +2,64 @@
 
 ## Overview
 
-InstaLab is designed for **private, trusted network deployment** and requires additional security hardening before exposing to the internet.
+InstaLab is designed for **private, trusted network deployment** and requires additional hardening before exposing to the internet.
 
 ## ⚠️ Security Warnings
 
-### Critical: No Built-in Authentication
+### Critical: No Built‑in Authentication
 
 **The Flask API has NO authentication layer.** All endpoints are publicly accessible. This includes:
 - Triggering snapshot runs (`/api/run`)
-- Accessing Instagram credentials (`/api/logins`)
+- Accessing login status (`/api/logins`)
 - Starting unfollow operations (`/api/unfollow/start`)
-- Viewing follower/following data (`/api/runs`, `/api/insights/*`)
+- Viewing follower/following data (`/api/run/<id>`, `/api/insights/*`)
 
-**Recommendation:** Deploy behind a reverse proxy (nginx, Caddy) with authentication, or implement API key validation.
+**Recommendation:** Deploy behind a reverse proxy with authentication (nginx/Caddy + SSO or basic auth), or implement API key validation.
 
-### Production Deployment Checklist
+## Production Deployment Checklist
 
-Before deploying to production:
-
-- [ ] **Set `DJANGO_SECRET_KEY`** to a unique, random 50+ character string
-- [ ] **Set `DJANGO_DEBUG=False`** in your `.env` file
-- [ ] **Configure `DJANGO_ALLOWED_HOSTS`** to only include your domain(s)
-- [ ] **Never commit `.env` files** with real credentials
-- [ ] **Use HTTPS** for all external access (configure reverse proxy)
-- [ ] **Implement authentication** at the reverse proxy or Flask app level
-- [ ] **Restrict network access** to trusted IPs/networks
-- [ ] **Set restrictive file permissions** on:
-  - `/data/instalab/` directory (contains cookies, database)
-  - `/data/instalab/instalab-logins.json` (contains passwords)
-  - Cookie files in `INSTALAB_COOKIE_DIR`
-- [ ] **Rotate credentials** if any are exposed in logs/commits
-- [ ] **Enable audit logging** for unfollow actions and run requests
-- [ ] **Review and sanitize** any usernames passed to file operations
+- [ ] Set `DJANGO_SECRET_KEY` (strong random value)
+- [ ] Set `DJANGO_DEBUG=False`
+- [ ] Configure `DJANGO_ALLOWED_HOSTS`
+- [ ] Set `INSTALAB_ENCRYPTION_KEY` (required for encrypted login secrets)
+- [ ] Use HTTPS for all external access
+- [ ] Restrict network access to trusted IPs/VPN
+- [ ] Store secrets in `.env` (never commit)
+- [ ] Rotate credentials if exposed
 
 ## Credential Management
 
 ### Environment Variables
 
-Store all secrets in `.env` files (gitignored):
+Store secrets in `.env` files (gitignored):
 
 ```bash
-# Required for Django
-DJANGO_SECRET_KEY=your-random-50-char-secret-here
+DJANGO_SECRET_KEY=your-random-50-char-secret
 DJANGO_DEBUG=False
 DJANGO_ALLOWED_HOSTS=yourdomain.com
-
-# Instagram account credentials
-MZIO_LOGIN_USERNAME=your_ig_username
-MZIO_LOGIN_PASSWORD=your_ig_password
+INSTALAB_ENCRYPTION_KEY=base64-or-hex-secret
 ```
 
-### Login JSON File
+### Login Storage
 
-The `instalab-logins.json` file stores Instagram credentials:
-- **Location:** `INSTALAB_LOGINS_FILE` (default: `/data/instalab/instalab-logins.json`)
-- **Permissions:** Should be `600` (read/write owner only)
-- **Format:**
-  ```json
-  {
-    "username": {
-      "password": "plaintext_password",
-      "cookie_file": "/path/to/session.json"
-    }
-  }
-  ```
+- Logins live in Postgres `login_accounts` and are **encrypted at rest**.
+- Passwords, TOTP seeds, challenge codes, and forced-reset passwords are encrypted using `INSTALAB_ENCRYPTION_KEY`.
+- Session settings are stored in Postgres and cached in `/data/instalab/private`.
 
-**Security notes:**
-- Passwords are stored in **plaintext** (required for Instaloader/Selenium)
-- Passwords are exposed via `/api/logins` GET endpoint
-- After successful authentication, passwords can be removed (session cookies persist)
+### Session Files
 
-### Cookie Files
-
-Session cookies are stored in `INSTALAB_COOKIE_DIR`:
-- **Default:** `/data/instalab/cookies/`
-- **Naming:** `{username}_session.json`
-- **Permissions:** Should be `600` (read/write owner only)
-- **Content:** Instagram authentication tokens (long-lived)
-
-**Security notes:**
-- Cookie files grant Instagram access without password
-- Protect these as strictly as passwords
-- Rotate by deleting file and re-authenticating
+- Session settings are **not** browser cookies.
+- Treat `/data/instalab/private` as sensitive (same as passwords).
 
 ## Network Security
 
-### Deployment Patterns
+### Recommended Deployment Patterns
 
-**Option 1: Localhost only (default)**
-```bash
-# Flask API: http://127.0.0.1:5000
-# Django UI: http://127.0.0.1:8000
-# Not accessible from network
-```
+**Option 1: Private LAN only (default)**
+- Expose UI/API only on a private network.
 
-**Option 2: Private network (Docker internal)**
-```yaml
-# docker-compose.yml
-services:
-  api:
-    networks:
-      - instalab_private
-    # No exposed ports to host
-```
-
-**Option 3: Reverse proxy with auth (recommended for team access)**
+**Option 2: Reverse proxy with auth (recommended)**
 ```nginx
-# nginx.conf
 location / {
   auth_basic "InstaLab";
   auth_basic_user_file /etc/nginx/.htpasswd;
@@ -116,72 +67,46 @@ location / {
 }
 ```
 
-**Option 4: VPN/Tailscale (secure remote access)**
-- Deploy on private Tailscale network
-- Access via `http://instalab.tailnet-name.ts.net:8000`
+**Option 3: VPN/Tailscale**
+- Expose only on a private tailnet.
 
 ## Database Security
 
-### SQLite (default)
-- **Location:** `INSTALAB_SQLITE_PATH` (default: `/data/instalab/instaloader.db`)
-- **Permissions:** Set to `600` (owner read/write only)
-- **Contains:** Follower lists, run history, credentials (if using config table)
-
-### PostgreSQL
-- **Connection:** Uses `INSTALAB_DB_*` environment variables
-- **Network:** Ensure Postgres is not exposed to internet
-- **Credentials:** Use strong passwords, never commit connection strings
-- **Backups:** Encrypt backups of production data
+- Postgres only.
+- Do not expose DB to the public internet.
+- Use strong passwords and rotate regularly.
 
 ## Audit & Monitoring
 
 ### What to Monitor
 
-1. **Unfollow actions** – Check `unfollow_actions` table for unexpected bulk operations
-2. **Run history** – Review `runs` table for unauthorized snapshot requests
-3. **Login attempts** – Watch Flask logs for `/api/logins/add` calls
-4. **File access** – Monitor cookie file reads (potential compromise indicator)
+1. **Run history** – `runs` table for unexpected snapshots
+2. **Unfollow actions** – `unfollow_actions` table
+3. **Login changes** – `login_accounts` table
+4. **Proxy config** – `config` table changes
 
-### Logging Recommendations
+### Logging
 
-```python
-# Future enhancement: Replace print() with proper logging
-import logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("instalab")
-logger.info("Run started", extra={"target": username, "login": login})
-```
+- Worker logs and trace files are written to `/data/instalab/job_runs/job_<id>/`.
+- Remove old job directories if storing long‑term.
 
 ## Vulnerability Disclosure
 
 If you discover a security vulnerability:
 
 1. **Do NOT open a public issue**
-2. Email the maintainer directly (check repository for contact)
-3. Include:
-   - Description of the vulnerability
-   - Steps to reproduce
-   - Potential impact
-   - Suggested fix (if available)
+2. Email the maintainer directly (see repository contact)
+3. Include repro steps and impact
 
 ## Security Updates
 
-Check for dependency updates regularly:
+Keep dependencies current:
 
 ```bash
-# Python dependencies
 pip list --outdated
-
-# Node dependencies
 npm outdated
 ```
 
-Known critical dependencies:
-- **Django:** Web framework (CVEs possible)
-- **Flask:** API framework (CVEs possible)
-- **Selenium/Playwright:** Browser automation (update with browser updates)
-- **Requests:** HTTP client (SSRF/redirect vulnerabilities)
-
 ## License
 
-This security policy is part of the InstaLab project and follows the same license terms.
+This security policy follows the same license terms as the InstaLab project.

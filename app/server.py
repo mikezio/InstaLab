@@ -1,28 +1,26 @@
 """
-Lightweight web control panel + scheduler for Instaloader.
+Lightweight web control panel + scheduler for the InstaLab private API pipeline.
 
 Features:
 - One-off runs via /api/run
-- Interval schedules persisted in SQLite and executed via APScheduler
-- Rebuild dashboard after runs (optional)
+- Interval schedules persisted in Postgres and executed via APScheduler
 - Simple control UI at /control (static HTML/JS)
-
-Run:
-    cd /home/stremio/instaloader_data
-    source venv/bin/activate
-    python server.py
-
-The server sets HOME to /home/stremio so Instaloader uses the existing session
-files in ~/.config/instaloader (to avoid repeated 2FA).
 """
 
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
 import time
 import threading
+import urllib.request
+from urllib.parse import quote
+import ssl
+import secrets
+import re
+from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,12 +32,28 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, jsonify, request, send_from_directory, redirect
 
-from instaloader_tracker import update_run_duration, _init_db as _init_instaloader_db
-import dashboard as dashboard_builder
+from tracker_db import update_run_duration, write_run_metadata, _init_db as _init_run_db
 from unfollow_bot import AuthRequiredError, ensure_auth_state, unfollow_users, init_login
 from db import get_db, get_columns, ddl, is_postgres
+from login_store import (
+    clear_session_settings,
+    clear_challenge_code,
+    delete_login,
+    disable_login,
+    get_login,
+    init_login_table,
+    list_logins,
+    set_challenge_code,
+    set_last_error,
+    set_last_login,
+    set_login_password,
+    set_new_password,
+    set_session_settings,
+    set_totp_seed,
+    upsert_login,
+)
 
-# Ensure Instaloader uses the stremio user's home for session files
+# Ensure consistent HOME for session/cache files
 os.environ.setdefault("HOME", "/home/stremio")
 os.environ.setdefault("TZ", "America/New_York")
 try:
@@ -50,12 +64,34 @@ except (AttributeError, OSError) as e:
 LOCAL_TZ = ZoneInfo("America/New_York")
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH_DEFAULT = BASE_DIR / "instaloader.db"
+DB_PATH_DEFAULT = BASE_DIR / "instalab_runs.db"
 # Environment variables are already loaded by db module
 ENV_PATH = Path(os.getenv("INSTALAB_ENV", "/srv/secrets/instalab.env"))
 COOKIE_DIR = Path(os.getenv("INSTALAB_COOKIE_DIR", "/data/instalab/cookies"))
+PRIVATE_SETTINGS_DIR = Path(os.getenv("INSTALAB_PRIVATE_SETTINGS_DIR", "/data/instalab/private"))
+# UI redirect configuration: Set INSTALAB_UI_BASE_URL when UI is on custom port or behind proxy
+# Leave empty for default behavior (constructs URL from request host + INSTALAB_UI_PORT)
+UI_BASE_URL = os.getenv("INSTALAB_UI_BASE_URL", "")
 
 JOB_TMP_DIR = BASE_DIR / "job_runs"
+
+
+class WorkerRunError(RuntimeError):
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(message)
+        self.code = code
+
+
+def _wrap_with_ddtrace(cmd, env, *, service=None):
+    ddtrace_run = shutil.which("ddtrace-run")
+    if not ddtrace_run:
+        return cmd, env
+    next_env = dict(env or {})
+    if service:
+        next_env["DD_SERVICE"] = service
+    next_env.setdefault("DD_TRACE_ENABLED", "true")
+    next_env.setdefault("DD_DYNAMIC_INSTRUMENTATION_ENABLED", "true")
+    return [ddtrace_run, *cmd], next_env
 
 
 def _ensure_job_tmp_dir():
@@ -118,12 +154,74 @@ def _ensure_cookie_dir():
 
 _ensure_cookie_dir()
 
+
+PRIVATE_USERNAME_RE = re.compile(r"^[A-Za-z0-9._]+$")
+
+
+def _safe_private_name(value: str) -> str:
+    value = (value or "").strip()
+    if PRIVATE_USERNAME_RE.match(value):
+        return value
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value) or "login"
+
+
+def _private_settings_path(login_username: str) -> Path:
+    return PRIVATE_SETTINGS_DIR / f"{_safe_private_name(login_username)}.json"
+
+
+def _ensure_private_settings_dir():
+    try:
+        PRIVATE_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            PRIVATE_SETTINGS_DIR.chmod(0o2770)
+        except PermissionError:
+            pass
+    except (PermissionError, OSError) as exc:
+        print(f"[init] private settings dir not writable: {exc}", file=sys.stderr)
+
+
+_ensure_private_settings_dir()
+
+
+def _remove_private_settings(login_username: str) -> bool:
+    path = _private_settings_path(login_username)
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _private_session_exists(login_username: str) -> bool:
+    entry = get_login(login_username, include_secrets=False)
+    if entry and entry.get("session_settings"):
+        return True
+    return _private_settings_path(login_username).exists()
+
 CONFIG_DEFAULTS = {
     "run_stall_seconds": int(os.getenv("RUN_STALL_SECONDS", "1200")),
     "run_max_seconds": int(os.getenv("RUN_MAX_SECONDS", "10800")),
     "run_request_timeout": float(os.getenv("RUN_REQUEST_TIMEOUT", "600")),
-    "run_item_delay_min": float(os.getenv("RUN_ITEM_DELAY_MIN", "0.25")),
-    "run_item_delay_max": float(os.getenv("RUN_ITEM_DELAY_MAX", "0.75")),
+    "run_item_delay_min": float(os.getenv("RUN_ITEM_DELAY_MIN", "0")),
+    "run_item_delay_max": float(os.getenv("RUN_ITEM_DELAY_MAX", "0")),
+    "run_pause_every_min": int(os.getenv("RUN_PAUSE_EVERY_MIN", "0")),
+    "run_pause_every_max": int(os.getenv("RUN_PAUSE_EVERY_MAX", "0")),
+    "run_pause_seconds_min": float(os.getenv("RUN_PAUSE_SECONDS_MIN", "0")),
+    "run_pause_seconds_max": float(os.getenv("RUN_PAUSE_SECONDS_MAX", "0")),
+    "run_trace_enabled": os.getenv("RUN_TRACE_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+    "run_profile_only": os.getenv("RUN_PROFILE_ONLY", "false").lower() in {"1", "true", "yes", "on"},
+    "run_login_mode": os.getenv("RUN_LOGIN_MODE", "auto"),
+    "private_device_settings_json": os.getenv("INSTALAB_PRIVATE_DEVICE_SETTINGS_JSON", ""),
+    "private_user_agent": os.getenv("INSTALAB_PRIVATE_USER_AGENT", ""),
+    "proxy_enabled": os.getenv("INSTALAB_PROXY_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+    "proxy_provider": os.getenv("INSTALAB_PROXY_PROVIDER", "decodo"),
+    "proxy_access_mode": os.getenv("INSTALAB_PROXY_ACCESS_MODE", "native"),
+    "proxy_host": os.getenv("INSTALAB_PROXY_HOST", "gate.decodo.com"),
+    "proxy_port": int(os.getenv("INSTALAB_PROXY_PORT", "7000")),
+    "proxy_username": os.getenv("INSTALAB_PROXY_USERNAME", ""),
+    "proxy_password": os.getenv("INSTALAB_PROXY_PASSWORD", ""),
     "unfollow_max_per_run": 25,
     "unfollow_delay_min": 25,
     "unfollow_delay_max": 45,
@@ -143,8 +241,24 @@ CONFIG_SCHEMA = {
     "run_stall_seconds": {"type": "int", "min": 60, "max": 21600},
     "run_max_seconds": {"type": "int", "min": 600, "max": 43200},
     "run_request_timeout": {"type": "float", "min": 10, "max": 3600},
-    "run_item_delay_min": {"type": "float", "min": 0.0, "max": 5.0},
-    "run_item_delay_max": {"type": "float", "min": 0.0, "max": 5.0},
+    "run_item_delay_min": {"type": "float", "min": 0.0, "max": 10.0},
+    "run_item_delay_max": {"type": "float", "min": 0.0, "max": 10.0},
+    "run_pause_every_min": {"type": "int", "min": 0, "max": 1000},
+    "run_pause_every_max": {"type": "int", "min": 0, "max": 1000},
+    "run_pause_seconds_min": {"type": "float", "min": 0.0, "max": 300.0},
+    "run_pause_seconds_max": {"type": "float", "min": 0.0, "max": 300.0},
+    "run_trace_enabled": {"type": "bool"},
+    "run_profile_only": {"type": "bool"},
+    "run_login_mode": {"type": "str", "allowed": {"auto", "session_only", "password"}},
+    "private_device_settings_json": {"type": "str"},
+    "private_user_agent": {"type": "str"},
+    "proxy_enabled": {"type": "bool"},
+    "proxy_provider": {"type": "str"},
+    "proxy_access_mode": {"type": "str", "allowed": {"native"}},
+    "proxy_host": {"type": "str"},
+    "proxy_port": {"type": "int", "min": 1, "max": 65535},
+    "proxy_username": {"type": "str"},
+    "proxy_password": {"type": "str"},
     "unfollow_max_per_run": {"type": "int", "min": 1, "max": 500},
     "unfollow_delay_min": {"type": "int", "min": 1, "max": 600},
     "unfollow_delay_max": {"type": "int", "min": 1, "max": 900},
@@ -163,6 +277,7 @@ CONFIG_SCHEMA = {
     "monitor_min_gap_minutes": {"type": "int", "min": 60, "max": 1440},
     "monitor_login_username": {"type": "str"},
 }
+SENSITIVE_CONFIG_KEYS = {"proxy_password"}
 CONFIG_CACHE = {"data": {}, "ts": 0.0}
 CONFIG_CACHE_TTL = 5.0
 
@@ -254,66 +369,103 @@ def _write_login_file(logins):
         print(f"Warning: Could not set permissions on {path}: {e}", file=sys.stderr)
 
 
+def _seed_logins_from_env_and_file():
+    """Seed login_accounts table from env + legacy logins file if empty."""
+    try:
+        existing = {entry.get("login_username") for entry in list_logins(include_secrets=False)}
+    except Exception:
+        existing = set()
+    if not existing:
+        for base in BASE_LOGIN_PROFILES:
+            username = (base.get("login_username") or "").strip()
+            if not username:
+                continue
+            prefix = base.get("prefix") or ""
+            password = os.getenv(f"{prefix}_LOGIN_PASSWORD") if prefix else None
+            try:
+                upsert_login(
+                    login_username=username,
+                    login_password=password,
+                    cookie_file=base.get("cookie_file"),
+                    source="env",
+                )
+            except Exception as exc:
+                print(f"Warning: Could not seed env login {username}: {exc}", file=sys.stderr)
+        for entry in _read_login_file():
+            username = (entry.get("login_username") or "").strip()
+            if not username:
+                continue
+            try:
+                upsert_login(
+                    login_username=username,
+                    login_password=entry.get("login_password"),
+                    cookie_file=entry.get("cookie_file"),
+                    disabled=bool(entry.get("disabled")),
+                    source="file",
+                )
+            except Exception as exc:
+                print(f"Warning: Could not seed file login {username}: {exc}", file=sys.stderr)
+    else:
+        # Ensure env/file entries are present if missing
+        for base in BASE_LOGIN_PROFILES:
+            username = (base.get("login_username") or "").strip()
+            if not username or username in existing:
+                continue
+            prefix = base.get("prefix") or ""
+            password = os.getenv(f"{prefix}_LOGIN_PASSWORD") if prefix else None
+            try:
+                upsert_login(
+                    login_username=username,
+                    login_password=password,
+                    cookie_file=base.get("cookie_file"),
+                    source="env",
+                )
+            except Exception as exc:
+                print(f"Warning: Could not add env login {username}: {exc}", file=sys.stderr)
+        for entry in _read_login_file():
+            username = (entry.get("login_username") or "").strip()
+            if not username or username in existing:
+                continue
+            try:
+                upsert_login(
+                    login_username=username,
+                    login_password=entry.get("login_password"),
+                    cookie_file=entry.get("cookie_file"),
+                    disabled=bool(entry.get("disabled")),
+                    source="file",
+                )
+            except Exception as exc:
+                print(f"Warning: Could not add file login {username}: {exc}", file=sys.stderr)
+
+
 def _load_login_profiles(force: bool = False):
     if not force and (time.time() - LOGIN_CACHE.get("ts", 0.0)) < LOGIN_CACHE_TTL:
         return
+    _seed_logins_from_env_and_file()
     profiles = []
     seen = set()
-    file_entries = _read_login_file()
-    disabled = {
-        (entry.get("login_username") or "").strip()
-        for entry in file_entries
-        if entry.get("disabled")
-    }
-    for base in BASE_LOGIN_PROFILES:
-        username = (base.get("login_username") or "").strip()
-        if not username or username in seen or username in disabled or _is_blocked_login(username):
-            continue
-        profiles.append(dict(base))
-        seen.add(username)
-    scrubbed_entries = []
-    changed = False
-    for entry in file_entries:
+    for entry in list_logins(include_secrets=False):
         username = (entry.get("login_username") or "").strip()
-        if not username:
+        if not username or username in seen:
             continue
         if _is_blocked_login(username):
-            changed = True
-            entry = dict(entry)
-            entry["disabled"] = True
-            entry["login_password"] = None
-            scrubbed_entries.append(entry)
-            seen.add(username)
+            try:
+                disable_login(username, True)
+            except Exception:
+                pass
             continue
         if entry.get("disabled"):
-            scrubbed_entries.append(entry)
-            seen.add(username)
-            continue
-        if entry.get("login_password"):
-            session_file = _session_path_for_login(username)
-            if os.path.exists(session_file):
-                entry = dict(entry)
-                entry["login_password"] = None
-                changed = True
-        scrubbed_entries.append(entry)
-        if username in seen:
             continue
         profiles.append(
             {
                 "login_username": username,
                 "prefix": None,
                 "cookie_file": entry.get("cookie_file") or f"cookies_{username}.txt",
-                "db_path": entry.get("db_path") or str(DB_PATH_DEFAULT),
-                "login_password": entry.get("login_password"),
-                "source": "file",
+                "db_path": str(DB_PATH_DEFAULT),
+                "source": entry.get("source") or "db",
             }
         )
         seen.add(username)
-    if changed:
-        try:
-            _write_login_file(scrubbed_entries)
-        except (IOError, OSError) as e:
-            print(f"Warning: Could not write login file: {e}", file=sys.stderr)
     LOGIN_CACHE["profiles"] = profiles
     LOGIN_CACHE["lookup"] = {p["login_username"]: p for p in profiles}
     LOGIN_CACHE["ts"] = time.time()
@@ -357,11 +509,6 @@ def _resolve_cookie_file(cookie_file):
 
 def _get_db():
     conn = get_db()
-    if not is_postgres():
-        try:
-            conn.execute("PRAGMA busy_timeout=30000")
-        except Exception as e:
-            print(f"Warning: Could not set busy_timeout: {e}", file=sys.stderr)
     # Add schema migrations if needed
     try:
         cols = get_columns(conn, "runs")
@@ -392,16 +539,13 @@ def _get_db():
 
 def _list_tables(conn) -> set[str]:
     try:
-        if is_postgres():
-            cur = conn.execute(
-                """
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                """
-            )
-            return {row[0] for row in cur.fetchall()}
-        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        cur = conn.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+            """
+        )
         return {row[0] for row in cur.fetchall()}
     except Exception as e:
         print(f"Warning: Could not list tables: {e}", file=sys.stderr)
@@ -432,6 +576,7 @@ def _health_check_db():
             "count_checks",
             "unfollow_actions",
             "config",
+            "login_accounts",
         }
         missing = sorted(required - tables)
         payload["details"]["tables_present"] = sorted(tables)
@@ -468,8 +613,10 @@ def _health_check_files():
         "env": _path_state(ENV_PATH, writable=False),
         "logins_file": _path_state(Path(LOGIN_FILE_PATH), writable=True),
         "cookie_dir": _path_state(COOKIE_DIR, expect_dir=True, writable=True),
+        "private_settings_dir": _path_state(PRIVATE_SETTINGS_DIR, expect_dir=True, writable=True),
         "job_tmp_dir": _path_state(JOB_TMP_DIR, expect_dir=True, writable=True),
         "data_dir": _path_state(Path("/data/instalab"), expect_dir=True, writable=True),
+        "encryption_key": {"present": bool(os.getenv("INSTALAB_ENCRYPTION_KEY") or os.getenv("INSTALAB_FERNET_KEY"))},
     }
     status = "ok"
     if not checks["env"]["exists"] or not checks["env"]["readable"]:
@@ -477,6 +624,10 @@ def _health_check_files():
     if not checks["job_tmp_dir"]["exists"] or not checks["job_tmp_dir"]["writable"]:
         status = "fail"
     if not checks["cookie_dir"]["exists"] or not checks["cookie_dir"]["writable"]:
+        status = "degraded"
+    if not checks["private_settings_dir"]["exists"] or not checks["private_settings_dir"]["writable"]:
+        status = "degraded"
+    if not checks["encryption_key"]["present"]:
         status = "degraded"
     return {"status": status, "details": checks}
 
@@ -549,22 +700,25 @@ def _health_check_sessions():
     details = []
     for p in profiles:
         username = p.get("login_username")
-        session_file = _session_path_for_login(username)
-        session_exists = os.path.exists(session_file)
-        cookie_file = (p.get("cookie_file") or "").strip()
-        cookie_path = COOKIE_DIR / cookie_file if cookie_file else None
-        cookie_exists = bool(cookie_path and cookie_path.exists())
-        has_password = bool(p.get("login_password"))
-        ready = has_password or session_exists or cookie_exists
+        private_settings = _private_settings_path(username)
+        private_session_exists = private_settings.exists()
+        private_session_mtime = None
+        if private_session_exists:
+            try:
+                private_session_mtime = private_settings.stat().st_mtime
+            except Exception:
+                private_session_mtime = None
+        prefix = p.get("prefix")
+        has_password = bool(p.get("login_password") or (prefix and os.getenv(f"{prefix}_LOGIN_PASSWORD")))
+        ready = has_password or private_session_exists
         if not ready:
             missing_auth.append(username)
         details.append(
             {
                 "login_username": username,
                 "source": p.get("source", "env"),
-                "session_exists": session_exists,
-                "cookie_file": cookie_file or None,
-                "cookie_exists": cookie_exists,
+                "private_session_exists": private_session_exists,
+                "private_session_mtime": private_session_mtime,
                 "has_password": has_password,
                 "ready": ready,
             }
@@ -586,7 +740,7 @@ def _health_check_sessions():
 
 
 def _health_check_scraper():
-    backend = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "selenium").strip().lower()
+    backend = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
     
     # Check cache first
     now = time.time()
@@ -597,24 +751,16 @@ def _health_check_scraper():
     
     details = {"backend": backend}
     status = "ok"
-    if backend in {"instaloader", "insta", "iloader"}:
+    if backend in {"private", "private_api", "private-api", "osintgram"}:
         try:
-            import instaloader  # noqa: F401
-            details["instaloader"] = "ok"
+            import instagrapi  # noqa: F401
+            details["private_api"] = "ok"
         except Exception as exc:  # noqa: BLE001
             status = "fail"
-            details["instaloader"] = f"error: {exc}"
+            details["private_api"] = f"error: {exc}"
     else:
-        try:
-            import selenium  # noqa: F401
-            details["selenium"] = "ok"
-        except Exception as exc:  # noqa: BLE001
-            status = "fail"
-            details["selenium"] = f"error: {exc}"
-        chromedriver = shutil.which("chromedriver")
-        details["chromedriver"] = chromedriver
-        if not chromedriver:
-            status = "degraded" if status == "ok" else status
+        status = "fail"
+        details["private_api"] = "backend disabled (set INSTALAB_SCRAPER_BACKEND=private)"
     
     result = {"status": status, "details": details}
     # Update cache
@@ -622,6 +768,11 @@ def _health_check_scraper():
     _BACKEND_HEALTH_CACHE["status"] = result
     _BACKEND_HEALTH_CACHE["ts"] = now
     return result
+
+
+def _is_private_backend() -> bool:
+    backend = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
+    return backend in {"private", "private_api", "private-api", "osintgram"}
 
 
 def _health_check_runs():
@@ -787,6 +938,15 @@ def _get_config(force=False):
     return merged
 
 
+def _mask_config_for_api(cfg: dict) -> dict:
+    safe = dict(cfg)
+    for key in SENSITIVE_CONFIG_KEYS:
+        if key in safe:
+            safe.pop(key, None)
+            safe[f"{key}_set"] = bool(cfg.get(key))
+    return safe
+
+
 def _get_config_value(key, fallback=None):
     cfg = _get_config()
     if key in cfg:
@@ -822,23 +982,86 @@ def _set_config_values(updates: dict):
     CONFIG_CACHE["ts"] = 0.0
     return cleaned
 
+
+def _build_proxy_server(host: str, port: int) -> str:
+    return f"http://{host}:{int(port)}"
+
+
+def _build_proxy_url(host: str, port: int, username: str | None = None, password: str | None = None) -> str:
+    if username and password:
+        user_enc = quote(str(username), safe="")
+        pass_enc = quote(str(password), safe="")
+        return f"http://{user_enc}:{pass_enc}@{host}:{int(port)}"
+    return f"http://{host}:{int(port)}"
+
+
+ 
+def _get_proxy_config(session_id: str | None = None):
+    enabled = _parse_bool(_get_config_value("proxy_enabled", False))
+    provider = str(_get_config_value("proxy_provider", "decodo") or "decodo").strip().lower()
+    access_mode = str(_get_config_value("proxy_access_mode", "native") or "native").strip().lower()
+    if access_mode != "native":
+        access_mode = "native"
+    host = str(_get_config_value("proxy_host", "") or "").strip().rstrip("/")
+    if host.startswith("http://"):
+        host = host[7:]
+    elif host.startswith("https://"):
+        host = host[8:]
+    port = int(_get_config_value("proxy_port", 7000) or 7000)
+    username = str(_get_config_value("proxy_username", "") or "").strip()
+    password = str(_get_config_value("proxy_password", "") or "").strip()
+    if not enabled:
+        return {"enabled": False}
+    if not host or not port:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "provider": provider,
+        "access_mode": access_mode,
+        "host": host,
+        "port": port,
+        "username": username,
+        "password": password,
+        "server": _build_proxy_server(host, port),
+    }
+
+
+def _generate_proxy_session_id(length: int = 16) -> str:
+    return secrets.token_hex(max(4, int(length) // 2))
+
+
+def _apply_proxy_env(env: dict, *, session_id: str | None = None):
+    proxy = _get_proxy_config(session_id=session_id)
+    if not proxy.get("enabled"):
+        env["INSTALAB_PROXY_ENABLED"] = "false"
+        return
+    env["INSTALAB_PROXY_ENABLED"] = "true"
+    env["INSTALAB_PROXY_PROVIDER"] = proxy.get("provider", "decodo")
+    env["INSTALAB_PROXY_ACCESS_MODE"] = proxy.get("access_mode", "native")
+    env["INSTALAB_PROXY_HOST"] = proxy.get("host", "")
+    env["INSTALAB_PROXY_PORT"] = str(proxy.get("port", 7000))
+    if proxy.get("username"):
+        env["INSTALAB_PROXY_USERNAME"] = proxy.get("username")
+    if proxy.get("password"):
+        env["INSTALAB_PROXY_PASSWORD"] = proxy.get("password")
+    host = proxy.get("host") or ""
+    port = proxy.get("port")
+    if host and port:
+        user = proxy.get("username") or ""
+        pwd = proxy.get("password") or ""
+        proxy_url = _build_proxy_url(host, int(port), user, pwd)
+        env["HTTP_PROXY"] = proxy_url
+        env["HTTPS_PROXY"] = proxy_url
+
+
+def _proxy_test_url(provider: str) -> str:
+    return "https://ip.decodo.com/json"
+
 def _init_unfollow_table():
     conn = _get_db()
     try:
         conn.execute(
             ddl(
-                """
-                CREATE TABLE IF NOT EXISTS unfollow_actions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    login_username TEXT NOT NULL,
-                    target_username TEXT NOT NULL,
-                    username TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    detail TEXT,
-                    created_at TEXT NOT NULL
-                )
-                """,
                 """
                 CREATE TABLE IF NOT EXISTS unfollow_actions (
                     id SERIAL PRIMARY KEY,
@@ -850,7 +1073,7 @@ def _init_unfollow_table():
                     detail TEXT,
                     created_at TEXT NOT NULL
                 )
-                """,
+                """
             )
         )
         conn.execute(
@@ -864,13 +1087,17 @@ def _init_unfollow_table():
         conn.close()
 
 
-def _init_instaloader_tables():
+def _init_run_tables():
     conn = _get_db()
     try:
-        _init_instaloader_db(conn)
+        _init_run_db(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _init_login_tables():
+    init_login_table()
 
 
 
@@ -1140,6 +1367,8 @@ def _unfollow_worker(usernames, login_username, target_username, dry_run, max_ac
         return UNFOLLOW_CANCEL.is_set()
 
     try:
+        session_id = _generate_proxy_session_id()
+        proxy = _get_proxy_config(session_id=session_id)
         result = unfollow_users(
             usernames,
             UNFOLLOW_STORAGE,
@@ -1151,6 +1380,9 @@ def _unfollow_worker(usernames, login_username, target_username, dry_run, max_ac
             log=_log_unfollow,
             progress=_progress,
             record=_record,
+            proxy_server=proxy.get("server") if proxy.get("enabled") else None,
+            proxy_username=proxy.get("username"),
+            proxy_password=proxy.get("password"),
         )
         cancelled = bool(result.get("cancelled")) or UNFOLLOW_CANCEL.is_set()
         fatal_error = result.get("fatal_error")
@@ -1190,16 +1422,6 @@ def _init_schedule_table():
             ddl(
                 """
                 CREATE TABLE IF NOT EXISTS schedules (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    login_username TEXT NOT NULL,
-                    target_username TEXT NOT NULL,
-                    interval_minutes INTEGER,
-                    interval TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )
-                """,
-                """
-                CREATE TABLE IF NOT EXISTS schedules (
                     id SERIAL PRIMARY KEY,
                     login_username TEXT NOT NULL,
                     target_username TEXT NOT NULL,
@@ -1207,7 +1429,7 @@ def _init_schedule_table():
                     interval TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
-                """,
+                """
             )
         )
         # backward compat: add interval column if only interval_minutes existed
@@ -1232,19 +1454,6 @@ def _init_monitor_table():
             ddl(
                 """
                 CREATE TABLE IF NOT EXISTS count_checks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    target_username TEXT NOT NULL,
-                    login_username TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    followers_count INTEGER,
-                    followees_count INTEGER,
-                    run_requested INTEGER NOT NULL DEFAULT 0,
-                    triggered_run_id TEXT,
-                    trigger_reason TEXT
-                )
-                """,
-                """
-                CREATE TABLE IF NOT EXISTS count_checks (
                     id SERIAL PRIMARY KEY,
                     target_username TEXT NOT NULL,
                     login_username TEXT NOT NULL,
@@ -1255,7 +1464,7 @@ def _init_monitor_table():
                     triggered_run_id TEXT,
                     trigger_reason TEXT
                 )
-                """,
+                """
             )
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_count_checks_target ON count_checks(target_username)")
@@ -1347,7 +1556,7 @@ def _schedule_job(schedule_id, login_username, target_username, cron_expr):
     def _scheduled_wrapper():
         try:
             started = datetime.now(LOCAL_TZ).isoformat()
-            res = guarded_run(login_username, target_username, rebuild_dashboard=True, source=f"schedule:{schedule_id}")
+            res = guarded_run(login_username, target_username, source=f"schedule:{schedule_id}")
             finished = datetime.now(LOCAL_TZ).isoformat()
             try:
                 elapsed = int((datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds())
@@ -1427,7 +1636,25 @@ def _run_count_check(login_username, target_username):
     err_path = job_dir / "worker.err"
 
     env = os.environ.copy()
+    env["INSTALAB_SCRAPER_BACKEND"] = "private"
+    env["SCRAPER_BACKEND"] = "private"
     env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
+    if creds.get("totp_seed"):
+        env["RUN_TOTP_SEED"] = str(creds["totp_seed"]).strip()
+    else:
+        env.pop("RUN_TOTP_SEED", None)
+    device_settings_json = str(_get_config_value("private_device_settings_json", "") or "").strip()
+    if device_settings_json:
+        env["RUN_DEVICE_SETTINGS_JSON"] = device_settings_json
+    else:
+        env.pop("RUN_DEVICE_SETTINGS_JSON", None)
+    user_agent = str(_get_config_value("private_user_agent", "") or "").strip()
+    if user_agent:
+        env["RUN_USER_AGENT"] = user_agent
+    else:
+        env.pop("RUN_USER_AGENT", None)
+    session_id = _generate_proxy_session_id()
+    _apply_proxy_env(env, session_id=session_id)
 
     cmd = [
         sys.executable,
@@ -1443,10 +1670,20 @@ def _run_count_check(login_username, target_username):
         "--request-timeout",
         "120",
     ]
-    with open(out_path, "w", encoding="utf-8") as out_fh, open(err_path, "w", encoding="utf-8") as err_fh:
-        proc = subprocess.Popen(cmd, stdout=out_fh, stderr=err_fh, env=env)
+    cmd, env = _wrap_with_ddtrace(cmd, env, service="instalab-worker")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+        bufsize=1,
+    )
+    out_fh, err_fh, out_thread, err_thread = _stream_worker_output(
+        proc, out_path, err_path, f"count:{login_username}"
+    )
     try:
-        proc.communicate(timeout=180)
+        proc.wait(timeout=180)
     except Exception:
         _terminate_proc(proc)
         # Clean up temp directory on failure
@@ -1455,6 +1692,17 @@ def _run_count_check(login_username, target_username):
         except Exception:
             pass
         return None
+    finally:
+        try:
+            out_thread.join(timeout=2)
+            err_thread.join(timeout=2)
+        except Exception:
+            pass
+        try:
+            out_fh.close()
+            err_fh.close()
+        except Exception:
+            pass
 
     payload = _read_json_file(result_path) or {}
     
@@ -1704,24 +1952,31 @@ def _get_credentials(login_username):
     profile = _get_login_lookup().get(login_username)
     if not profile:
         raise ValueError(f"Unknown login_username: {login_username}")
-    password = profile.get("login_password")
+    entry = get_login(login_username, include_secrets=True) or {}
+    password = entry.get("login_password") or ""
     if not password:
         prefix = profile.get("prefix")
         if prefix:
-            password = os.getenv(f"{prefix}_LOGIN_PASSWORD")
-    cookie_file = _resolve_cookie_file(profile.get("cookie_file"))
-    if not password:
-        session_file = _session_path_for_login(login_username)
-        if not os.path.exists(session_file):
-            if not (cookie_file and os.path.exists(cookie_file)):
-                raise ValueError(f"Missing password or cookie for login: {login_username}")
-        password = ""
+            password = os.getenv(f"{prefix}_LOGIN_PASSWORD", "")
+    if not password and not _private_session_exists(login_username):
+        raise ValueError(f"Missing password or private session for login: {login_username}")
     return {
         "login_username": login_username,
         "login_password": password,
-        "cookie_file": cookie_file,
+        "totp_seed": entry.get("totp_seed"),
+        "cookie_file": None,
         "db_path": profile.get("db_path", str(DB_PATH_DEFAULT)),
     }
+
+
+def _sanitize_login_username(value: str) -> str:
+    username = (value or "").strip()
+    if not username:
+        return ""
+    if not re.match(r"^[A-Za-z0-9._]+$", username):
+        return ""
+    return username
+
 
 def _read_json_file(path: Path):
     try:
@@ -1747,6 +2002,34 @@ def _terminate_proc(proc: subprocess.Popen):
         return
     except Exception:
         pass
+
+
+def _stream_worker_output(proc: subprocess.Popen, out_path: Path, err_path: Path, prefix: str):
+    """Stream worker stdout/stderr to files and container logs for Datadog collection."""
+    out_fh = open(out_path, "w", encoding="utf-8")
+    err_fh = open(err_path, "w", encoding="utf-8")
+
+    def _reader(stream, fh, tag):
+        try:
+            for line in iter(stream.readline, ""):
+                if not line:
+                    break
+                fh.write(line)
+                fh.flush()
+                print(f"[{prefix} {tag}] {line.rstrip()}", flush=True)
+        except Exception:
+            pass
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+    out_thread = threading.Thread(target=_reader, args=(proc.stdout, out_fh, "out"), daemon=True)
+    err_thread = threading.Thread(target=_reader, args=(proc.stderr, err_fh, "err"), daemon=True)
+    out_thread.start()
+    err_thread.start()
+    return out_fh, err_fh, out_thread, err_thread
     try:
         proc.kill()
         proc.wait(timeout=5)
@@ -1754,7 +2037,7 @@ def _terminate_proc(proc: subprocess.Popen):
         pass
 
 
-def run_snapshot(login_username, target_username, rebuild_dashboard=True, job_id=None, two_factor_code=None):
+def run_snapshot(login_username, target_username, job_id=None, two_factor_code=None, challenge_code=None):
     _ensure_job_tmp_dir()
     creds = _get_credentials(login_username)
     job = ACTIVE_JOBS.get(login_username)
@@ -1767,19 +2050,62 @@ def run_snapshot(login_username, target_username, rebuild_dashboard=True, job_id
     err_path = job_dir / "worker.err"
 
     env = os.environ.copy()
+    env["INSTALAB_SCRAPER_BACKEND"] = "private"
+    env["SCRAPER_BACKEND"] = "private"
     env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
+    session_id = _generate_proxy_session_id()
+    _apply_proxy_env(env, session_id=session_id)
+    if two_factor_code or challenge_code:
+        try:
+            clear_challenge_code(login_username)
+        except Exception:
+            pass
     if two_factor_code:
         env["RUN_2FA_CODE"] = str(two_factor_code).strip()
     else:
         env.pop("RUN_2FA_CODE", None)
+    if challenge_code:
+        env["RUN_CHALLENGE_CODE"] = str(challenge_code).strip()
+    else:
+        env.pop("RUN_CHALLENGE_CODE", None)
+    if creds.get("totp_seed"):
+        env["RUN_TOTP_SEED"] = str(creds["totp_seed"]).strip()
+    else:
+        env.pop("RUN_TOTP_SEED", None)
+    device_settings_json = str(_get_config_value("private_device_settings_json", "") or "").strip()
+    if device_settings_json:
+        env["RUN_DEVICE_SETTINGS_JSON"] = device_settings_json
+    else:
+        env.pop("RUN_DEVICE_SETTINGS_JSON", None)
+    user_agent = str(_get_config_value("private_user_agent", "") or "").strip()
+    if user_agent:
+        env["RUN_USER_AGENT"] = user_agent
+    else:
+        env.pop("RUN_USER_AGENT", None)
 
     request_timeout = float(_get_config_value("run_request_timeout", 600))
     item_delay_min = float(_get_config_value("run_item_delay_min", 0.25))
     item_delay_max = float(_get_config_value("run_item_delay_max", 0.75))
+    pause_every_min = int(_get_config_value("run_pause_every_min", 0) or 0)
+    pause_every_max = int(_get_config_value("run_pause_every_max", 0) or 0)
+    pause_seconds_min = float(_get_config_value("run_pause_seconds_min", 0) or 0)
+    pause_seconds_max = float(_get_config_value("run_pause_seconds_max", 0) or 0)
+    trace_enabled = _parse_bool(_get_config_value("run_trace_enabled", False))
+    profile_only = _parse_bool(_get_config_value("run_profile_only", False))
+    login_mode = str(_get_config_value("run_login_mode", "auto") or "auto").strip().lower()
     stall_seconds = int(_get_config_value("run_stall_seconds", 1200))
     max_seconds = int(_get_config_value("run_max_seconds", 10800))
     env["RUN_ITEM_DELAY_MIN"] = str(item_delay_min)
     env["RUN_ITEM_DELAY_MAX"] = str(item_delay_max)
+    env["RUN_PAUSE_EVERY_MIN"] = str(pause_every_min)
+    env["RUN_PAUSE_EVERY_MAX"] = str(pause_every_max)
+    env["RUN_PAUSE_SECONDS_MIN"] = str(pause_seconds_min)
+    env["RUN_PAUSE_SECONDS_MAX"] = str(pause_seconds_max)
+    env["RUN_TRACE_ENABLED"] = "true" if trace_enabled else "false"
+    if trace_enabled:
+        env["RUN_TRACE_PATH"] = str(job_dir / "trace.jsonl")
+    env["RUN_PROFILE_ONLY"] = "true" if profile_only else "false"
+    env["RUN_LOGIN_MODE"] = login_mode
     cmd = [
         sys.executable,
         str(BASE_DIR / "snapshot_worker.py"),
@@ -1798,9 +2124,19 @@ def run_snapshot(login_username, target_username, rebuild_dashboard=True, job_id
         "--request-timeout",
         str(request_timeout),
     ]
+    cmd, env = _wrap_with_ddtrace(cmd, env, service="instalab-worker")
 
-    with open(out_path, "w", encoding="utf-8") as out_fh, open(err_path, "w", encoding="utf-8") as err_fh:
-        proc = subprocess.Popen(cmd, stdout=out_fh, stderr=err_fh, env=env)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+        bufsize=1,
+    )
+    out_fh, err_fh, out_thread, err_thread = _stream_worker_output(
+        proc, out_path, err_path, f"run:{login_username}"
+    )
 
     if job:
         job["worker_pid"] = proc.pid
@@ -1863,41 +2199,39 @@ def run_snapshot(login_username, target_username, rebuild_dashboard=True, job_id
 
         time.sleep(1.0)
 
+    try:
+        out_thread.join(timeout=2)
+        err_thread.join(timeout=2)
+    except Exception:
+        pass
+    try:
+        out_fh.close()
+        err_fh.close()
+    except Exception:
+        pass
+
     result_payload = _read_json_file(result_path)
     if not result_payload:
         tail = _tail_file(err_path)
-        # Clean up temp directory on failure
-        try:
-            shutil.rmtree(job_dir, ignore_errors=True)
-        except Exception:
-            pass
-        raise RuntimeError(f"worker exited without result{(': ' + tail) if tail else ''}")
+        error_msg = f"worker exited without result"
+        if tail:
+            error_msg = f"{error_msg}: {tail}"
+        error_msg = f"{error_msg} (job_dir: {job_dir})"
+        raise RuntimeError(error_msg)
     if result_payload.get("status") != "success":
-        # Clean up temp directory on failure
-        try:
-            shutil.rmtree(job_dir, ignore_errors=True)
-        except Exception:
-            pass
-        raise RuntimeError(result_payload.get("error", "worker failed"))
+        tail = _tail_file(err_path)
+        error_msg = result_payload.get("error", "worker failed")
+        if tail:
+            error_msg = f"{error_msg}: {tail}"
+        error_msg = f"{error_msg} (job_dir: {job_dir})"
+        raise WorkerRunError(error_msg, code=result_payload.get("error_code"))
 
     result = result_payload.get("result") or {}
     
-    # Clean up temp directory after successful completion
-    try:
-        shutil.rmtree(job_dir, ignore_errors=True)
-    except Exception:
-        pass
-    
-    if rebuild_dashboard:
-        dashboard_builder.build_dashboard(
-            base_dir=str(BASE_DIR),
-            output_path=str(BASE_DIR / "dashboard" / "index.html"),
-            db_path=str(DB_PATH_DEFAULT),
-        )
     return result
 
 
-def guarded_run(login_username, target_username, rebuild_dashboard=True, source="api", job_id=None, two_factor_code=None):
+def guarded_run(login_username, target_username, source="api", job_id=None, two_factor_code=None, challenge_code=None):
     """Serialise runs per login across API + scheduler."""
     _acquire_run_slot(source, login_username, target_username, job_id=job_id)
     try:
@@ -1909,9 +2243,9 @@ def guarded_run(login_username, target_username, rebuild_dashboard=True, source=
         return run_snapshot(
             login_username,
             target_username,
-            rebuild_dashboard=rebuild_dashboard,
             job_id=job_id,
             two_factor_code=two_factor_code,
+            challenge_code=challenge_code,
         )
     finally:
         CANCEL_REQUESTS.discard((login_username, target_username))
@@ -1939,6 +2273,7 @@ RUN_META = {}
 RUN_LOCKS = {}
 RUN_LOCKS_GUARD = threading.Lock()
 ACTIVE_JOBS = {}
+LAST_JOB_BY_LOGIN = {}
 DELETED_RUNS = {}
 CANCEL_REQUESTS = set()
 SCHEMA_HAS_INTERVAL_MINUTES = False
@@ -2043,47 +2378,42 @@ def _release_run_slot(login_username: str):
         lock.release()
 
 
-def _session_path_for_login(login_username: str) -> str:
-    session_dir = os.path.expanduser("~/.config/instaloader")
-    return os.path.join(session_dir, f"session-{login_username.lower()}")
-
-
 _init_schedule_table()
 _init_config_table()
 _init_unfollow_table()
-_init_instaloader_tables()
+_init_run_tables()
+_init_login_tables()
 _init_monitor_table()
 _restore_schedules()
 _schedule_monitor_job()
 threading.Thread(target=_watchdog_loop, daemon=True).start()
 
-app = Flask(__name__, static_folder=str(BASE_DIR / "dashboard"), static_url_path="/dashboard")
+app = Flask(__name__)
 
 
 @app.route("/api/logins", methods=["GET"])
 def api_logins():
-    def _session_info(username: str):
-        session_file = _session_path_for_login(username)
-        if os.path.exists(session_file):
-            try:
-                return True, os.path.getmtime(session_file)
-            except Exception:
-                return True, None
-        return False, None
-    profiles = _get_login_profiles()
-    return jsonify(
-        [
+    entries = [e for e in list_logins(include_secrets=False) if not e.get("disabled")]
+    payload = []
+    for entry in entries:
+        username = entry.get("login_username")
+        path = _private_settings_path(username)
+        session_cached = bool(entry.get("session_settings")) or path.exists()
+        payload.append(
             {
-                "login_username": p["login_username"],
-                "cookie_file": p.get("cookie_file"),
-                "db_path": p.get("db_path"),
-                "source": p.get("source", "env"),
-                "session_exists": (info := _session_info(p["login_username"]))[0],
-                "session_mtime": info[1],
+                "login_username": username,
+                "cookie_file": entry.get("cookie_file"),
+                "db_path": str(DB_PATH_DEFAULT),
+                "source": entry.get("source", "db"),
+                "private_session_exists": session_cached,
+                "private_session_mtime": (path.stat().st_mtime if path.exists() else None),
+                "has_password": bool(entry.get("has_password")),
+                "has_totp_seed": bool(entry.get("has_totp_seed")),
+                "last_login_at": entry.get("last_login_at"),
+                "last_error": entry.get("last_error"),
             }
-            for p in profiles
-        ]
-    )
+        )
+    return jsonify(payload)
 
 
 @app.route("/api/logins/add", methods=["POST"])
@@ -2091,91 +2421,33 @@ def api_logins_add():
     data = request.get_json(silent=True) or {}
     login_username = (data.get("login_username") or "").strip()
     login_password = (data.get("login_password") or "").strip()
-    cookie_file = (data.get("cookie_file") or "").strip()
-    if not login_username or (not login_password and not cookie_file):
-        return jsonify({"error": "login_username and (login_password or cookie_file) are required"}), 400
+    totp_seed = (data.get("totp_seed") or "").strip() or None
+    private_session_exists = _private_session_exists(login_username) if login_username else False
+    if not login_username or (not login_password and not private_session_exists and not totp_seed):
+        return jsonify({"error": "login_username and login_password are required (no private session cached)"}), 400
     if _is_blocked_login(login_username):
         return jsonify({"error": "login_username is blocked"}), 400
-
-    lookup = _get_login_lookup(force=True)
-    
-    # Read login file once at the beginning
-    logins = _read_login_file()
-    
-    if login_username in lookup:
-        profile = lookup.get(login_username) or {}
-        session_file = _session_path_for_login(login_username)
-        if (
-            profile.get("source") == "file"
-            and not profile.get("login_password")
-            and not os.path.exists(session_file)
-        ):
-            updated = False
-            for entry in logins:
-                if entry.get("login_username") == login_username:
-                    if login_password:
-                        entry["login_password"] = login_password
-                    if cookie_file:
-                        entry["cookie_file"] = cookie_file
-                    elif not entry.get("cookie_file"):
-                        entry["cookie_file"] = f"cookies_{login_username}.txt"
-                    updated = True
-            if updated:
-                try:
-                    _write_login_file(logins)
-                    _clear_login_cache()
-                except Exception as exc:  # noqa: BLE001
-                    return jsonify({"error": f"failed to save login: {exc}"}), 500
-                return jsonify({"updated": login_username})
-        return jsonify({"error": "login_username already exists"}), 409
-
-    # Check for disabled login or existing entry (using already-loaded logins)
-    for entry in logins:
-        if entry.get("login_username") == login_username:
-            if entry.get("disabled"):
-                entry["disabled"] = False
-                if login_password:
-                    entry["login_password"] = login_password
-                if cookie_file:
-                    entry["cookie_file"] = cookie_file
-                elif not entry.get("cookie_file"):
-                    entry["cookie_file"] = f"cookies_{login_username}.txt"
-                try:
-                    _write_login_file(logins)
-                    _clear_login_cache()
-                except Exception as exc:  # noqa: BLE001
-                    return jsonify({"error": f"failed to save login: {exc}"}), 500
-                return jsonify({"updated": login_username})
-            session_file = _session_path_for_login(login_username)
-            if not entry.get("login_password") and not os.path.exists(session_file):
-                if login_password:
-                    entry["login_password"] = login_password
-                if cookie_file:
-                    entry["cookie_file"] = cookie_file
-                elif not entry.get("cookie_file"):
-                    entry["cookie_file"] = f"cookies_{login_username}.txt"
-                try:
-                    _write_login_file(logins)
-                    _clear_login_cache()
-                except Exception as exc:  # noqa: BLE001
-                    return jsonify({"error": f"failed to save login: {exc}"}), 500
-                return jsonify({"updated": login_username})
-            return jsonify({"error": "login_username already exists"}), 409
-
-    logins.append(
-        {
-            "login_username": login_username,
-            "login_password": login_password or None,
-            "cookie_file": cookie_file or f"cookies_{login_username}.txt",
-            "db_path": str(DB_PATH_DEFAULT),
-        }
-    )
     try:
-        _write_login_file(logins)
+        entry = get_login(login_username, include_secrets=False)
+        if entry:
+            if login_password:
+                set_login_password(login_username, login_password)
+            if totp_seed:
+                set_totp_seed(login_username, totp_seed)
+            disable_login(login_username, False)
+            _clear_login_cache()
+            return jsonify({"updated": login_username})
+        upsert_login(
+            login_username=login_username,
+            login_password=login_password or None,
+            totp_seed=totp_seed,
+            cookie_file=f"cookies_{login_username}.txt",
+            disabled=False,
+            source="db",
+        )
         _clear_login_cache()
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"failed to save login: {exc}"}), 500
-
     return jsonify({"added": login_username})
 
 
@@ -2191,12 +2463,10 @@ def api_logins_reset():
         return jsonify({"error": "run already in progress for this login"}), 409
     if UNFOLLOW_LOCK.locked() and (UNFOLLOW_JOB.get("login_username") or "") == login_username:
         return jsonify({"error": "unfollow job running for this login"}), 409
-    session_file = _session_path_for_login(login_username)
     try:
-        removed = False
-        if os.path.exists(session_file):
-            os.remove(session_file)
-            removed = True
+        removed = _remove_private_settings(login_username)
+        clear_session_settings(login_username)
+        _clear_login_cache()
         return jsonify({"ok": True, "login_username": login_username, "removed": removed})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"failed to remove session: {exc}"}), 500
@@ -2209,55 +2479,165 @@ def api_logins_delete():
     delete_session = bool(data.get("delete_session", True))
     if not login_username:
         return jsonify({"error": "login_username is required"}), 400
-    profile = _get_login_lookup().get(login_username)
-    if not profile:
+    if login_username not in _get_login_lookup():
         return jsonify({"error": "unknown login_username"}), 404
     if _get_run_lock(login_username).locked():
         return jsonify({"error": "run already in progress for this login"}), 409
     if UNFOLLOW_LOCK.locked() and (UNFOLLOW_JOB.get("login_username") or "") == login_username:
         return jsonify({"error": "unfollow job running for this login"}), 409
-    logins = _read_login_file()
-    if profile.get("source") != "file":
-        found = False
-        for entry in logins:
-            if (entry.get("login_username") or "") == login_username:
-                entry["disabled"] = True
-                entry["login_password"] = None
-                found = True
-        if not found:
-            logins.append(
-                {
-                    "login_username": login_username,
-                    "login_password": None,
-                    "disabled": True,
-                    "cookie_file": f"cookies_{login_username}.txt",
-                    "db_path": str(DB_PATH_DEFAULT),
-                }
-            )
-        try:
-            _write_login_file(logins)
-            _clear_login_cache()
-        except Exception as exc:  # noqa: BLE001
-            return jsonify({"error": f"failed to delete login: {exc}"}), 500
-    else:
-        new_logins = [entry for entry in logins if (entry.get("login_username") or "") != login_username]
-        if len(new_logins) == len(logins):
-            return jsonify({"error": "login_username not found in file"}), 404
-        try:
-            _write_login_file(new_logins)
-            _clear_login_cache()
-        except Exception as exc:  # noqa: BLE001
-            return jsonify({"error": f"failed to delete login: {exc}"}), 500
-    removed_session = False
-    if delete_session:
-        session_file = _session_path_for_login(login_username)
-        if os.path.exists(session_file):
-            try:
-                os.remove(session_file)
-                removed_session = True
-            except Exception:
-                pass
-    return jsonify({"deleted": login_username, "session_removed": removed_session})
+    try:
+        delete_login(login_username)
+        removed_session = False
+        if delete_session:
+            removed_session = _remove_private_settings(login_username)
+            clear_session_settings(login_username)
+        _clear_login_cache()
+        return jsonify({"deleted": login_username, "session_removed": removed_session})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to delete login: {exc}"}), 500
+
+
+@app.route("/api/logins/challenge", methods=["POST"])
+def api_logins_challenge():
+    data = request.get_json(silent=True) or {}
+    login_username = (data.get("login_username") or "").strip()
+    code = (data.get("code") or data.get("challenge_code") or "").strip()
+    if not login_username or not code:
+        return jsonify({"error": "login_username and code are required"}), 400
+    if login_username not in _get_login_lookup():
+        return jsonify({"error": "unknown login_username"}), 404
+    try:
+        set_challenge_code(login_username, code)
+        return jsonify({"ok": True, "login_username": login_username})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to store challenge code: {exc}"}), 500
+
+
+@app.route("/api/logins/new-password", methods=["POST"])
+def api_logins_new_password():
+    data = request.get_json(silent=True) or {}
+    login_username = (data.get("login_username") or "").strip()
+    new_password = (data.get("new_password") or "").strip()
+    if not login_username or not new_password:
+        return jsonify({"error": "login_username and new_password are required"}), 400
+    if login_username not in _get_login_lookup():
+        return jsonify({"error": "unknown login_username"}), 404
+    try:
+        set_new_password(login_username, new_password)
+        return jsonify({"ok": True, "login_username": login_username})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to store new password: {exc}"}), 500
+
+
+@app.route("/api/logins/totp/seed", methods=["POST"])
+def api_logins_totp_seed():
+    data = request.get_json(silent=True) or {}
+    login_username = (data.get("login_username") or "").strip()
+    two_factor_code = (data.get("two_factor_code") or "").strip() or None
+    challenge_code = (data.get("challenge_code") or "").strip() or None
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    if login_username not in _get_login_lookup():
+        return jsonify({"error": "unknown login_username"}), 404
+    creds = _get_credentials(login_username)
+    device_settings_json = str(_get_config_value("private_device_settings_json", "") or "").strip() or None
+    user_agent = str(_get_config_value("private_user_agent", "") or "").strip() or None
+    try:
+        from private_api_tracker import generate_totp_seed
+
+        seed = generate_totp_seed(
+            login_username=login_username,
+            login_password=creds.get("login_password"),
+            two_factor_code=two_factor_code,
+            challenge_code=challenge_code,
+            device_settings_json=device_settings_json,
+            user_agent=user_agent,
+        )
+        return jsonify({"ok": True, "login_username": login_username, "totp_seed": seed})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to generate totp seed: {exc}"}), 500
+
+
+@app.route("/api/logins/totp/enable", methods=["POST"])
+def api_logins_totp_enable():
+    data = request.get_json(silent=True) or {}
+    login_username = (data.get("login_username") or "").strip()
+    seed = (data.get("totp_seed") or "").strip()
+    verification_code = (data.get("verification_code") or "").strip() or None
+    two_factor_code = (data.get("two_factor_code") or "").strip() or None
+    challenge_code = (data.get("challenge_code") or "").strip() or None
+    if not login_username or not seed:
+        return jsonify({"error": "login_username and totp_seed are required"}), 400
+    if login_username not in _get_login_lookup():
+        return jsonify({"error": "unknown login_username"}), 404
+    creds = _get_credentials(login_username)
+    device_settings_json = str(_get_config_value("private_device_settings_json", "") or "").strip() or None
+    user_agent = str(_get_config_value("private_user_agent", "") or "").strip() or None
+    try:
+        from private_api_tracker import enable_totp
+
+        backup_codes = enable_totp(
+            login_username=login_username,
+            login_password=creds.get("login_password"),
+            totp_seed=seed,
+            verification_code=verification_code,
+            two_factor_code=two_factor_code,
+            challenge_code=challenge_code,
+            device_settings_json=device_settings_json,
+            user_agent=user_agent,
+        )
+        return jsonify({"ok": True, "login_username": login_username, "backup_codes": backup_codes})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to enable totp: {exc}"}), 500
+
+
+@app.route("/api/logins/totp/disable", methods=["POST"])
+def api_logins_totp_disable():
+    data = request.get_json(silent=True) or {}
+    login_username = (data.get("login_username") or "").strip()
+    two_factor_code = (data.get("two_factor_code") or "").strip() or None
+    challenge_code = (data.get("challenge_code") or "").strip() or None
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    if login_username not in _get_login_lookup():
+        return jsonify({"error": "unknown login_username"}), 404
+    creds = _get_credentials(login_username)
+    device_settings_json = str(_get_config_value("private_device_settings_json", "") or "").strip() or None
+    user_agent = str(_get_config_value("private_user_agent", "") or "").strip() or None
+    try:
+        from private_api_tracker import disable_totp
+
+        ok = disable_totp(
+            login_username=login_username,
+            login_password=creds.get("login_password"),
+            two_factor_code=two_factor_code,
+            challenge_code=challenge_code,
+            device_settings_json=device_settings_json,
+            user_agent=user_agent,
+        )
+        return jsonify({"ok": bool(ok), "login_username": login_username})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to disable totp: {exc}"}), 500
+
+
+@app.route("/api/logins/totp/code", methods=["POST"])
+def api_logins_totp_code():
+    data = request.get_json(silent=True) or {}
+    login_username = (data.get("login_username") or "").strip()
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    entry = get_login(login_username, include_secrets=True) or {}
+    seed = entry.get("totp_seed")
+    if not seed:
+        return jsonify({"error": "totp seed not configured"}), 404
+    try:
+        from private_api_tracker import generate_totp_code
+
+        code = generate_totp_code(seed)
+        return jsonify({"ok": True, "login_username": login_username, "code": code})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to generate totp code: {exc}"}), 500
+
 
 
 @app.route("/api/targets", methods=["GET"])
@@ -2729,8 +3109,9 @@ def _is_target_busy(target_username: str) -> bool:
     return False
 
 
-def _queue_run(login_username, target_username, *, source="api", two_factor_code=None, rebuild=True):
+def _queue_run(login_username, target_username, *, source="api", two_factor_code=None, challenge_code=None, rebuild=True):
     job_id = str(uuid4())
+    LAST_JOB_BY_LOGIN[login_username] = job_id
 
     def _runner():
         started = datetime.now(LOCAL_TZ).isoformat()
@@ -2750,10 +3131,10 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
             res = guarded_run(
                 login_username,
                 target_username,
-                rebuild_dashboard=rebuild,
                 source=source,
                 job_id=job_id,
                 two_factor_code=two_factor_code,
+                challenge_code=challenge_code,
             )
             finished = datetime.now(LOCAL_TZ).isoformat()
             try:
@@ -2777,7 +3158,11 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
         except Exception as exc:  # noqa: BLE001
             finished = datetime.now(LOCAL_TZ).isoformat()
             RUN_META[job_id]["state"] = "error"
-            return {"status": "error", "started_at": started, "finished_at": finished, "error": str(exc)}
+            payload = {"status": "error", "started_at": started, "finished_at": finished, "error": str(exc)}
+            code = getattr(exc, "code", None)
+            if code:
+                payload["error_code"] = code
+            return payload
 
     RUN_META[job_id] = {
         "login_username": login_username,
@@ -2796,8 +3181,9 @@ def api_run():
     login_username = data.get("login_username")
     target_username = data.get("target_username")
     two_factor_code = data.get("two_factor_code") or data.get("twoFactorCode")
-    # Always rebuild dashboard after a run so new targets appear
-    rebuild = True
+    challenge_code = data.get("challenge_code") or data.get("challengeCode")
+    rebuild = data.get("rebuild", True)
+    rebuild = bool(rebuild)
     if not login_username or not target_username:
         return jsonify({"error": "login_username and target_username are required"}), 400
     if _is_blocked_login(login_username):
@@ -2818,6 +3204,7 @@ def api_run():
         target_username,
         source="api",
         two_factor_code=two_factor_code,
+        challenge_code=challenge_code,
         rebuild=rebuild,
     )
     return jsonify({"job_id": job_id})
@@ -2846,6 +3233,7 @@ def api_job_detail(job_id):
     result_path = job_dir / "result.json"
     out_path = job_dir / "worker.out"
     err_path = job_dir / "worker.err"
+    trace_path = job_dir / "trace.jsonl"
     return jsonify(
         {
             "job_id": job_id,
@@ -2853,6 +3241,51 @@ def api_job_detail(job_id):
             "result": _read_json_file(result_path),
             "worker_out_tail": _tail_file(out_path, lines=30),
             "worker_err_tail": _tail_file(err_path, lines=30),
+            "trace_tail": _tail_file(trace_path, lines=40),
+        }
+    )
+
+
+@app.route("/api/jobs/latest", methods=["GET"])
+def api_job_latest():
+    login_username = (request.args.get("login_username") or "").strip()
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    job_id = LAST_JOB_BY_LOGIN.get(login_username)
+    if not job_id:
+        candidates = []
+        for jid, meta in RUN_META.items():
+            if meta.get("login_username") != login_username:
+                continue
+            submitted_at = meta.get("submitted_at")
+            if not submitted_at:
+                continue
+            try:
+                ts = datetime.fromisoformat(submitted_at)
+            except Exception:
+                ts = None
+            candidates.append((ts, jid))
+        if candidates:
+            candidates.sort(key=lambda x: x[0] or datetime.min, reverse=True)
+            job_id = candidates[0][1]
+    if not job_id:
+        return jsonify({"error": "no job found for login"}), 404
+    job_dir = JOB_TMP_DIR / f"job_{job_id}"
+    if not job_dir.exists():
+        return jsonify({"error": "job not found"}), 404
+    progress_path = job_dir / "progress.json"
+    result_path = job_dir / "result.json"
+    out_path = job_dir / "worker.out"
+    err_path = job_dir / "worker.err"
+    trace_path = job_dir / "trace.jsonl"
+    return jsonify(
+        {
+            "job_id": job_id,
+            "progress": _read_json_file(progress_path),
+            "result": _read_json_file(result_path),
+            "worker_out_tail": _tail_file(out_path, lines=60),
+            "worker_err_tail": _tail_file(err_path, lines=60),
+            "trace_tail": _tail_file(trace_path, lines=80),
         }
     )
 
@@ -3010,7 +3443,8 @@ def api_monitor_status():
 
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
-    return jsonify({"config": _get_config(force=True), "defaults": CONFIG_DEFAULTS})
+    cfg = _get_config(force=True)
+    return jsonify({"config": _mask_config_for_api(cfg), "defaults": _mask_config_for_api(CONFIG_DEFAULTS)})
 
 
 @app.route("/api/config", methods=["PUT"])
@@ -3019,14 +3453,27 @@ def api_config_update():
     if not isinstance(data, dict) or not data:
         return jsonify({"error": "config payload required"}), 400
     try:
-        updated = _set_config_values(data)
+        cleaned = {}
+        for key, value in data.items():
+            if key in SENSITIVE_CONFIG_KEYS and (value is None or str(value).strip() == ""):
+                continue
+            cleaned[key] = value
+        if _parse_bool(cleaned.get("proxy_enabled", _get_config_value("proxy_enabled", False))):
+            host = cleaned.get("proxy_host") or _get_config_value("proxy_host", "")
+            port = cleaned.get("proxy_port") or _get_config_value("proxy_port", 0)
+            user = cleaned.get("proxy_username") or _get_config_value("proxy_username", "")
+            pwd = cleaned.get("proxy_password") or _get_config_value("proxy_password", "")
+            if not host or not port or not user or not pwd:
+                raise ValueError("Proxy enabled requires host, port, username, and password")
+        updated = _set_config_values(cleaned)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     try:
         _schedule_monitor_job()
     except Exception:
         pass
-    return jsonify({"updated": list(updated.keys()), "config": _get_config(force=True)})
+    cfg = _get_config(force=True)
+    return jsonify({"updated": list(updated.keys()), "config": _mask_config_for_api(cfg)})
 
 
 @app.route("/api/unfollow/status", methods=["GET"])
@@ -3177,8 +3624,58 @@ def api_unfollow_init():
     if UNFOLLOW_LOCK.locked():
         return jsonify({"error": "unfollow job running"}), 409
     # Launch interactive login in background (requires display on server)
-    executor.submit(init_login, UNFOLLOW_STORAGE)
+    proxy = _get_proxy_config(session_id=_generate_proxy_session_id())
+    executor.submit(
+        init_login,
+        UNFOLLOW_STORAGE,
+        proxy.get("server") if proxy.get("enabled") else None,
+        proxy.get("username"),
+        proxy.get("password"),
+    )
     return jsonify({"started": True, "note": "interactive login opened"})
+
+
+@app.route("/api/proxy/test", methods=["POST", "GET"])
+def api_proxy_test():
+    proxy = _get_proxy_config(session_id=_generate_proxy_session_id())
+    if not proxy.get("enabled"):
+        return jsonify({"ok": False, "error": "proxy disabled"}), 400
+    test_url = _proxy_test_url(proxy.get("provider", "decodo"))
+    start = time.monotonic()
+    if not proxy.get("host") or not proxy.get("port") or not proxy.get("username") or not proxy.get("password"):
+        return jsonify({"ok": False, "error": "proxy credentials incomplete"}), 400
+
+    proxy_url = _build_proxy_url(
+        proxy["host"],
+        int(proxy["port"]),
+        proxy.get("username"),
+        proxy.get("password"),
+    )
+    handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    ctx = ssl._create_unverified_context()
+    opener = urllib.request.build_opener(handler, urllib.request.HTTPSHandler(context=ctx))
+    req = urllib.request.Request(
+        test_url,
+        headers={
+            "User-Agent": "InstaLabProxyCheck/1.0",
+            "Accept": "application/json,text/plain",
+        },
+    )
+    try:
+        with opener.open(req, timeout=20) as resp:
+            body = resp.read(2048).decode("utf-8", errors="ignore").strip()
+            latency_ms = int((time.monotonic() - start) * 1000)
+            return jsonify(
+                {
+                    "ok": resp.status == 200,
+                    "status": resp.status,
+                    "latency_ms": latency_ms,
+                    "body": body[:400],
+                }
+            )
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return jsonify({"ok": False, "error": str(exc), "latency_ms": latency_ms}), 502
 
 
 @app.route("/api/run/cancel", methods=["POST"])
@@ -3187,6 +3684,7 @@ def api_run_cancel():
     login_username = data.get("login_username")
     target_username = data.get("target_username")
     job_id = data.get("job_id")
+    worker_pid = None
     if (not login_username or not target_username) and job_id:
         meta = RUN_META.get(job_id) or {}
         login_username = login_username or meta.get("login_username")
@@ -3196,6 +3694,7 @@ def api_run_cancel():
                 if job.get("job_id") == job_id:
                     login_username = login_username or job.get("login_username") or login
                     target_username = target_username or job.get("target_username")
+                    worker_pid = job.get("worker_pid")
                     break
     if not login_username or not target_username:
         return jsonify({"error": "login_username and target_username are required"}), 400
@@ -3205,6 +3704,12 @@ def api_run_cancel():
     job = ACTIVE_JOBS.get(login_username)
     if job and job.get("target_username") == target_username:
         job["cancelled"] = True
+        worker_pid = job.get("worker_pid") or worker_pid
+    if worker_pid:
+        try:
+            os.kill(int(worker_pid), signal.SIGTERM)
+        except Exception:
+            pass
     return jsonify({"cancelled": True})
 
 
@@ -3213,12 +3718,6 @@ def api_run_delete(run_id):
     target = _delete_run(run_id)
     if not target:
         return jsonify({"error": "run not found"}), 404
-    # Rebuild dashboard so UI reflects deletion
-    dashboard_builder.build_dashboard(
-        base_dir=str(BASE_DIR),
-        output_path=str(BASE_DIR / "dashboard" / "index.html"),
-        db_path=str(DB_PATH_DEFAULT),
-    )
     return jsonify({"deleted": run_id, "target": target, "undo": True})
 
 
@@ -3227,11 +3726,6 @@ def api_run_undo(run_id):
     ok, msg = _restore_run(run_id)
     if not ok:
         return jsonify({"error": msg}), 400
-    dashboard_builder.build_dashboard(
-        base_dir=str(BASE_DIR),
-        output_path=str(BASE_DIR / "dashboard" / "index.html"),
-        db_path=str(DB_PATH_DEFAULT),
-    )
     return jsonify({"restored": run_id})
 
 
@@ -3342,26 +3836,29 @@ def api_schedule_update(schedule_id):
     return jsonify({"updated": schedule_id})
 
 
-@app.route("/api/rebuild", methods=["POST"])
-def api_rebuild():
-    dashboard_builder.build_dashboard(
-        base_dir=str(BASE_DIR),
-        output_path=str(BASE_DIR / "dashboard" / "index.html"),
-        db_path=str(DB_PATH_DEFAULT),
-    )
-    return jsonify({"status": "rebuilt"})
+def _get_ui_redirect_url():
+    """
+    Get the UI redirect URL. 
+    Uses INSTALAB_UI_BASE_URL if set, otherwise constructs from request host.
+    """
+    if UI_BASE_URL:
+        return UI_BASE_URL
+    # Fallback: construct URL from request host (works for local development)
+    host = request.host.split(":")[0]
+    ui_port = os.getenv("INSTALAB_UI_PORT", "8000")
+    return f"http://{host}:{ui_port}/"
 
 
 @app.route("/control")
 def control_page():
-    host = request.host.split(":")[0]
-    return redirect(f"http://{host}:8000/", code=302)
+    """Redirect /control to Django UI."""
+    return redirect(_get_ui_redirect_url(), code=302)
 
 
 @app.route("/")
 def root():
-    host = request.host.split(":")[0]
-    return redirect(f"http://{host}:8000/", code=302)
+    """Redirect root to Django UI."""
+    return redirect(_get_ui_redirect_url(), code=302)
 
 
 if __name__ == "__main__":

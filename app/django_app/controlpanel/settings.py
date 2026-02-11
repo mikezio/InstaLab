@@ -87,25 +87,16 @@ WSGI_APPLICATION = 'controlpanel.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-_db_type = os.getenv("INSTALAB_DB_TYPE", "sqlite").strip().lower()
-if _db_type in {"postgres", "postgresql"}:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.getenv("INSTALAB_DB_NAME", "instalab"),
-            "USER": os.getenv("INSTALAB_DB_USER", "instalab"),
-            "PASSWORD": os.getenv("INSTALAB_DB_PASS", ""),
-            "HOST": os.getenv("INSTALAB_DB_HOST", "127.0.0.1"),
-            "PORT": os.getenv("INSTALAB_DB_PORT", "5432"),
-        }
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.getenv("INSTALAB_DB_NAME", "instalab"),
+        "USER": os.getenv("INSTALAB_DB_USER", "instalab"),
+        "PASSWORD": os.getenv("INSTALAB_DB_PASS", ""),
+        "HOST": os.getenv("INSTALAB_DB_HOST", "127.0.0.1"),
+        "PORT": os.getenv("INSTALAB_DB_PORT", "5432"),
     }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
+}
 
 
 # Password validation
@@ -143,6 +134,10 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = '/static/'
+
+# Allow larger uploads for Secret Drop packages.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 500 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 

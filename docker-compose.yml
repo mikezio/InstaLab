@@ -11,19 +11,27 @@ services:
       INSTALAB_ENV: /srv/secrets/instalab.env
       INSTALAB_DB_HOST: apps-postgres
       HOME: /data/instalab/home
+      # UI redirect configuration - set INSTALAB_UI_BASE_URL for external access
+      # Example: INSTALAB_UI_BASE_URL: http://192.168.4.30:8002
       DD_SERVICE: instalab-api
       DD_ENV: homelab
       DD_VERSION: "1"
       DD_TRACE_ENABLED: "true"
+      DD_DYNAMIC_INSTRUMENTATION_ENABLED: "true"
+      DD_TRACE_EXCLUDED_URLS: "/api/health,/api/health/detail"
+      DD_EXCEPTION_REPLAY_ENABLED: "true"
       DD_LOGS_INJECTION: "true"
       DD_RUNTIME_METRICS_ENABLED: "true"
       DD_AGENT_HOST: 192.168.4.30
+      DD_DOGSTATSD_HOST: 192.168.4.30
+      DD_DOGSTATSD_PORT: "8125"
       DD_TRACE_AGENT_PORT: "8126"
     volumes:
       - /srv/apps/instalab/app:/app
       - /srv/secrets/instalab.env:/srv/secrets/instalab.env:ro
       - /srv/secrets/instalab-logins.json:/srv/secrets/instalab-logins.json
       - /srv/secrets/instalab-cookies:/data/instalab/cookies
+      - /srv/secrets/instalab-private:/data/instalab/private
       - /srv/data/instalab:/data/instalab
     ports:
       - "192.168.4.30:5000:5000"
@@ -59,9 +67,14 @@ services:
       DD_ENV: homelab
       DD_VERSION: "1"
       DD_TRACE_ENABLED: "true"
+      DD_DYNAMIC_INSTRUMENTATION_ENABLED: "true"
+      DD_TRACE_EXCLUDED_URLS: "/healthz/"
+      DD_EXCEPTION_REPLAY_ENABLED: "true"
       DD_LOGS_INJECTION: "true"
       DD_RUNTIME_METRICS_ENABLED: "true"
       DD_AGENT_HOST: 192.168.4.30
+      DD_DOGSTATSD_HOST: 192.168.4.30
+      DD_DOGSTATSD_PORT: "8125"
       DD_TRACE_AGENT_PORT: "8126"
     volumes:
       - /srv/apps/instalab/app:/app
@@ -77,7 +90,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=5).read()",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/', timeout=5).read()",
         ]
       interval: 30s
       timeout: 5s
@@ -85,24 +98,6 @@ services:
       start_period: 20s
     networks:
       - apps-db
-
-  instalab-vnc:
-    build:
-      context: /srv/apps/instalab
-    container_name: instalab-vnc
-    user: "1001:1003"
-    command: /app/scripts/start_vnc.sh
-    environment:
-      DISPLAY_NUM: "1"
-      VNC_PORT: "5900"
-      NOVNC_PORT: "7900"
-    volumes:
-      - /srv/apps/instalab/app:/app
-      - /srv/secrets/instalab-cookies:/data/instalab/cookies
-      - /srv/data/instalab:/data/instalab
-    ports:
-      - "127.0.0.1:7900:7900"
-    restart: unless-stopped
 
 networks:
   apps-db:
