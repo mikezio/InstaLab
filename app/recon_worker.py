@@ -141,7 +141,9 @@ def _run_blackbird(mode: str, query_value: str, options: dict, job_dir: Path, cf
     if not cmd:
         raise ReconExecutionError("recon_blackbird_cmd is empty")
 
-    cmd.extend(["--json", "--no-update"])  # keep scans deterministic and avoid runtime updates
+    # Do not force --no-update here; some Blackbird builds do not ship wmn-data.json
+    # and require an initial list download before username scans can run.
+    cmd.append("--json")
     if mode == "username":
         cmd.extend(["--username", query_value])
     elif mode == "email":
@@ -160,6 +162,10 @@ def _run_blackbird(mode: str, query_value: str, options: dict, job_dir: Path, cf
     before_mtime = time.time() - 1
     before_files = set(glob.glob(str(result_dir / "**" / "*.json"), recursive=True)) if result_dir.exists() else set()
 
+    blackbird_results_dir = str(cfg.get("recon_blackbird_results_dir") or "/tmp/instalab-blackbird/results").strip()
+    blackbird_cwd = str(Path(blackbird_results_dir).resolve().parent)
+    Path(blackbird_cwd).mkdir(parents=True, exist_ok=True)
+
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -167,7 +173,7 @@ def _run_blackbird(mode: str, query_value: str, options: dict, job_dir: Path, cf
         text=True,
         timeout=timeout_seconds,
         check=False,
-        cwd="/app",
+        cwd=blackbird_cwd,
     )
 
     stdout_path = raw_dir / "blackbird.stdout.log"

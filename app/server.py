@@ -293,8 +293,8 @@ CONFIG_DEFAULTS = {
     "recon_timeout_seconds": int(os.getenv("RECON_TIMEOUT_SECONDS", "240")),
     "recon_blackbird_ai_enabled": os.getenv("RECON_BLACKBIRD_AI_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
     "recon_blackbird_no_nsfw": os.getenv("RECON_BLACKBIRD_NO_NSFW", "true").lower() in {"1", "true", "yes", "on"},
-    "recon_blackbird_cmd": os.getenv("RECON_BLACKBIRD_CMD", "python /opt/blackbird/blackbird.py"),
-    "recon_blackbird_results_dir": os.getenv("RECON_BLACKBIRD_RESULTS_DIR", "/opt/blackbird/results"),
+    "recon_blackbird_cmd": os.getenv("RECON_BLACKBIRD_CMD", "python /app/scripts/blackbird_proxy.py"),
+    "recon_blackbird_results_dir": os.getenv("RECON_BLACKBIRD_RESULTS_DIR", "/tmp/instalab-blackbird/results"),
     "recon_phoneinfoga_enabled": os.getenv("RECON_PHONEINFOGA_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
     "recon_phoneinfoga_cmd": os.getenv("RECON_PHONEINFOGA_CMD", "/usr/local/bin/phoneinfoga"),
 }
