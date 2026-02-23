@@ -62,6 +62,7 @@ services:
     environment:
       INSTALAB_ENV: /srv/secrets/instalab.env
       INSTALAB_API_BASE: http://instalab-api:5000/
+      INSTALAB_UI_VARIANT: modern
       INSTALAB_DB_HOST: apps-postgres
       DD_SERVICE: instalab-ui
       DD_ENV: homelab

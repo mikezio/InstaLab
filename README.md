@@ -49,11 +49,21 @@ If you already have Postgres running, set the `INSTALAB_DB_*` values in `.env` a
 - 2FA is supported via TOTP or SMS/email challenge codes.
 - Device profile settings are persisted to avoid “new device” loops.
 
-## UI build (Tailwind)
-- Source: `app/ui_src/ui.css`
-- Output: `app/django_app/static/ui.css`
-- Build once: `cd app && npm run build`
-- Watch: `cd app && npm run dev`
+## UI build
+- Legacy template styles:
+  - Source: `app/ui_src/ui.css`
+  - Output: `app/django_app/static/ui.css`
+- Modern React UI:
+  - Source: `app/frontend/`
+  - Output: `app/django_app/static/modern/`
+- Build both UI assets: `cd app && npm run build`
+- Watch legacy CSS: `cd app && npm run dev`
+- Run modern UI dev server: `cd app && npm run frontend:dev`
+
+## UI routing
+- `/` serves legacy or modern UI based on `INSTALAB_UI_VARIANT` (`legacy` or `modern`)
+- `/legacy/` always serves legacy UI
+- `/app/` serves the modern React UI
 
 ## Operational notes
 - This repo contains code + compose; environment‑specific ops runbooks live outside the repo.

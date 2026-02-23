@@ -3,8 +3,10 @@
   "private": true,
   "version": "1.0.0",
   "scripts": {
-    "build": "tailwindcss -c tailwind.config.js -i ./ui_src/ui.css -o ./django_app/static/ui.css --minify",
-    "dev": "tailwindcss -c tailwind.config.js -i ./ui_src/ui.css -o ./django_app/static/ui.css --watch"
+    "build": "tailwindcss -c tailwind.config.js -i ./ui_src/ui.css -o ./django_app/static/ui.css --minify && npm run -C frontend build",
+    "dev": "tailwindcss -c tailwind.config.js -i ./ui_src/ui.css -o ./django_app/static/ui.css --watch",
+    "frontend:dev": "npm run -C frontend dev",
+    "frontend:build": "npm run -C frontend build"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.24",

@@ -7,7 +7,9 @@ from datetime import datetime
 from urllib.parse import urljoin
 
 import requests
+from django.conf import settings
 from django.http import HttpResponse, JsonResponse
+from django.shortcuts import redirect
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -28,7 +30,18 @@ SECRET_DROP_DIR = Path(os.getenv("INSTALAB_SECRET_DROP_DIR", "/srv/secrets/secre
 
 
 def index(request):
+    variant = str(getattr(settings, "INSTALAB_UI_VARIANT", "legacy")).lower()
+    if variant == "modern":
+        return redirect("modern_app")
     return render(request, "dashboard/index.html")
+
+
+def legacy_index(request):
+    return render(request, "dashboard/index.html")
+
+
+def modern_app(request):
+    return render(request, "dashboard/modern_index.html")
 
 
 def healthz(request):

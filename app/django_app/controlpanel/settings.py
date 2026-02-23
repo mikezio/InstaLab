@@ -154,3 +154,8 @@ if not DEBUG:
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# UI rollout toggle:
+# - legacy: serve template-based dashboard at "/"
+# - modern: redirect "/" to React app at "/app/"
+INSTALAB_UI_VARIANT = os.getenv("INSTALAB_UI_VARIANT", "legacy").strip().lower()
