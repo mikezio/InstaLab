@@ -84,3 +84,23 @@ def test_blackbird_findings_normalization_maps_confidence():
     findings = recon_worker._normalize_blackbird_findings(payload)
     assert findings[0]["confidence_tier"] == "high"
     assert findings[1]["confidence_tier"] == "low"
+
+
+def test_blackbird_ai_requires_key(tmp_path):
+    cfg = {
+        "recon_blackbird_cmd": "python /app/scripts/blackbird_proxy.py",
+        "recon_blackbird_results_dir": str(tmp_path / "runtime" / "results"),
+        "recon_timeout_seconds": 30,
+    }
+    with pytest.raises(recon_worker.ReconExecutionError, match="AI key not configured"):
+        recon_worker._run_blackbird(
+            mode="username",
+            query_value="someuser",
+            options={"ai": True},
+            job_dir=tmp_path / "job",
+            cfg=cfg,
+        )
+
+
+def test_phoneinfoga_api_number_strips_non_digits():
+    assert recon_worker._phoneinfoga_api_number("+1 (415) 555-2671") == "14155552671"

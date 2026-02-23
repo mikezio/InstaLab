@@ -257,7 +257,13 @@ def list_recon_jobs(conn, *, mode: str | None, q: str | None, status: str | None
         SELECT rj.id, rj.status, rj.started_at, rj.finished_at, rj.duration_seconds,
                rj.error_message, rj.created_at,
                rq.mode, rq.query_value, rq.requested_by, rq.source_tool,
-               (SELECT COUNT(*) FROM recon_findings rf WHERE rf.recon_job_id = rj.id) AS findings_count
+               (SELECT COUNT(*) FROM recon_findings rf WHERE rf.recon_job_id = rj.id) AS findings_count,
+               (
+                 SELECT COUNT(*)
+                 FROM recon_artifacts ra
+                 WHERE ra.recon_job_id = rj.id
+                   AND LOWER(ra.artifact_type) IN ('pdf', 'pdf_blackbird', 'pdf_instalab')
+               ) AS report_count
         FROM recon_jobs rj
         JOIN recon_queries rq ON rq.id = rj.recon_query_id
         {where_sql}

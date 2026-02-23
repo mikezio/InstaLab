@@ -346,14 +346,22 @@ Queue a recon scan.
   "query_value": "example_user",
   "requested_by": "collector",
   "options": {
-    "no_nsfw": true
+    "no_nsfw": true,
+    "ai": false,
+    "generate_pdf": true,
+    "timeout_seconds": 240
   }
 }
 ```
+`ai` and `generate_pdf` apply to Blackbird username/email modes.
 
 ### GET `/api/recon/run/<job_id>`
 
 Returns status, findings, and artifacts for one recon job.
+
+### DELETE `/api/recon/run/<job_id>`
+
+Deletes a completed recon job, including persisted findings/artifacts and local job files.
 
 ### POST `/api/recon/run/<job_id>/cancel`
 
@@ -363,6 +371,10 @@ Cancels a queued recon job (running jobs may not be cancellable).
 
 List recon jobs with filters.
 
+### GET `/api/recon/queue`
+
+Returns live recon queue/running state with queue position, elapsed seconds, and timeout remaining.
+
 ### GET `/api/recon/findings?job_id=<job_id>`
 
 Returns normalized findings and artifacts.
@@ -371,9 +383,17 @@ Returns normalized findings and artifacts.
 
 Exports recon findings.
 
+### GET `/api/recon/report/<job_id>`
+
+Downloads the Blackbird PDF report artifact for a recon job (if generated).
+
+### POST `/api/recon/ai/setup`
+
+Runs Blackbird AI key setup (`--setup-ai`) in non-interactive mode and returns key status.
+
 ### GET `/api/recon/health`
 
-Returns recon module health (queue and tool executable checks).
+Returns recon module health (queue/tool checks + AI key status).
 
 ---
 

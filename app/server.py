@@ -156,6 +156,46 @@ def _cleanup_old_job_dirs():
         pass
 
 
+def _cleanup_recon_artifacts():
+    try:
+        retention_days = int(_get_config_value("recon_artifact_retention_days", 30) or 30)
+    except Exception:
+        retention_days = 30
+    if retention_days <= 0:
+        return
+
+    cutoff = datetime.now(LOCAL_TZ) - timedelta(days=retention_days)
+    cutoff_iso = cutoff.astimezone(ZoneInfo("UTC")).isoformat()
+    active_recon_ids = {
+        jid
+        for jid, meta in list(RECON_META.items())
+        if meta.get("state") in {"queued", "running"}
+    }
+
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id
+            FROM recon_jobs
+            WHERE created_at < ?
+              AND status IN ('success', 'error', 'cancelled')
+            """,
+            (cutoff_iso,),
+        ).fetchall()
+        for row in rows:
+            job_id = str(row[0])
+            if job_id in active_recon_ids:
+                continue
+            job_dir = JOB_TMP_DIR / f"recon_{job_id}"
+            shutil.rmtree(job_dir, ignore_errors=True)
+            conn.execute("DELETE FROM recon_artifacts WHERE recon_job_id = ?", (job_id,))
+            conn.execute("UPDATE recon_jobs SET raw_output_path = NULL WHERE id = ?", (job_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _ensure_cookie_dir():
     global COOKIE_DIR
     try:
@@ -291,7 +331,9 @@ CONFIG_DEFAULTS = {
     "monitor_login_username": os.getenv("MONITOR_LOGIN_USERNAME", ""),
     "recon_enabled": os.getenv("RECON_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
     "recon_max_concurrency": int(os.getenv("RECON_MAX_CONCURRENCY", "2")),
+    "recon_queue_limit": int(os.getenv("RECON_QUEUE_LIMIT", "20")),
     "recon_timeout_seconds": int(os.getenv("RECON_TIMEOUT_SECONDS", "240")),
+    "recon_artifact_retention_days": int(os.getenv("RECON_ARTIFACT_RETENTION_DAYS", "30")),
     "recon_blackbird_ai_enabled": os.getenv("RECON_BLACKBIRD_AI_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
     "recon_blackbird_no_nsfw": os.getenv("RECON_BLACKBIRD_NO_NSFW", "true").lower() in {"1", "true", "yes", "on"},
     "recon_blackbird_cmd": os.getenv("RECON_BLACKBIRD_CMD", "python /app/scripts/blackbird_proxy.py"),
@@ -342,7 +384,9 @@ CONFIG_SCHEMA = {
     "monitor_login_username": {"type": "str"},
     "recon_enabled": {"type": "bool"},
     "recon_max_concurrency": {"type": "int", "min": 1, "max": 8},
+    "recon_queue_limit": {"type": "int", "min": 1, "max": 500},
     "recon_timeout_seconds": {"type": "int", "min": 15, "max": 1800},
+    "recon_artifact_retention_days": {"type": "int", "min": 0, "max": 3650},
     "recon_blackbird_ai_enabled": {"type": "bool"},
     "recon_blackbird_no_nsfw": {"type": "bool"},
     "recon_blackbird_cmd": {"type": "str"},
@@ -921,12 +965,16 @@ def _health_check_recon():
     phoneinfoga_cmd = str(cfg.get("recon_phoneinfoga_cmd") or "").strip()
     blackbird_exec = shlex.split(blackbird_cmd)[0] if blackbird_cmd else ""
     phoneinfoga_exec = shlex.split(phoneinfoga_cmd)[0] if phoneinfoga_cmd else ""
-    running = _recon_running_count()
+    counts = _recon_state_counts()
     max_concurrency = int(cfg.get("recon_max_concurrency", 2) or 2)
+    queue_limit = int(cfg.get("recon_queue_limit", 20) or 20)
     details = {
         "enabled": enabled,
-        "running_jobs": running,
+        "running_jobs": counts["running"],
+        "queued_jobs": counts["queued"],
+        "pending_jobs": counts["pending"],
         "max_concurrency": max_concurrency,
+        "queue_limit": queue_limit,
         "blackbird_executable": bool(shutil.which(blackbird_exec)) if blackbird_exec else False,
         "phoneinfoga_executable": bool(shutil.which(phoneinfoga_exec)) if phoneinfoga_exec else False,
     }
@@ -934,6 +982,12 @@ def _health_check_recon():
     if not enabled or not details["blackbird_executable"]:
         status = "degraded"
     return {"status": status, "details": details}
+
+
+def _blackbird_ai_key_path(cfg: dict) -> Path:
+    results_dir = str(cfg.get("recon_blackbird_results_dir") or "/tmp/instalab-blackbird/results").strip()
+    runtime_dir = Path(results_dir).resolve().parent
+    return runtime_dir / ".ai_key.json"
 
 
 def _init_config_table():
@@ -2011,6 +2065,21 @@ def _schedule_monitor_job():
     )
 
 
+def _schedule_recon_maintenance_job():
+    try:
+        scheduler.remove_job("recon_maintenance")
+    except Exception:
+        pass
+    scheduler.add_job(
+        _cleanup_recon_artifacts,
+        trigger=CronTrigger(hour=3, minute=20),
+        id="recon_maintenance",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+    )
+
+
 def _delete_run(run_id):
     conn = _get_db()
     try:
@@ -2444,6 +2513,8 @@ ACTIVE_JOBS = {}
 LAST_JOB_BY_LOGIN = {}
 RECON_FUTURES = {}
 RECON_META = {}
+RECON_PROCESSES = {}
+RECON_CANCEL_EVENTS = {}
 RECON_LOCK = threading.Lock()
 DELETED_RUNS = {}
 CANCEL_REQUESTS = set()
@@ -2549,13 +2620,71 @@ def _release_run_slot(login_username: str):
         lock.release()
 
 
-def _recon_running_count() -> int:
-    count = 0
+def _recon_state_counts() -> dict:
+    running = 0
+    queued = 0
     for jid, meta in list(RECON_META.items()):
         fut = RECON_FUTURES.get(jid)
-        if fut and not fut.done() and meta.get("state") in {"queued", "running"}:
-            count += 1
-    return count
+        if fut and not fut.done():
+            if meta.get("state") == "running":
+                running += 1
+            elif meta.get("state") == "queued":
+                queued += 1
+    return {"running": running, "queued": queued, "pending": running + queued}
+
+
+def _recon_running_count() -> int:
+    return int(_recon_state_counts()["running"])
+
+
+def _recon_queue_snapshot() -> list[dict]:
+    rows = []
+    now = time.time()
+    for jid, meta in list(RECON_META.items()):
+        fut = RECON_FUTURES.get(jid)
+        if not fut or fut.done():
+            continue
+        state = str(meta.get("state") or "queued")
+        if state not in {"queued", "running"}:
+            continue
+        created_raw = str(meta.get("created_at") or "")
+        started_raw = str(meta.get("started_at") or "")
+        elapsed = None
+        if started_raw:
+            try:
+                started_dt = datetime.fromisoformat(started_raw)
+                elapsed = max(0, int((datetime.now(LOCAL_TZ) - started_dt).total_seconds()))
+            except Exception:
+                elapsed = None
+        rows.append(
+            {
+                "job_id": jid,
+                "state": state,
+                "mode": meta.get("mode"),
+                "query_value": meta.get("query_value"),
+                "created_at": created_raw,
+                "started_at": started_raw or None,
+                "timeout_seconds": int(meta.get("timeout_seconds") or 0),
+                "elapsed_seconds": elapsed,
+                "_sort_key": created_raw or str(now),
+            }
+        )
+    rows.sort(key=lambda item: item.get("_sort_key") or "")
+    queue_index = 0
+    for item in rows:
+        if item["state"] == "queued":
+            queue_index += 1
+            item["queue_position"] = queue_index
+        else:
+            item["queue_position"] = 0
+        timeout_seconds = int(item.get("timeout_seconds") or 0)
+        elapsed = item.get("elapsed_seconds")
+        if item["state"] == "running" and timeout_seconds > 0 and elapsed is not None:
+            item["timeout_remaining_seconds"] = max(0, timeout_seconds - int(elapsed))
+        else:
+            item["timeout_remaining_seconds"] = None
+        item.pop("_sort_key", None)
+    return rows
 
 
 def _queue_recon_scan(mode: str, query_value: str, *, requested_by: str | None = None, options: dict | None = None):
@@ -2563,13 +2692,15 @@ def _queue_recon_scan(mode: str, query_value: str, *, requested_by: str | None =
     if not _parse_bool(cfg.get("recon_enabled", True)):
         raise RuntimeError("recon module disabled")
     max_concurrency = int(cfg.get("recon_max_concurrency", 2) or 2)
-    running = _recon_running_count()
-    if running >= max_concurrency:
+    queue_limit = int(cfg.get("recon_queue_limit", 20) or 20)
+    counts = _recon_state_counts()
+    if counts["pending"] >= queue_limit:
         raise RuntimeError("recon queue at capacity")
 
     options = options or {}
     job_id = uuid4().hex
     source_tool = "phoneinfoga" if str(mode).strip().lower() == "phone" else "blackbird"
+    timeout_seconds = int(options.get("timeout_seconds") or cfg.get("recon_timeout_seconds") or 240)
 
     conn = _get_db()
     try:
@@ -2598,12 +2729,25 @@ def _queue_recon_scan(mode: str, query_value: str, *, requested_by: str | None =
         "query_value": query_value,
         "requested_by": requested_by,
         "created_at": datetime.now(LOCAL_TZ).isoformat(),
+        "started_at": None,
+        "timeout_seconds": timeout_seconds,
         "error": None,
     }
+    cancel_event = threading.Event()
+    RECON_CANCEL_EVENTS[job_id] = cancel_event
+    RECON_PROCESSES[job_id] = None
 
     def _runner():
         started = time.time()
+        while True:
+            if cancel_event.is_set():
+                raise ReconExecutionError("cancelled by user")
+            if _recon_running_count() < max_concurrency:
+                break
+            time.sleep(0.2)
+
         RECON_META[job_id]["state"] = "running"
+        RECON_META[job_id]["started_at"] = datetime.now(LOCAL_TZ).isoformat()
         conn = _get_db()
         try:
             mark_recon_job_running(conn, job_id=job_id)
@@ -2617,7 +2761,12 @@ def _queue_recon_scan(mode: str, query_value: str, *, requested_by: str | None =
             payload = run_recon_scan(
                 mode=mode,
                 query_value=query_value,
-                options=options,
+                options={
+                    **options,
+                    "timeout_seconds": timeout_seconds,
+                    "_cancel_event": cancel_event,
+                    "_on_process_start": lambda proc: RECON_PROCESSES.__setitem__(job_id, proc),
+                },
                 job_dir=job_dir,
                 cfg=cfg,
             )
@@ -2641,7 +2790,29 @@ def _queue_recon_scan(mode: str, query_value: str, *, requested_by: str | None =
             RECON_META[job_id]["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
             RECON_META[job_id]["result"] = payload
             return payload
-        except (ValidationError, ReconExecutionError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        except ReconExecutionError as exc:
+            message = str(exc)
+            cancelled = "cancelled by user" in message.lower()
+            conn = _get_db()
+            try:
+                finalize_recon_job(
+                    conn,
+                    job_id=job_id,
+                    status="cancelled" if cancelled else "error",
+                    duration_seconds=int(round(time.time() - started)),
+                    raw_output_path=None,
+                    error_message=message,
+                    findings=[],
+                    artifacts=[],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            RECON_META[job_id]["state"] = "cancelled" if cancelled else "error"
+            RECON_META[job_id]["error"] = message
+            RECON_META[job_id]["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
+            return {"status": "cancelled" if cancelled else "error", "error": message}
+        except (ValidationError, RuntimeError, subprocess.TimeoutExpired) as exc:
             conn = _get_db()
             try:
                 finalize_recon_job(
@@ -2681,6 +2852,9 @@ def _queue_recon_scan(mode: str, query_value: str, *, requested_by: str | None =
             RECON_META[job_id]["error"] = str(exc)
             RECON_META[job_id]["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
             return {"status": "error", "error": str(exc)}
+        finally:
+            RECON_PROCESSES.pop(job_id, None)
+            RECON_CANCEL_EVENTS.pop(job_id, None)
 
     RECON_FUTURES[job_id] = executor.submit(_runner)
     return job_id
@@ -2695,6 +2869,7 @@ _init_login_tables()
 _init_monitor_table()
 _restore_schedules()
 _schedule_monitor_job()
+_schedule_recon_maintenance_job()
 threading.Thread(target=_watchdog_loop, daemon=True).start()
 
 app = Flask(__name__)
@@ -3079,7 +3254,18 @@ def api_recon_run_cancel(job_id):
         if fut and not fut.done():
             cancelled = fut.cancel()
             if not cancelled:
-                return jsonify({"error": "recon job already running and cannot be cancelled"}), 409
+                cancel_event = RECON_CANCEL_EVENTS.get(job_id)
+                if cancel_event:
+                    cancel_event.set()
+                proc = RECON_PROCESSES.get(job_id)
+                if proc and getattr(proc, "poll", lambda: None)() is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                if meta is not None:
+                    meta["state"] = "cancelling"
+                return jsonify({"job_id": job_id, "cancel_requested": True, "running": True})
 
         finalize_recon_job(
             conn,
@@ -3113,6 +3299,22 @@ def api_recon_history():
         return jsonify(rows)
     finally:
         conn.close()
+
+
+@app.route("/api/recon/queue", methods=["GET"])
+def api_recon_queue():
+    cfg = _get_config()
+    counts = _recon_state_counts()
+    return jsonify(
+        {
+            "queue": _recon_queue_snapshot(),
+            "running": counts["running"],
+            "queued": counts["queued"],
+            "pending": counts["pending"],
+            "max_concurrency": int(cfg.get("recon_max_concurrency", 2) or 2),
+            "queue_limit": int(cfg.get("recon_queue_limit", 20) or 20),
+        }
+    )
 
 
 @app.route("/api/recon/findings", methods=["GET"])
@@ -3176,6 +3378,77 @@ def api_recon_export(job_id):
     )
 
 
+@app.route("/api/recon/report/<job_id>", methods=["GET"])
+def api_recon_report_download(job_id):
+    conn = _get_db()
+    try:
+        job = get_recon_job(conn, job_id)
+        if not job:
+            return jsonify({"error": "recon job not found"}), 404
+        artifacts = list_recon_artifacts(conn, job_id=job_id)
+    finally:
+        conn.close()
+
+    priority = {"pdf_instalab": 0, "pdf": 1, "pdf_blackbird": 2}
+    pdf_artifacts = [
+        a
+        for a in artifacts
+        if str(a.get("artifact_type") or "").lower() in priority
+    ]
+    if not pdf_artifacts:
+        return jsonify({"error": "report not found for this recon job"}), 404
+    pdf_artifacts.sort(key=lambda a: priority.get(str(a.get("artifact_type") or "").lower(), 99))
+    path = Path(str(pdf_artifacts[0].get("path") or ""))
+    if not path.exists() or not path.is_file():
+        return jsonify({"error": "report file missing on disk"}), 410
+    return send_from_directory(path.parent, path.name, as_attachment=True, mimetype="application/pdf")
+
+
+@app.route("/api/recon/ai/setup", methods=["POST"])
+def api_recon_ai_setup():
+    cfg = _get_config()
+    blackbird_cmd = str(cfg.get("recon_blackbird_cmd") or "").strip()
+    cmd = shlex.split(blackbird_cmd)
+    if not cmd:
+        return jsonify({"error": "recon_blackbird_cmd is empty"}), 400
+    cmd.append("--setup-ai")
+
+    runtime_key_path = _blackbird_ai_key_path(cfg)
+    runtime_cwd = runtime_key_path.parent
+    runtime_cwd.mkdir(parents=True, exist_ok=True)
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+            check=False,
+            cwd=runtime_cwd,
+            input="y\n",
+        )
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "blackbird AI setup timed out"}), 504
+
+    if proc.returncode != 0:
+        return jsonify(
+            {
+                "error": "blackbird AI setup failed",
+                "returncode": proc.returncode,
+                "stderr": (proc.stderr or "")[-800:],
+            }
+        ), 500
+
+    return jsonify(
+        {
+            "ok": runtime_key_path.exists(),
+            "key_configured": runtime_key_path.exists(),
+            "stdout_tail": (proc.stdout or "")[-500:],
+        }
+    )
+
+
 @app.route("/api/recon/health", methods=["GET"])
 def api_recon_health():
     cfg = _get_config()
@@ -3187,9 +3460,15 @@ def api_recon_health():
     payload = {
         "status": "ok",
         "enabled": bool(cfg.get("recon_enabled", True)),
+        "ai": {
+            "enabled": bool(cfg.get("recon_blackbird_ai_enabled", False)),
+            "key_configured": _blackbird_ai_key_path(cfg).exists(),
+        },
         "queue": {
-            "running": _recon_running_count(),
+            "running": _recon_state_counts()["running"],
+            "queued": _recon_state_counts()["queued"],
             "max_concurrency": int(cfg.get("recon_max_concurrency", 2) or 2),
+            "queue_limit": int(cfg.get("recon_queue_limit", 20) or 20),
         },
         "tools": {
             "blackbird": {
@@ -4205,6 +4484,10 @@ def api_config_update():
         return jsonify({"error": str(exc)}), 400
     try:
         _schedule_monitor_job()
+    except Exception:
+        pass
+    try:
+        _schedule_recon_maintenance_job()
     except Exception:
         pass
     cfg = _get_config(force=True)

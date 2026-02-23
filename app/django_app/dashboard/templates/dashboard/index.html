@@ -713,11 +713,25 @@
                   </select>
                   <label for="recon-query" style="margin-top:8px;">Query</label>
                   <input id="recon-query" type="text" placeholder="@username / user@example.com / +15551234567">
+                  <div class="row" style="margin-top: 10px; gap: 10px; flex-wrap: wrap;">
+                    <label style="display:flex; align-items:center; gap:6px; margin:0;">
+                      <input id="recon-opt-ai" type="checkbox">
+                      AI analysis
+                    </label>
+                    <label style="display:flex; align-items:center; gap:6px; margin:0;">
+                      <input id="recon-opt-pdf" type="checkbox" checked>
+                      Generate PDF report
+                    </label>
+                  </div>
                   <div class="row" style="margin-top: 12px; gap: 8px;">
                     <button id="recon-run-btn">Run scan</button>
                     <button class="secondary" id="recon-refresh-btn">Refresh</button>
                   </div>
                   <div class="config-help">Phone scans should use E.164 format (example: +15551234567).</div>
+                  <div class="row" style="margin-top:6px; gap:8px; align-items:center;">
+                    <div class="config-help" id="recon-ai-status" style="margin:0;">AI key status: checking...</div>
+                    <button class="secondary" id="recon-ai-setup-btn" type="button">Setup AI key</button>
+                  </div>
                 </div>
                 <div class="config-card lg:col-span-2">
                   <h4>Latest result</h4>
@@ -726,6 +740,7 @@
                   <div class="row" style="margin-top: 10px; gap: 8px;">
                     <button class="secondary" id="recon-export-json" disabled>Export JSON</button>
                     <button class="secondary" id="recon-export-csv" disabled>Export CSV</button>
+                    <button class="secondary" id="recon-download-report" disabled>Download Report PDF</button>
                   </div>
                   <div class="list-wrap" style="margin-top: 12px;">
                     <table>
@@ -742,6 +757,26 @@
                       </tbody>
                     </table>
                   </div>
+                </div>
+              </div>
+              <div class="config-card" style="margin-top: 14px;">
+                <h4>Queue Monitor</h4>
+                <div id="recon-queue-meta" class="muted">Queue idle.</div>
+                <div class="list-wrap" style="margin-top: 8px;">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>State</th>
+                        <th>Query</th>
+                        <th>Elapsed</th>
+                        <th>Queue Pos</th>
+                        <th>Timeout Left</th>
+                      </tr>
+                    </thead>
+                    <tbody id="recon-queue-body">
+                      <tr><td colspan="5" class="muted">No active recon jobs.</td></tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
               <div class="config-card" style="margin-top: 14px;">
@@ -1164,9 +1199,19 @@
                 <div class="config-help">Queue limit for active recon workers. Higher values increase CPU/network load.</div>
               </div>
               <div>
+                <label for="cfg-recon-queue-limit">Queue capacity</label>
+                <input id="cfg-recon-queue-limit" type="number" min="1" max="500">
+                <div class="config-help">Maximum queued + running recon jobs accepted before new jobs are rejected.</div>
+              </div>
+              <div>
                 <label for="cfg-recon-timeout-seconds">Job timeout (sec)</label>
                 <input id="cfg-recon-timeout-seconds" type="number" min="15" max="1800">
                 <div class="config-help">Hard timeout applied to each tool invocation before job is marked as error.</div>
+              </div>
+              <div>
+                <label for="cfg-recon-retention-days">Artifact retention (days)</label>
+                <input id="cfg-recon-retention-days" type="number" min="0" max="3650">
+                <div class="config-help">Deletes old recon raw artifacts from disk on schedule. Set 0 to disable.</div>
               </div>
             </div>
           </div>
@@ -1913,7 +1958,9 @@
       document.getElementById('cfg-recon-ai-enabled').value = (src.recon_blackbird_ai_enabled ?? false) ? 'true' : 'false';
       document.getElementById('cfg-recon-no-nsfw').value = (src.recon_blackbird_no_nsfw ?? true) ? 'true' : 'false';
       document.getElementById('cfg-recon-max-concurrency').value = src.recon_max_concurrency ?? 2;
+      document.getElementById('cfg-recon-queue-limit').value = src.recon_queue_limit ?? 20;
       document.getElementById('cfg-recon-timeout-seconds').value = src.recon_timeout_seconds ?? 240;
+      document.getElementById('cfg-recon-retention-days').value = src.recon_artifact_retention_days ?? 30;
       document.getElementById('cfg-proxy-enabled').value = (src.proxy_enabled ?? false) ? 'true' : 'false';
       document.getElementById('cfg-proxy-provider').value = src.proxy_provider ?? 'decodo';
       document.getElementById('cfg-proxy-access').value = src.proxy_access_mode ?? 'native';
@@ -1989,7 +2036,9 @@
         recon_blackbird_ai_enabled: document.getElementById('cfg-recon-ai-enabled').value === 'true',
         recon_blackbird_no_nsfw: document.getElementById('cfg-recon-no-nsfw').value === 'true',
         recon_max_concurrency: Number(document.getElementById('cfg-recon-max-concurrency').value || 0),
+        recon_queue_limit: Number(document.getElementById('cfg-recon-queue-limit').value || 0),
         recon_timeout_seconds: Number(document.getElementById('cfg-recon-timeout-seconds').value || 0),
+        recon_artifact_retention_days: Number(document.getElementById('cfg-recon-retention-days').value || 0),
         proxy_enabled: document.getElementById('cfg-proxy-enabled').value === 'true',
         proxy_provider: document.getElementById('cfg-proxy-provider').value,
         proxy_access_mode: document.getElementById('cfg-proxy-access').value,
@@ -2968,6 +3017,101 @@
       if (c === 'medium') return 'warn';
       return 'neutral';
     }
+    function formatSecondsShort(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) return '—';
+      const s = Math.floor(n % 60);
+      const m = Math.floor((n / 60) % 60);
+      const h = Math.floor(n / 3600);
+      if (h > 0) return `${h}h ${m}m ${s}s`;
+      if (m > 0) return `${m}m ${s}s`;
+      return `${s}s`;
+    }
+    function renderReconQueue(data) {
+      const meta = document.getElementById('recon-queue-meta');
+      const body = document.getElementById('recon-queue-body');
+      if (!meta || !body) return;
+      const rows = Array.isArray(data?.queue) ? data.queue : [];
+      const running = Number(data?.running || 0);
+      const queued = Number(data?.queued || 0);
+      const maxConc = Number(data?.max_concurrency || 0);
+      const limit = Number(data?.queue_limit || 0);
+      meta.textContent = `Running ${running}/${maxConc} · Queued ${queued} · Pending ${rows.length}/${limit}`;
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="5" class="muted">No active recon jobs.</td></tr>';
+        return;
+      }
+      body.innerHTML = rows.map(r => `
+        <tr>
+          <td>${r.state || '—'}</td>
+          <td>${r.query_value || '—'}</td>
+          <td>${formatSecondsShort(r.elapsed_seconds)}</td>
+          <td>${r.queue_position || '—'}</td>
+          <td>${formatSecondsShort(r.timeout_remaining_seconds)}</td>
+        </tr>
+      `).join('');
+    }
+    async function loadReconQueue() {
+      try {
+        const data = await fetchJSON('/recon/queue');
+        renderReconQueue(data);
+      } catch (e) {
+        const meta = document.getElementById('recon-queue-meta');
+        if (meta) meta.textContent = `Queue unavailable: ${e.message}`;
+      }
+    }
+    function updateReconOptionState() {
+      const mode = document.getElementById('recon-mode')?.value || 'username';
+      const ai = document.getElementById('recon-opt-ai');
+      const pdf = document.getElementById('recon-opt-pdf');
+      if (!ai || !pdf) return;
+      const isBlackbirdMode = mode === 'username' || mode === 'email';
+      ai.disabled = !isBlackbirdMode;
+      pdf.disabled = !isBlackbirdMode;
+      if (!isBlackbirdMode) {
+        ai.checked = false;
+        pdf.checked = false;
+      }
+    }
+    async function loadReconHealth() {
+      const statusEl = document.getElementById('recon-ai-status');
+      const setupBtn = document.getElementById('recon-ai-setup-btn');
+      try {
+        const data = await fetchJSON('/recon/health');
+        const keyConfigured = !!data?.ai?.key_configured;
+        const aiEnabled = !!data?.ai?.enabled;
+        if (statusEl) {
+          statusEl.textContent = keyConfigured
+            ? 'AI key status: configured'
+            : 'AI key status: missing (enable via Blackbird --setup-ai in container).';
+        }
+        if (setupBtn) setupBtn.disabled = keyConfigured;
+        const aiOpt = document.getElementById('recon-opt-ai');
+        if (aiOpt) {
+          aiOpt.checked = aiEnabled;
+          if (!keyConfigured) aiOpt.checked = false;
+        }
+      } catch (e) {
+        if (statusEl) statusEl.textContent = `AI key status: unavailable (${e.message})`;
+        if (setupBtn) setupBtn.disabled = false;
+      }
+    }
+    async function setupReconAiKey() {
+      const btn = document.getElementById('recon-ai-setup-btn');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetchJSON('/recon/ai/setup', {method: 'POST', body: JSON.stringify({})});
+        if (res?.key_configured) {
+          showToast('Blackbird AI key configured', 'good');
+        } else {
+          showToast('AI setup completed but key not detected', 'warn');
+        }
+      } catch (e) {
+        showToast('AI setup failed: ' + e.message, 'bad');
+      } finally {
+        await loadReconHealth();
+      }
+    }
     function renderReconFindings(findings) {
       const body = document.getElementById('recon-findings-body');
       const chips = document.getElementById('recon-result-chips');
@@ -3011,8 +3155,11 @@
         renderReconFindings(data.findings || []);
         const btnJson = document.getElementById('recon-export-json');
         const btnCsv = document.getElementById('recon-export-csv');
+        const btnReport = document.getElementById('recon-download-report');
         if (btnJson) btnJson.disabled = false;
         if (btnCsv) btnCsv.disabled = false;
+        const hasPdf = Array.isArray(data.artifacts) && data.artifacts.some(a => String(a.artifact_type || '').toLowerCase() === 'pdf');
+        if (btnReport) btnReport.disabled = !hasPdf;
       } catch (e) {
         log('Recon load error: ' + e.message);
         showToast('Recon load failed: ' + e.message, 'bad');
@@ -3045,8 +3192,10 @@
           renderReconFindings([]);
           const btnJson = document.getElementById('recon-export-json');
           const btnCsv = document.getElementById('recon-export-csv');
+          const btnReport = document.getElementById('recon-download-report');
           if (btnJson) btnJson.disabled = true;
           if (btnCsv) btnCsv.disabled = true;
+          if (btnReport) btnReport.disabled = true;
         }
         showToast('Recon job deleted', 'good');
         await loadReconHistory();
@@ -3067,9 +3216,12 @@
           <td>${r.mode || '—'}</td>
           <td>${r.query_value || '—'}</td>
           <td>${r.status || '—'}</td>
-          <td>${r.findings_count ?? 0}</td>
+          <td>${r.findings_count ?? 0} ${Number(r.report_count || 0) > 0 ? '<span class="chip good">PDF</span>' : ''}</td>
           <td>
             <button class="secondary" data-recon-open="${r.id}">Open</button>
+            ${Number(r.report_count || 0) > 0
+              ? `<button class="secondary" data-recon-report="${r.id}">Report</button>`
+              : ''}
             ${['queued', 'running'].includes(String(r.status || '').toLowerCase())
               ? `<button class="secondary" data-recon-cancel="${r.id}">Cancel</button>`
               : `<button class="secondary" data-recon-delete="${r.id}">Delete</button>`}
@@ -3081,6 +3233,9 @@
       });
       body.querySelectorAll('button[data-recon-cancel]').forEach(btn => {
         btn.onclick = () => cancelReconJob(btn.dataset.reconCancel);
+      });
+      body.querySelectorAll('button[data-recon-report]').forEach(btn => {
+        btn.onclick = () => window.open(`${API_BASE}/recon/report/${encodeURIComponent(btn.dataset.reconReport)}`, '_blank');
       });
       body.querySelectorAll('button[data-recon-delete]').forEach(btn => {
         btn.onclick = () => deleteReconJob(btn.dataset.reconDelete);
@@ -3110,18 +3265,26 @@
         showToast('Enter a recon query first', 'warn');
         return;
       }
+      const aiEnabled = !!document.getElementById('recon-opt-ai')?.checked;
+      const reportEnabled = !!document.getElementById('recon-opt-pdf')?.checked;
+      const isBlackbirdMode = mode === 'username' || mode === 'email';
       const btn = document.getElementById('recon-run-btn');
       if (btn) btn.disabled = true;
       try {
+        const options = {
+          no_nsfw: getConfigValue('recon_blackbird_no_nsfw', true),
+        };
+        if (isBlackbirdMode) {
+          options.ai = aiEnabled;
+          options.generate_pdf = reportEnabled;
+        }
         const res = await fetchJSON('/recon/run', {
           method: 'POST',
           body: JSON.stringify({
             mode: mode,
             query_value: query,
             requested_by: document.getElementById('run-login')?.value || '',
-            options: {
-              no_nsfw: true,
-            },
+            options: options,
           }),
         });
         showToast(`Recon queued (${res.job_id})`, 'good');
@@ -4374,8 +4537,10 @@
     }
     const reconRunBtn = document.getElementById('recon-run-btn');
     if (reconRunBtn) reconRunBtn.onclick = runRecon;
+    const reconModeSel = document.getElementById('recon-mode');
+    if (reconModeSel) reconModeSel.onchange = updateReconOptionState;
     const reconRefreshBtn = document.getElementById('recon-refresh-btn');
-    if (reconRefreshBtn) reconRefreshBtn.onclick = loadReconHistory;
+    if (reconRefreshBtn) reconRefreshBtn.onclick = async () => { await loadReconHistory(); await loadReconHealth(); await loadReconQueue(); };
     const reconHistoryLoadBtn = document.getElementById('recon-history-load');
     if (reconHistoryLoadBtn) reconHistoryLoadBtn.onclick = loadReconHistory;
     const reconExportJsonBtn = document.getElementById('recon-export-json');
@@ -4392,6 +4557,15 @@
         window.open(`${API_BASE}/recon/export/${encodeURIComponent(reconCurrentJobId)}?format=csv`, '_blank');
       };
     }
+    const reconReportBtn = document.getElementById('recon-download-report');
+    if (reconReportBtn) {
+      reconReportBtn.onclick = () => {
+        if (!reconCurrentJobId) return;
+        window.open(`${API_BASE}/recon/report/${encodeURIComponent(reconCurrentJobId)}`, '_blank');
+      };
+    }
+    const reconAiSetupBtn = document.getElementById('recon-ai-setup-btn');
+    if (reconAiSetupBtn) reconAiSetupBtn.onclick = setupReconAiKey;
 
     function showAPIError(show = true) {
       const banner = document.getElementById('api-error-banner');
@@ -4411,11 +4585,15 @@
         await loadLogins();
         await Promise.all([loadSchedules(), loadTargetsOverview(), loadTargetsForHistory(), loadLastStatus(), loadSummary()]);
         await loadReconHistory();
+        await loadReconHealth();
+        await loadReconQueue();
+        updateReconOptionState();
         toggleFrequencyUI();
         fetchSystemStatus();
         fetchUnfollowStatus();
         scheduleAdaptivePolling(true);
         document.addEventListener('visibilitychange', () => scheduleAdaptivePolling(true));
+        setInterval(loadReconQueue, 5000);
         // Hide API error banner if everything loaded successfully
         showAPIError(false);
       } catch (e) {
