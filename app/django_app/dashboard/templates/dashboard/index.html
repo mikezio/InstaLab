@@ -1124,6 +1124,47 @@
             </div>
           </div>
           <div class="config-card">
+            <h4>Recon Lab</h4>
+            <div class="config-grid">
+              <div>
+                <label for="cfg-recon-enabled">Recon module</label>
+                <select id="cfg-recon-enabled">
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </div>
+              <div>
+                <label for="cfg-recon-phoneinfoga-enabled">Phone mode (PhoneInfoga)</label>
+                <select id="cfg-recon-phoneinfoga-enabled">
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </div>
+              <div>
+                <label for="cfg-recon-ai-enabled">Blackbird AI</label>
+                <select id="cfg-recon-ai-enabled">
+                  <option value="false">Disabled</option>
+                  <option value="true">Enabled</option>
+                </select>
+              </div>
+              <div>
+                <label for="cfg-recon-no-nsfw">Hide NSFW sites</label>
+                <select id="cfg-recon-no-nsfw">
+                  <option value="true">Enabled</option>
+                  <option value="false">Disabled</option>
+                </select>
+              </div>
+              <div>
+                <label for="cfg-recon-max-concurrency">Max concurrent jobs</label>
+                <input id="cfg-recon-max-concurrency" type="number" min="1" max="8">
+              </div>
+              <div>
+                <label for="cfg-recon-timeout-seconds">Job timeout (sec)</label>
+                <input id="cfg-recon-timeout-seconds" type="number" min="15" max="1800">
+              </div>
+            </div>
+          </div>
+          <div class="config-card">
             <h4>Schedule defaults</h4>
             <div class="config-grid">
               <div>
@@ -1861,6 +1902,12 @@
         const monSel = document.getElementById('cfg-monitor-login');
         if (monSel) monSel.value = src.monitor_login_username;
       }
+      document.getElementById('cfg-recon-enabled').value = (src.recon_enabled ?? true) ? 'true' : 'false';
+      document.getElementById('cfg-recon-phoneinfoga-enabled').value = (src.recon_phoneinfoga_enabled ?? true) ? 'true' : 'false';
+      document.getElementById('cfg-recon-ai-enabled').value = (src.recon_blackbird_ai_enabled ?? false) ? 'true' : 'false';
+      document.getElementById('cfg-recon-no-nsfw').value = (src.recon_blackbird_no_nsfw ?? true) ? 'true' : 'false';
+      document.getElementById('cfg-recon-max-concurrency').value = src.recon_max_concurrency ?? 2;
+      document.getElementById('cfg-recon-timeout-seconds').value = src.recon_timeout_seconds ?? 240;
       document.getElementById('cfg-proxy-enabled').value = (src.proxy_enabled ?? false) ? 'true' : 'false';
       document.getElementById('cfg-proxy-provider').value = src.proxy_provider ?? 'decodo';
       document.getElementById('cfg-proxy-access').value = src.proxy_access_mode ?? 'native';
@@ -1931,6 +1978,12 @@
         monitor_threshold_delta: Number(document.getElementById('cfg-monitor-threshold').value || 0),
         monitor_min_gap_minutes: Number(document.getElementById('cfg-monitor-gap').value || 0),
         monitor_login_username: document.getElementById('cfg-monitor-login').value || '',
+        recon_enabled: document.getElementById('cfg-recon-enabled').value === 'true',
+        recon_phoneinfoga_enabled: document.getElementById('cfg-recon-phoneinfoga-enabled').value === 'true',
+        recon_blackbird_ai_enabled: document.getElementById('cfg-recon-ai-enabled').value === 'true',
+        recon_blackbird_no_nsfw: document.getElementById('cfg-recon-no-nsfw').value === 'true',
+        recon_max_concurrency: Number(document.getElementById('cfg-recon-max-concurrency').value || 0),
+        recon_timeout_seconds: Number(document.getElementById('cfg-recon-timeout-seconds').value || 0),
         proxy_enabled: document.getElementById('cfg-proxy-enabled').value === 'true',
         proxy_provider: document.getElementById('cfg-proxy-provider').value,
         proxy_access_mode: document.getElementById('cfg-proxy-access').value,
