@@ -3041,20 +3041,24 @@ def api_recon_run_status(job_id):
 def api_recon_run_cancel(job_id):
     fut = RECON_FUTURES.get(job_id)
     meta = RECON_META.get(job_id)
-    if not fut or not meta:
-        return jsonify({"error": "recon job not found"}), 404
-    if fut.done():
-        return jsonify({"error": "recon job already finished"}), 409
-    cancelled = fut.cancel()
-    if not cancelled:
-        return jsonify({"error": "recon job already running and cannot be cancelled"}), 409
     conn = _get_db()
     try:
+        job = get_recon_job(conn, job_id)
+        if not job:
+            return jsonify({"error": "recon job not found"}), 404
+        if job.get("status") in {"success", "error", "cancelled"}:
+            return jsonify({"error": "recon job already finished"}), 409
+
+        if fut and not fut.done():
+            cancelled = fut.cancel()
+            if not cancelled:
+                return jsonify({"error": "recon job already running and cannot be cancelled"}), 409
+
         finalize_recon_job(
             conn,
             job_id=job_id,
             status="cancelled",
-            duration_seconds=0,
+            duration_seconds=int(job.get("duration_seconds") or 0),
             raw_output_path=None,
             error_message="cancelled by user",
             findings=[],
@@ -3063,10 +3067,11 @@ def api_recon_run_cancel(job_id):
         conn.commit()
     finally:
         conn.close()
-    meta["state"] = "cancelled"
-    meta["error"] = "cancelled by user"
-    meta["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
-    return jsonify({"job_id": job_id, "cancelled": True})
+    if meta is not None:
+        meta["state"] = "cancelled"
+        meta["error"] = "cancelled by user"
+        meta["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
+    return jsonify({"job_id": job_id, "cancelled": True, "stale_recovered": not bool(fut)})
 
 
 @app.route("/api/recon/history", methods=["GET"])
