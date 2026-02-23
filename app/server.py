@@ -10,6 +10,7 @@ Features:
 import json
 import os
 import signal
+import shlex
 import shutil
 import subprocess
 import sys
