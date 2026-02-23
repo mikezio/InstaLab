@@ -21,6 +21,7 @@ This document describes the Flask API endpoints available in InstaLab.
 - [Monitor](#monitor)
 - [Summary](#summary)
 - [Configuration](#configuration)
+- [Recon](#recon)
 - [Schedules](#schedules)
 - [Import](#import)
 - [Error Responses](#error-responses)
@@ -327,6 +328,52 @@ Returns current config + defaults (masked for sensitive values).
 ### PUT `/api/config`
 
 Update config values. If `proxy_enabled` is true, host/port/user/pass are required.
+
+---
+
+## Recon
+
+Recon endpoints are isolated from run tracking data (`runs`, `run_followers`, `run_followees`).
+
+### POST `/api/recon/run`
+
+Queue a recon scan.
+
+**Request:**
+```json
+{
+  "mode": "username",
+  "query_value": "example_user",
+  "requested_by": "collector",
+  "options": {
+    "no_nsfw": true
+  }
+}
+```
+
+### GET `/api/recon/run/<job_id>`
+
+Returns status, findings, and artifacts for one recon job.
+
+### POST `/api/recon/run/<job_id>/cancel`
+
+Cancels a queued recon job (running jobs may not be cancellable).
+
+### GET `/api/recon/history?mode=&q=&status=&limit=`
+
+List recon jobs with filters.
+
+### GET `/api/recon/findings?job_id=<job_id>`
+
+Returns normalized findings and artifacts.
+
+### GET `/api/recon/export/<job_id>?format=json|csv`
+
+Exports recon findings.
+
+### GET `/api/recon/health`
+
+Returns recon module health (queue and tool executable checks).
 
 ---
 

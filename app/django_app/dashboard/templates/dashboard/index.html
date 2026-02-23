@@ -235,6 +235,7 @@
         <div class="mt-3 flex flex-col gap-2">
           <button class="view-tab active" data-view="overview">Overview</button>
           <button class="view-tab" data-view="explorer">Explorer</button>
+          <button class="view-tab" data-view="recon">Recon Lab</button>
         </div>
       </div>
 
@@ -271,6 +272,7 @@
           <div class="mt-4 flex flex-wrap gap-2">
             <button class="view-tab active" data-view="overview">Overview</button>
             <button class="view-tab" data-view="explorer">Explorer</button>
+            <button class="view-tab" data-view="recon">Recon Lab</button>
           </div>
         </div>
       </header>
@@ -686,6 +688,98 @@
                       </details>
                     </div>
                   </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        </section>
+        <section class="app-view" id="view-recon">
+          <section class="section">
+            <div class="section-header">
+              <div>
+                <h2>Recon Lab</h2>
+                <p class="sub">Separate reconnaissance workspace. Results here do not change tracked capture history.</p>
+              </div>
+            </div>
+            <div class="panel" style="padding:16px;">
+              <div class="grid gap-6 lg:grid-cols-3">
+                <div class="config-card">
+                  <h4>New scan</h4>
+                  <label for="recon-mode">Mode</label>
+                  <select id="recon-mode">
+                    <option value="username">Username (Blackbird)</option>
+                    <option value="email">Email (Blackbird)</option>
+                    <option value="phone">Phone (PhoneInfoga)</option>
+                  </select>
+                  <label for="recon-query" style="margin-top:8px;">Query</label>
+                  <input id="recon-query" type="text" placeholder="@username / user@example.com / +15551234567">
+                  <div class="row" style="margin-top: 12px; gap: 8px;">
+                    <button id="recon-run-btn">Run scan</button>
+                    <button class="secondary" id="recon-refresh-btn">Refresh</button>
+                  </div>
+                  <div class="config-help">Phone scans should use E.164 format (example: +15551234567).</div>
+                </div>
+                <div class="config-card lg:col-span-2">
+                  <h4>Latest result</h4>
+                  <div id="recon-result-meta" class="muted">No scan selected.</div>
+                  <div class="chip-row" id="recon-result-chips"></div>
+                  <div class="row" style="margin-top: 10px; gap: 8px;">
+                    <button class="secondary" id="recon-export-json" disabled>Export JSON</button>
+                    <button class="secondary" id="recon-export-csv" disabled>Export CSV</button>
+                  </div>
+                  <div class="list-wrap" style="margin-top: 12px;">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Platform</th>
+                          <th>Confidence</th>
+                          <th>Status</th>
+                          <th>URL</th>
+                        </tr>
+                      </thead>
+                      <tbody id="recon-findings-body">
+                        <tr><td colspan="4" class="muted">No findings yet.</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              <div class="config-card" style="margin-top: 14px;">
+                <h4>History</h4>
+                <div class="row" style="gap:8px; margin-bottom:8px;">
+                  <input id="recon-filter-q" type="text" placeholder="Search query value">
+                  <select id="recon-filter-mode">
+                    <option value="">All modes</option>
+                    <option value="username">Username</option>
+                    <option value="email">Email</option>
+                    <option value="phone">Phone</option>
+                  </select>
+                  <select id="recon-filter-status">
+                    <option value="">All statuses</option>
+                    <option value="queued">Queued</option>
+                    <option value="running">Running</option>
+                    <option value="success">Success</option>
+                    <option value="error">Error</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                  <button class="secondary" id="recon-history-load">Load</button>
+                </div>
+                <div class="list-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>When</th>
+                        <th>Mode</th>
+                        <th>Query</th>
+                        <th>Status</th>
+                        <th>Findings</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="recon-history-body">
+                      <tr><td colspan="6" class="muted">No recon jobs yet.</td></tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
@@ -1219,7 +1313,17 @@
     let focusLogin = '';
     let logtailTimer = null;
     let toastTimer;
-    let statusTimer;
+    let statusTimer = null;
+    let unfollowTimer = null;
+    let statusPollMs = null;
+    let unfollowPollMs = null;
+    const POLL_ACTIVE_STATUS_MS = 6000;
+    const POLL_IDLE_STATUS_MS = 180000;
+    const POLL_ACTIVE_UNFOLLOW_MS = 9000;
+    const POLL_IDLE_UNFOLLOW_MS = 300000;
+    const POLL_HIDDEN_MIN_MS = 240000;
+    let reconHistoryCache = [];
+    let reconCurrentJobId = '';
 
     function log(msg) {
       const ts = new Date().toISOString();
@@ -2799,6 +2903,132 @@
     function openHistoryModal(target) {
       openExplorer(target);
     }
+    function reconToneForConfidence(conf) {
+      const c = String(conf || '').toLowerCase();
+      if (c === 'high') return 'good';
+      if (c === 'medium') return 'warn';
+      return 'neutral';
+    }
+    function renderReconFindings(findings) {
+      const body = document.getElementById('recon-findings-body');
+      const chips = document.getElementById('recon-result-chips');
+      if (!body || !chips) return;
+      if (!Array.isArray(findings) || !findings.length) {
+        body.innerHTML = '<tr><td colspan="4" class="muted">No findings yet.</td></tr>';
+        chips.innerHTML = '';
+        return;
+      }
+      const high = findings.filter(f => (f.confidence_tier || '').toLowerCase() === 'high').length;
+      const medium = findings.filter(f => (f.confidence_tier || '').toLowerCase() === 'medium').length;
+      const low = findings.length - high - medium;
+      chips.innerHTML = `
+        <span class="chip good">High ${high}</span>
+        <span class="chip warn">Medium ${medium}</span>
+        <span class="chip neutral">Low ${low}</span>
+      `;
+      body.innerHTML = findings.map(f => {
+        const tone = reconToneForConfidence(f.confidence_tier);
+        const url = f.url ? `<a href="${f.url}" target="_blank" rel="noopener">${f.url}</a>` : '—';
+        return `
+          <tr>
+            <td>${f.platform || '—'}</td>
+            <td><span class="chip ${tone}">${f.confidence_tier || 'low'}</span></td>
+            <td>${f.tool_status || '—'}</td>
+            <td>${url}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+    async function loadReconJob(jobId) {
+      if (!jobId) return;
+      try {
+        const data = await fetchJSON(`/recon/run/${encodeURIComponent(jobId)}`);
+        reconCurrentJobId = jobId;
+        const job = data.job || {};
+        const meta = document.getElementById('recon-result-meta');
+        if (meta) {
+          meta.textContent = `${renderTime(job.created_at)} · ${job.mode || '—'} · ${job.query_value || '—'} · ${job.status || '—'} · findings ${data.findings?.length || 0}`;
+        }
+        renderReconFindings(data.findings || []);
+        const btnJson = document.getElementById('recon-export-json');
+        const btnCsv = document.getElementById('recon-export-csv');
+        if (btnJson) btnJson.disabled = false;
+        if (btnCsv) btnCsv.disabled = false;
+      } catch (e) {
+        log('Recon load error: ' + e.message);
+        showToast('Recon load failed: ' + e.message, 'bad');
+      }
+    }
+    function renderReconHistory(rows) {
+      const body = document.getElementById('recon-history-body');
+      if (!body) return;
+      if (!rows || !rows.length) {
+        body.innerHTML = '<tr><td colspan="6" class="muted">No recon jobs yet.</td></tr>';
+        return;
+      }
+      body.innerHTML = rows.map(r => `
+        <tr>
+          <td>${renderTime(r.created_at)}</td>
+          <td>${r.mode || '—'}</td>
+          <td>${r.query_value || '—'}</td>
+          <td>${r.status || '—'}</td>
+          <td>${r.findings_count ?? 0}</td>
+          <td><button class="secondary" data-recon-open="${r.id}">Open</button></td>
+        </tr>
+      `).join('');
+      body.querySelectorAll('button[data-recon-open]').forEach(btn => {
+        btn.onclick = () => loadReconJob(btn.dataset.reconOpen);
+      });
+    }
+    async function loadReconHistory() {
+      const mode = document.getElementById('recon-filter-mode')?.value || '';
+      const status = document.getElementById('recon-filter-status')?.value || '';
+      const q = (document.getElementById('recon-filter-q')?.value || '').trim();
+      const params = new URLSearchParams();
+      if (mode) params.set('mode', mode);
+      if (status) params.set('status', status);
+      if (q) params.set('q', q);
+      params.set('limit', '50');
+      try {
+        const rows = await fetchJSON(`/recon/history?${params.toString()}`);
+        reconHistoryCache = rows || [];
+        renderReconHistory(reconHistoryCache);
+      } catch (e) {
+        log('Recon history error: ' + e.message);
+      }
+    }
+    async function runRecon() {
+      const mode = document.getElementById('recon-mode')?.value || 'username';
+      const query = (document.getElementById('recon-query')?.value || '').trim();
+      if (!query) {
+        showToast('Enter a recon query first', 'warn');
+        return;
+      }
+      const btn = document.getElementById('recon-run-btn');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetchJSON('/recon/run', {
+          method: 'POST',
+          body: JSON.stringify({
+            mode: mode,
+            query_value: query,
+            requested_by: document.getElementById('run-login')?.value || '',
+            options: {
+              no_nsfw: true,
+            },
+          }),
+        });
+        showToast(`Recon queued (${res.job_id})`, 'good');
+        await loadReconHistory();
+        if (res.job_id) {
+          setTimeout(() => loadReconJob(res.job_id), 1200);
+        }
+      } catch (e) {
+        showToast('Recon run failed: ' + e.message, 'bad');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
     async function createSchedule() {
       const login = document.getElementById('sch-login').value;
       const target = document.getElementById('sch-target').value.trim();
@@ -3623,6 +3853,7 @@
         updateKpiStatus();
         updateSignalBoard();
         if (targetsCache) renderTargetsOverview();
+        scheduleAdaptivePolling();
       } catch (e) {
         log('Status error: ' + e.message);
       }
@@ -3734,6 +3965,7 @@
             ufMax.value = data.suggested_max;
           }
         }
+        scheduleAdaptivePolling();
       } catch (e) {
         const heroCleanupPill = document.getElementById('hero-cleanup-pill');
         const heroCleanupMeta = document.getElementById('hero-cleanup-meta');
@@ -3743,6 +3975,35 @@
           heroCleanupPill.classList.add('idle');
         }
         if (heroCleanupMeta) heroCleanupMeta.textContent = 'Cleanup status error';
+      }
+    }
+
+    function desiredStatusPollMs() {
+      const activeJobs = statusCache?.active_jobs?.length || 0;
+      const queuedJobs = statusCache?.queued_jobs?.length || 0;
+      const base = (activeJobs > 0 || queuedJobs > 0 || unfollowRunning) ? POLL_ACTIVE_STATUS_MS : POLL_IDLE_STATUS_MS;
+      return document.hidden ? Math.max(base, POLL_HIDDEN_MIN_MS) : base;
+    }
+
+    function desiredUnfollowPollMs() {
+      const state = unfollowCache?.job?.state || '';
+      const base = (state === 'running' || state === 'cancelling') ? POLL_ACTIVE_UNFOLLOW_MS : POLL_IDLE_UNFOLLOW_MS;
+      return document.hidden ? Math.max(base, POLL_HIDDEN_MIN_MS) : base;
+    }
+
+    function scheduleAdaptivePolling(force = false) {
+      const nextStatusMs = desiredStatusPollMs();
+      if (force || statusTimer === null || statusPollMs !== nextStatusMs) {
+        if (statusTimer !== null) clearInterval(statusTimer);
+        statusTimer = setInterval(fetchSystemStatus, nextStatusMs);
+        statusPollMs = nextStatusMs;
+      }
+
+      const nextUnfollowMs = desiredUnfollowPollMs();
+      if (force || unfollowTimer === null || unfollowPollMs !== nextUnfollowMs) {
+        if (unfollowTimer !== null) clearInterval(unfollowTimer);
+        unfollowTimer = setInterval(fetchUnfollowStatus, nextUnfollowMs);
+        unfollowPollMs = nextUnfollowMs;
       }
     }
     async function previewUnfollow() {
@@ -4005,6 +4266,26 @@
       });
       eventsUserInput.addEventListener('blur', () => loadRelationshipEvents(currentHistoryTarget));
     }
+    const reconRunBtn = document.getElementById('recon-run-btn');
+    if (reconRunBtn) reconRunBtn.onclick = runRecon;
+    const reconRefreshBtn = document.getElementById('recon-refresh-btn');
+    if (reconRefreshBtn) reconRefreshBtn.onclick = loadReconHistory;
+    const reconHistoryLoadBtn = document.getElementById('recon-history-load');
+    if (reconHistoryLoadBtn) reconHistoryLoadBtn.onclick = loadReconHistory;
+    const reconExportJsonBtn = document.getElementById('recon-export-json');
+    if (reconExportJsonBtn) {
+      reconExportJsonBtn.onclick = () => {
+        if (!reconCurrentJobId) return;
+        window.open(`${API_BASE}/recon/export/${encodeURIComponent(reconCurrentJobId)}?format=json`, '_blank');
+      };
+    }
+    const reconExportCsvBtn = document.getElementById('recon-export-csv');
+    if (reconExportCsvBtn) {
+      reconExportCsvBtn.onclick = () => {
+        if (!reconCurrentJobId) return;
+        window.open(`${API_BASE}/recon/export/${encodeURIComponent(reconCurrentJobId)}?format=csv`, '_blank');
+      };
+    }
 
     function showAPIError(show = true) {
       const banner = document.getElementById('api-error-banner');
@@ -4023,11 +4304,12 @@
         await loadConfig();
         await loadLogins();
         await Promise.all([loadSchedules(), loadTargetsOverview(), loadTargetsForHistory(), loadLastStatus(), loadSummary()]);
+        await loadReconHistory();
         toggleFrequencyUI();
         fetchSystemStatus();
-        statusTimer = setInterval(fetchSystemStatus, 4000);
         fetchUnfollowStatus();
-        setInterval(fetchUnfollowStatus, 6000);
+        scheduleAdaptivePolling(true);
+        document.addEventListener('visibilitychange', () => scheduleAdaptivePolling(true));
         // Hide API error banner if everything loaded successfully
         showAPIError(false);
       } catch (e) {

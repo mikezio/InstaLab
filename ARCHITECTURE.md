@@ -143,6 +143,14 @@ Core behaviors:
 - Enforces batch size and delay settings.
 - Writes unfollow results to `unfollow_actions`.
 
+### 8) Recon Lab (`app/recon_worker.py` + recon API endpoints)
+
+- Separate reconnaissance pipeline from snapshot tracking.
+- Username/email scans use Blackbird CLI.
+- Phone scans use PhoneInfoga (spawned in API mode for each scan).
+- Results persist to dedicated tables: `recon_queries`, `recon_jobs`, `recon_findings`, `recon_artifacts`.
+- Recon writes do **not** mutate `runs` or relationship-history tables.
+
 ## Login + 2FA flow (detailed)
 
 ```mermaid
@@ -193,6 +201,7 @@ Key tables:
 - `config` – runtime config
 - `schedules` – cron schedules
 - `unfollow_actions` – audit trail of unfollows
+- `recon_queries`, `recon_jobs`, `recon_findings`, `recon_artifacts` – isolated recon data
 
 ## Configuration
 
@@ -223,4 +232,3 @@ Important keys:
 - **No active job in UI** → `/api/status` only shows active jobs; use `/api/jobs/latest` for finished job logs.
 - **Repeated “new device” logins** → ensure device profile persisted and `trust_this_device=1`.
 - **Proxy errors** → verify `/api/proxy/test` and required proxy credentials.
-
