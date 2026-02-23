@@ -13,6 +13,7 @@ from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from recon_report import create_instalab_recon_report
 from validation import ValidationError, validate_username
 
 CONFIDENCE_HIGH = "high"
@@ -79,6 +80,11 @@ def _normalize_mode_and_value(mode: str, query_value: str) -> tuple[str, str]:
     if not normalized.startswith("+"):
         normalized = "+" + normalized
     return cleaned_mode, normalized
+
+
+def _phoneinfoga_api_number(query_value: str) -> str:
+    # PhoneInfoga v2 API expects digits-only input (no '+' or separators).
+    return re.sub(r"\D+", "", query_value or "")
 
 
 def _resolve_blackbird_results_dir(command_parts: list[str], cfg: dict) -> Path:
@@ -155,31 +161,67 @@ def _run_blackbird(mode: str, query_value: str, options: dict, job_dir: Path, cf
     if options.get("no_nsfw", cfg.get("recon_blackbird_no_nsfw", True)):
         cmd.append("--no-nsfw")
 
-    if options.get("ai", cfg.get("recon_blackbird_ai_enabled", False)):
+    ai_enabled = bool(options.get("ai", cfg.get("recon_blackbird_ai_enabled", False)))
+    if ai_enabled:
         cmd.append("--ai")
+
+    generate_pdf = bool(options.get("generate_pdf", False))
+    if generate_pdf:
+        cmd.append("--pdf")
 
     result_dir = _resolve_blackbird_results_dir(cmd, cfg)
     before_mtime = time.time() - 1
     before_files = set(glob.glob(str(result_dir / "**" / "*.json"), recursive=True)) if result_dir.exists() else set()
+    before_pdfs = set(glob.glob(str(result_dir / "**" / "*.pdf"), recursive=True)) if result_dir.exists() else set()
 
     blackbird_results_dir = str(cfg.get("recon_blackbird_results_dir") or "/tmp/instalab-blackbird/results").strip()
     blackbird_cwd = str(Path(blackbird_results_dir).resolve().parent)
     Path(blackbird_cwd).mkdir(parents=True, exist_ok=True)
+    if ai_enabled:
+        ai_key_path = Path(blackbird_cwd) / ".ai_key.json"
+        if not ai_key_path.exists():
+            raise ReconExecutionError("Blackbird AI key not configured. Use /api/recon/ai/setup first.")
 
-    proc = subprocess.run(
+    on_process_start = options.get("_on_process_start")
+    cancel_event = options.get("_cancel_event")
+    proc = subprocess.Popen(  # noqa: S603
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout_seconds,
-        check=False,
         cwd=blackbird_cwd,
     )
+    if callable(on_process_start):
+        try:
+            on_process_start(proc)
+        except Exception:
+            pass
+
+    deadline = time.time() + timeout_seconds
+    while True:
+        try:
+            proc_stdout, proc_stderr = proc.communicate(timeout=1)
+            break
+        except subprocess.TimeoutExpired:
+            if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                raise ReconExecutionError("cancelled by user")
+            if time.time() > deadline:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                raise subprocess.TimeoutExpired(cmd, timeout_seconds)
 
     stdout_path = raw_dir / "blackbird.stdout.log"
     stderr_path = raw_dir / "blackbird.stderr.log"
-    _write_text(stdout_path, proc.stdout)
-    _write_text(stderr_path, proc.stderr)
+    _write_text(stdout_path, proc_stdout)
+    _write_text(stderr_path, proc_stderr)
 
     if proc.returncode != 0:
         raise ReconExecutionError(f"blackbird exited with code {proc.returncode}")
@@ -206,6 +248,38 @@ def _run_blackbird(mode: str, query_value: str, options: dict, job_dir: Path, cf
         {"artifact_type": "log", "path": str(stdout_path), "size_bytes": stdout_path.stat().st_size},
         {"artifact_type": "log", "path": str(stderr_path), "size_bytes": stderr_path.stat().st_size},
     ]
+
+    if generate_pdf:
+        after_pdfs = set(glob.glob(str(result_dir / "**" / "*.pdf"), recursive=True)) if result_dir.exists() else set()
+        new_pdfs = [Path(p) for p in (after_pdfs - before_pdfs)]
+        pdf_file = _latest_file(new_pdfs, after_mtime=before_mtime)
+        if not pdf_file:
+            candidates = [Path(p) for p in after_pdfs]
+            pdf_file = _latest_file(candidates, after_mtime=before_mtime)
+        if pdf_file and pdf_file.exists():
+            copied_pdf = raw_dir / "blackbird.report.pdf"
+            shutil.copy2(pdf_file, copied_pdf)
+            artifacts.append(
+                {"artifact_type": "pdf", "path": str(copied_pdf), "size_bytes": copied_pdf.stat().st_size}
+            )
+
+        instalab_pdf = raw_dir / "instalab.recon.report.pdf"
+        try:
+            create_instalab_recon_report(
+                output_path=instalab_pdf,
+                mode=mode,
+                query_value=query_value,
+                findings=findings,
+            )
+            artifacts.append(
+                {
+                    "artifact_type": "pdf_instalab",
+                    "path": str(instalab_pdf),
+                    "size_bytes": instalab_pdf.stat().st_size,
+                }
+            )
+        except Exception:
+            pass
 
     return {
         "tool": "blackbird",
@@ -276,6 +350,11 @@ def _run_phoneinfoga(query_value: str, options: dict, job_dir: Path, cfg: dict) 
 
     timeout_seconds = int(options.get("timeout_seconds") or cfg.get("recon_timeout_seconds") or 240)
     startup_timeout = min(30, max(5, timeout_seconds // 4))
+    cancel_event = options.get("_cancel_event")
+    on_process_start = options.get("_on_process_start")
+    api_number = _phoneinfoga_api_number(query_value)
+    if not api_number:
+        raise ReconExecutionError("phone number normalization failed for PhoneInfoga")
     port = _find_free_port()
     cmd = [*base_cmd, "serve", "--no-client", "--port", str(port)]
 
@@ -284,16 +363,25 @@ def _run_phoneinfoga(query_value: str, options: dict, job_dir: Path, cfg: dict) 
 
     with open(stdout_path, "w", encoding="utf-8") as out_fh, open(stderr_path, "w", encoding="utf-8") as err_fh:
         proc = subprocess.Popen(cmd, stdout=out_fh, stderr=err_fh, text=True)
+        if callable(on_process_start):
+            try:
+                on_process_start(proc)
+            except Exception:
+                pass
         base_url = f"http://127.0.0.1:{port}"
         try:
             _wait_for_phoneinfoga(base_url, startup_timeout)
+            if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                raise ReconExecutionError("cancelled by user")
 
             number_info = _http_json(
                 f"{base_url}/api/v2/numbers",
                 method="POST",
-                body={"number": query_value},
+                body={"number": api_number},
                 timeout=20,
             )
+            if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                raise ReconExecutionError("cancelled by user")
             scanners_payload = _http_json(f"{base_url}/api/v2/scanners", timeout=20)
             scanners = [s.get("name") for s in scanners_payload.get("scanners", []) if isinstance(s, dict) and s.get("name")]
             requested = options.get("scanners")
@@ -303,11 +391,13 @@ def _run_phoneinfoga(query_value: str, options: dict, job_dir: Path, cfg: dict) 
 
             scanner_results = []
             for scanner in scanners:
+                if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+                    raise ReconExecutionError("cancelled by user")
                 try:
                     result = _http_json(
                         f"{base_url}/api/v2/scanners/{quote(scanner)}/run",
                         method="POST",
-                        body={"number": query_value, "options": {}},
+                        body={"number": api_number, "options": {}},
                         timeout=30,
                     )
                     scanner_results.append({"scanner": scanner, "result": result.get("result"), "error": None})
