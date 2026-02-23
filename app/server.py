@@ -31,7 +31,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from flask import Flask, jsonify, request, send_from_directory, redirect
+from flask import Flask, Response, jsonify, request, send_from_directory, redirect
 
 from tracker_db import (
     backfill_relationship_events,
@@ -58,6 +58,19 @@ from login_store import (
     set_totp_seed,
     upsert_login,
 )
+from recon_store import (
+    create_recon_job,
+    create_recon_query,
+    finalize_recon_job,
+    get_recon_job,
+    init_recon_tables,
+    list_recon_artifacts,
+    list_recon_findings,
+    list_recon_jobs,
+    mark_recon_job_running,
+)
+from recon_worker import ReconExecutionError, run_recon_scan
+from validation import ValidationError, sanitize_sql_limit
 
 # Ensure consistent HOME for session/cache files
 os.environ.setdefault("HOME", "/home/stremio")
@@ -274,6 +287,15 @@ CONFIG_DEFAULTS = {
     "monitor_threshold_delta": int(os.getenv("MONITOR_THRESHOLD_DELTA", "4")),
     "monitor_min_gap_minutes": int(os.getenv("MONITOR_MIN_GAP_MINUTES", "180")),
     "monitor_login_username": os.getenv("MONITOR_LOGIN_USERNAME", ""),
+    "recon_enabled": os.getenv("RECON_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+    "recon_max_concurrency": int(os.getenv("RECON_MAX_CONCURRENCY", "2")),
+    "recon_timeout_seconds": int(os.getenv("RECON_TIMEOUT_SECONDS", "240")),
+    "recon_blackbird_ai_enabled": os.getenv("RECON_BLACKBIRD_AI_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+    "recon_blackbird_no_nsfw": os.getenv("RECON_BLACKBIRD_NO_NSFW", "true").lower() in {"1", "true", "yes", "on"},
+    "recon_blackbird_cmd": os.getenv("RECON_BLACKBIRD_CMD", "python /opt/blackbird/blackbird.py"),
+    "recon_blackbird_results_dir": os.getenv("RECON_BLACKBIRD_RESULTS_DIR", "/opt/blackbird/results"),
+    "recon_phoneinfoga_enabled": os.getenv("RECON_PHONEINFOGA_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+    "recon_phoneinfoga_cmd": os.getenv("RECON_PHONEINFOGA_CMD", "/usr/local/bin/phoneinfoga"),
 }
 CONFIG_SCHEMA = {
     "run_stall_seconds": {"type": "int", "min": 60, "max": 21600},
@@ -316,6 +338,15 @@ CONFIG_SCHEMA = {
     "monitor_threshold_delta": {"type": "int", "min": 1, "max": 200},
     "monitor_min_gap_minutes": {"type": "int", "min": 60, "max": 1440},
     "monitor_login_username": {"type": "str"},
+    "recon_enabled": {"type": "bool"},
+    "recon_max_concurrency": {"type": "int", "min": 1, "max": 8},
+    "recon_timeout_seconds": {"type": "int", "min": 15, "max": 1800},
+    "recon_blackbird_ai_enabled": {"type": "bool"},
+    "recon_blackbird_no_nsfw": {"type": "bool"},
+    "recon_blackbird_cmd": {"type": "str"},
+    "recon_blackbird_results_dir": {"type": "str"},
+    "recon_phoneinfoga_enabled": {"type": "bool"},
+    "recon_phoneinfoga_cmd": {"type": "str"},
 }
 SENSITIVE_CONFIG_KEYS = {"proxy_password"}
 CONFIG_CACHE = {"data": {}, "ts": 0.0}
@@ -881,6 +912,28 @@ def _health_check_unfollow():
     return {"status": status, "details": job}
 
 
+def _health_check_recon():
+    cfg = _get_config()
+    enabled = _parse_bool(cfg.get("recon_enabled", True))
+    blackbird_cmd = str(cfg.get("recon_blackbird_cmd") or "").strip()
+    phoneinfoga_cmd = str(cfg.get("recon_phoneinfoga_cmd") or "").strip()
+    blackbird_exec = shlex.split(blackbird_cmd)[0] if blackbird_cmd else ""
+    phoneinfoga_exec = shlex.split(phoneinfoga_cmd)[0] if phoneinfoga_cmd else ""
+    running = _recon_running_count()
+    max_concurrency = int(cfg.get("recon_max_concurrency", 2) or 2)
+    details = {
+        "enabled": enabled,
+        "running_jobs": running,
+        "max_concurrency": max_concurrency,
+        "blackbird_executable": bool(shutil.which(blackbird_exec)) if blackbird_exec else False,
+        "phoneinfoga_executable": bool(shutil.which(phoneinfoga_exec)) if phoneinfoga_exec else False,
+    }
+    status = "ok"
+    if not enabled or not details["blackbird_executable"]:
+        status = "degraded"
+    return {"status": status, "details": details}
+
+
 def _init_config_table():
     conn = _get_db()
     try:
@@ -1175,6 +1228,15 @@ def _init_run_tables():
     try:
         _init_run_db(conn)
         backfill_relationship_events(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _init_recon_tables():
+    conn = _get_db()
+    try:
+        init_recon_tables(conn)
         conn.commit()
     finally:
         conn.close()
@@ -2378,6 +2440,9 @@ RUN_LOCKS = {}
 RUN_LOCKS_GUARD = threading.Lock()
 ACTIVE_JOBS = {}
 LAST_JOB_BY_LOGIN = {}
+RECON_FUTURES = {}
+RECON_META = {}
+RECON_LOCK = threading.Lock()
 DELETED_RUNS = {}
 CANCEL_REQUESTS = set()
 SCHEMA_HAS_INTERVAL_MINUTES = False
@@ -2482,10 +2547,148 @@ def _release_run_slot(login_username: str):
         lock.release()
 
 
+def _recon_running_count() -> int:
+    count = 0
+    for jid, meta in list(RECON_META.items()):
+        fut = RECON_FUTURES.get(jid)
+        if fut and not fut.done() and meta.get("state") in {"queued", "running"}:
+            count += 1
+    return count
+
+
+def _queue_recon_scan(mode: str, query_value: str, *, requested_by: str | None = None, options: dict | None = None):
+    cfg = _get_config()
+    if not _parse_bool(cfg.get("recon_enabled", True)):
+        raise RuntimeError("recon module disabled")
+    max_concurrency = int(cfg.get("recon_max_concurrency", 2) or 2)
+    running = _recon_running_count()
+    if running >= max_concurrency:
+        raise RuntimeError("recon queue at capacity")
+
+    options = options or {}
+    job_id = uuid4().hex
+    source_tool = "phoneinfoga" if str(mode).strip().lower() == "phone" else "blackbird"
+
+    conn = _get_db()
+    try:
+        recon_query_id = create_recon_query(
+            conn,
+            mode=str(mode).strip().lower(),
+            query_value=(query_value or "").strip(),
+            requested_by=requested_by,
+            source_tool=source_tool,
+        )
+        create_recon_job(
+            conn,
+            job_id=job_id,
+            recon_query_id=recon_query_id,
+            status="queued",
+            command_fingerprint=None,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    RECON_META[job_id] = {
+        "job_id": job_id,
+        "state": "queued",
+        "mode": mode,
+        "query_value": query_value,
+        "requested_by": requested_by,
+        "created_at": datetime.now(LOCAL_TZ).isoformat(),
+        "error": None,
+    }
+
+    def _runner():
+        started = time.time()
+        RECON_META[job_id]["state"] = "running"
+        conn = _get_db()
+        try:
+            mark_recon_job_running(conn, job_id=job_id)
+            conn.commit()
+        finally:
+            conn.close()
+
+        job_dir = JOB_TMP_DIR / f"recon_{job_id}"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            payload = run_recon_scan(
+                mode=mode,
+                query_value=query_value,
+                options=options,
+                job_dir=job_dir,
+                cfg=cfg,
+            )
+            duration = int(payload.get("duration_seconds") or round(time.time() - started))
+            conn = _get_db()
+            try:
+                finalize_recon_job(
+                    conn,
+                    job_id=job_id,
+                    status="success",
+                    duration_seconds=duration,
+                    raw_output_path=payload.get("raw_output_path"),
+                    error_message=None,
+                    findings=payload.get("findings") or [],
+                    artifacts=payload.get("artifacts") or [],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            RECON_META[job_id]["state"] = "done"
+            RECON_META[job_id]["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
+            RECON_META[job_id]["result"] = payload
+            return payload
+        except (ValidationError, ReconExecutionError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            conn = _get_db()
+            try:
+                finalize_recon_job(
+                    conn,
+                    job_id=job_id,
+                    status="error",
+                    duration_seconds=int(round(time.time() - started)),
+                    raw_output_path=None,
+                    error_message=str(exc),
+                    findings=[],
+                    artifacts=[],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            RECON_META[job_id]["state"] = "error"
+            RECON_META[job_id]["error"] = str(exc)
+            RECON_META[job_id]["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
+            return {"status": "error", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            conn = _get_db()
+            try:
+                finalize_recon_job(
+                    conn,
+                    job_id=job_id,
+                    status="error",
+                    duration_seconds=int(round(time.time() - started)),
+                    raw_output_path=None,
+                    error_message=str(exc),
+                    findings=[],
+                    artifacts=[],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            RECON_META[job_id]["state"] = "error"
+            RECON_META[job_id]["error"] = str(exc)
+            RECON_META[job_id]["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
+            return {"status": "error", "error": str(exc)}
+
+    RECON_FUTURES[job_id] = executor.submit(_runner)
+    return job_id
+
+
 _init_schedule_table()
 _init_config_table()
 _init_unfollow_table()
 _init_run_tables()
+_init_recon_tables()
 _init_login_tables()
 _init_monitor_table()
 _restore_schedules()
@@ -2786,6 +2989,191 @@ def api_runs():
         return jsonify(rows)
     finally:
         conn.close()
+
+
+@app.route("/api/recon/run", methods=["POST"])
+def api_recon_run():
+    data = request.get_json(silent=True) or {}
+    mode = (data.get("mode") or "").strip().lower()
+    query_value = (data.get("query_value") or "").strip()
+    requested_by = (data.get("requested_by") or "").strip() or None
+    options = data.get("options") or {}
+    if not mode or not query_value:
+        return jsonify({"error": "mode and query_value are required"}), 400
+    if not isinstance(options, dict):
+        return jsonify({"error": "options must be an object"}), 400
+    try:
+        job_id = _queue_recon_scan(mode, query_value, requested_by=requested_by, options=options)
+        return jsonify({"job_id": job_id, "status": "queued"})
+    except (ValidationError, RuntimeError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/recon/run/<job_id>", methods=["GET"])
+def api_recon_run_status(job_id):
+    fut = RECON_FUTURES.get(job_id)
+    meta = RECON_META.get(job_id) or {}
+    conn = _get_db()
+    try:
+        job = get_recon_job(conn, job_id)
+        findings = list_recon_findings(conn, job_id=job_id) if job else []
+        artifacts = list_recon_artifacts(conn, job_id=job_id) if job else []
+    finally:
+        conn.close()
+    if not job:
+        return jsonify({"error": "recon job not found"}), 404
+    done = bool(fut.done()) if fut else job.get("status") in {"success", "error", "cancelled"}
+    return jsonify(
+        {
+            "done": done,
+            "meta": meta,
+            "job": job,
+            "findings": findings,
+            "artifacts": artifacts,
+        }
+    )
+
+
+@app.route("/api/recon/run/<job_id>/cancel", methods=["POST"])
+def api_recon_run_cancel(job_id):
+    fut = RECON_FUTURES.get(job_id)
+    meta = RECON_META.get(job_id)
+    if not fut or not meta:
+        return jsonify({"error": "recon job not found"}), 404
+    if fut.done():
+        return jsonify({"error": "recon job already finished"}), 409
+    cancelled = fut.cancel()
+    if not cancelled:
+        return jsonify({"error": "recon job already running and cannot be cancelled"}), 409
+    conn = _get_db()
+    try:
+        finalize_recon_job(
+            conn,
+            job_id=job_id,
+            status="cancelled",
+            duration_seconds=0,
+            raw_output_path=None,
+            error_message="cancelled by user",
+            findings=[],
+            artifacts=[],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    meta["state"] = "cancelled"
+    meta["error"] = "cancelled by user"
+    meta["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
+    return jsonify({"job_id": job_id, "cancelled": True})
+
+
+@app.route("/api/recon/history", methods=["GET"])
+def api_recon_history():
+    mode = (request.args.get("mode") or "").strip().lower() or None
+    q = (request.args.get("q") or "").strip() or None
+    status = (request.args.get("status") or "").strip().lower() or None
+    limit = sanitize_sql_limit(request.args.get("limit"), default=30, max_limit=200)
+    conn = _get_db()
+    try:
+        rows = list_recon_jobs(conn, mode=mode, q=q, status=status, limit=limit)
+        return jsonify(rows)
+    finally:
+        conn.close()
+
+
+@app.route("/api/recon/findings", methods=["GET"])
+def api_recon_findings():
+    job_id = (request.args.get("job_id") or "").strip()
+    if not job_id:
+        return jsonify({"error": "job_id is required"}), 400
+    conn = _get_db()
+    try:
+        job = get_recon_job(conn, job_id)
+        if not job:
+            return jsonify({"error": "recon job not found"}), 404
+        findings = list_recon_findings(conn, job_id=job_id)
+        artifacts = list_recon_artifacts(conn, job_id=job_id)
+        return jsonify({"job": job, "findings": findings, "artifacts": artifacts})
+    finally:
+        conn.close()
+
+
+@app.route("/api/recon/export/<job_id>", methods=["GET"])
+def api_recon_export(job_id):
+    export_format = (request.args.get("format") or "json").strip().lower()
+    if export_format not in {"json", "csv"}:
+        return jsonify({"error": "format must be json or csv"}), 400
+    conn = _get_db()
+    try:
+        job = get_recon_job(conn, job_id)
+        if not job:
+            return jsonify({"error": "recon job not found"}), 404
+        findings = list_recon_findings(conn, job_id=job_id)
+    finally:
+        conn.close()
+
+    filename_base = f"recon_{job_id}"
+    if export_format == "json":
+        payload = {
+            "job": job,
+            "findings": findings,
+        }
+        body = json.dumps(payload, ensure_ascii=False, indent=2)
+        return Response(
+            body,
+            mimetype="application/json",
+            headers={"Content-Disposition": f'attachment; filename=\"{filename_base}.json\"'},
+        )
+
+    lines = ["platform,url,category,tool_status,confidence_tier"]
+    for f in findings:
+        row = [
+            str(f.get("platform") or "").replace(",", " "),
+            str(f.get("url") or "").replace(",", " "),
+            str(f.get("category") or "").replace(",", " "),
+            str(f.get("tool_status") or "").replace(",", " "),
+            str(f.get("confidence_tier") or "").replace(",", " "),
+        ]
+        lines.append(",".join(row))
+    return Response(
+        "\n".join(lines) + "\n",
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename=\"{filename_base}.csv\"'},
+    )
+
+
+@app.route("/api/recon/health", methods=["GET"])
+def api_recon_health():
+    cfg = _get_config()
+    blackbird_cmd = str(cfg.get("recon_blackbird_cmd") or "").strip()
+    phoneinfoga_cmd = str(cfg.get("recon_phoneinfoga_cmd") or "").strip()
+    blackbird_exec = shlex.split(blackbird_cmd)[0] if blackbird_cmd else ""
+    phoneinfoga_exec = shlex.split(phoneinfoga_cmd)[0] if phoneinfoga_cmd else ""
+
+    payload = {
+        "status": "ok",
+        "enabled": bool(cfg.get("recon_enabled", True)),
+        "queue": {
+            "running": _recon_running_count(),
+            "max_concurrency": int(cfg.get("recon_max_concurrency", 2) or 2),
+        },
+        "tools": {
+            "blackbird": {
+                "command": blackbird_cmd,
+                "executable_exists": bool(shutil.which(blackbird_exec)) if blackbird_exec else False,
+            },
+            "phoneinfoga": {
+                "command": phoneinfoga_cmd,
+                "executable_exists": bool(shutil.which(phoneinfoga_exec)) if phoneinfoga_exec else False,
+            },
+        },
+    }
+    if not payload["enabled"]:
+        payload["status"] = "degraded"
+    elif not payload["tools"]["blackbird"]["executable_exists"]:
+        payload["status"] = "degraded"
+    return jsonify(payload)
 
 
 @app.route("/api/import/osintgraph", methods=["POST"])
@@ -3706,6 +4094,7 @@ def api_health_detail():
         "scraper": _health_check_scraper(),
         "runs": _health_check_runs(),
         "unfollow": _health_check_unfollow(),
+        "recon": _health_check_recon(),
     }
     status = _merge_health_status(checks)
     return jsonify({"status": status, "checks": checks})
