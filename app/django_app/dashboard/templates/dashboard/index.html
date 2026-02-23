@@ -1132,6 +1132,7 @@
                   <option value="true">Enabled</option>
                   <option value="false">Disabled</option>
                 </select>
+                <div class="config-help">Master switch for Recon Lab API actions. Disable to block new recon jobs.</div>
               </div>
               <div>
                 <label for="cfg-recon-phoneinfoga-enabled">Phone mode (PhoneInfoga)</label>
@@ -1139,6 +1140,7 @@
                   <option value="true">Enabled</option>
                   <option value="false">Disabled</option>
                 </select>
+                <div class="config-help">Allows phone-number recon scans. Username/email scans still use Blackbird.</div>
               </div>
               <div>
                 <label for="cfg-recon-ai-enabled">Blackbird AI</label>
@@ -1146,6 +1148,7 @@
                   <option value="false">Disabled</option>
                   <option value="true">Enabled</option>
                 </select>
+                <div class="config-help">Passes Blackbird --ai on eligible runs. Requires Blackbird AI key setup.</div>
               </div>
               <div>
                 <label for="cfg-recon-no-nsfw">Hide NSFW sites</label>
@@ -1153,14 +1156,17 @@
                   <option value="true">Enabled</option>
                   <option value="false">Disabled</option>
                 </select>
+                <div class="config-help">When enabled, Blackbird excludes NSFW sources from result matching.</div>
               </div>
               <div>
                 <label for="cfg-recon-max-concurrency">Max concurrent jobs</label>
                 <input id="cfg-recon-max-concurrency" type="number" min="1" max="8">
+                <div class="config-help">Queue limit for active recon workers. Higher values increase CPU/network load.</div>
               </div>
               <div>
                 <label for="cfg-recon-timeout-seconds">Job timeout (sec)</label>
                 <input id="cfg-recon-timeout-seconds" type="number" min="15" max="1800">
+                <div class="config-help">Hard timeout applied to each tool invocation before job is marked as error.</div>
               </div>
             </div>
           </div>
