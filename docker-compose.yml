@@ -17,7 +17,7 @@ services:
       DD_ENV: homelab
       DD_VERSION: "1"
       DD_TRACE_ENABLED: "true"
-      DD_DYNAMIC_INSTRUMENTATION_ENABLED: "true"
+      DD_DYNAMIC_INSTRUMENTATION_ENABLED: "false"
       DD_TRACE_EXCLUDED_URLS: "/api/health,/api/health/detail"
       DD_EXCEPTION_REPLAY_ENABLED: "true"
       DD_LOGS_INJECTION: "true"
