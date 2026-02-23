@@ -2959,6 +2959,42 @@
         showToast('Recon load failed: ' + e.message, 'bad');
       }
     }
+    async function cancelReconJob(jobId) {
+      if (!jobId) return;
+      try {
+        await fetchJSON(`/recon/run/${encodeURIComponent(jobId)}/cancel`, {method: 'POST'});
+        showToast('Recon job cancelled', 'warn');
+        await loadReconHistory();
+        if (reconCurrentJobId === jobId) {
+          await loadReconJob(jobId);
+        }
+      } catch (e) {
+        showToast('Cancel failed: ' + e.message, 'bad');
+      }
+    }
+    async function deleteReconJob(jobId) {
+      if (!jobId) return;
+      if (!window.confirm(`Delete recon job ${jobId}? This removes findings, artifacts, and local job files.`)) {
+        return;
+      }
+      try {
+        await fetchJSON(`/recon/run/${encodeURIComponent(jobId)}`, {method: 'DELETE'});
+        if (reconCurrentJobId === jobId) {
+          reconCurrentJobId = '';
+          const meta = document.getElementById('recon-result-meta');
+          if (meta) meta.textContent = 'No scan selected.';
+          renderReconFindings([]);
+          const btnJson = document.getElementById('recon-export-json');
+          const btnCsv = document.getElementById('recon-export-csv');
+          if (btnJson) btnJson.disabled = true;
+          if (btnCsv) btnCsv.disabled = true;
+        }
+        showToast('Recon job deleted', 'good');
+        await loadReconHistory();
+      } catch (e) {
+        showToast('Delete failed: ' + e.message, 'bad');
+      }
+    }
     function renderReconHistory(rows) {
       const body = document.getElementById('recon-history-body');
       if (!body) return;
@@ -2973,11 +3009,22 @@
           <td>${r.query_value || '—'}</td>
           <td>${r.status || '—'}</td>
           <td>${r.findings_count ?? 0}</td>
-          <td><button class="secondary" data-recon-open="${r.id}">Open</button></td>
+          <td>
+            <button class="secondary" data-recon-open="${r.id}">Open</button>
+            ${['queued', 'running'].includes(String(r.status || '').toLowerCase())
+              ? `<button class="secondary" data-recon-cancel="${r.id}">Cancel</button>`
+              : `<button class="secondary" data-recon-delete="${r.id}">Delete</button>`}
+          </td>
         </tr>
       `).join('');
       body.querySelectorAll('button[data-recon-open]').forEach(btn => {
         btn.onclick = () => loadReconJob(btn.dataset.reconOpen);
+      });
+      body.querySelectorAll('button[data-recon-cancel]').forEach(btn => {
+        btn.onclick = () => cancelReconJob(btn.dataset.reconCancel);
+      });
+      body.querySelectorAll('button[data-recon-delete]').forEach(btn => {
+        btn.onclick = () => deleteReconJob(btn.dataset.reconDelete);
       });
     }
     async function loadReconHistory() {

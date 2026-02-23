@@ -198,6 +198,29 @@ def finalize_recon_job(
         )
 
 
+def delete_recon_job(conn, *, job_id: str) -> bool:
+    row = conn.execute("SELECT recon_query_id FROM recon_jobs WHERE id = ?", (job_id,)).fetchone()
+    if not row:
+        return False
+    recon_query_id = int(row[0])
+    conn.execute("DELETE FROM recon_findings WHERE recon_job_id = ?", (job_id,))
+    conn.execute("DELETE FROM recon_artifacts WHERE recon_job_id = ?", (job_id,))
+    conn.execute("DELETE FROM recon_jobs WHERE id = ?", (job_id,))
+    conn.execute(
+        """
+        DELETE FROM recon_queries
+        WHERE id = ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM recon_jobs
+              WHERE recon_query_id = ?
+          )
+        """,
+        (recon_query_id, recon_query_id),
+    )
+    return True
+
+
 def get_recon_job(conn, job_id: str) -> dict | None:
     row = conn.execute(
         """

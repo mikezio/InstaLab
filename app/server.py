@@ -62,6 +62,7 @@ from login_store import (
 from recon_store import (
     create_recon_job,
     create_recon_query,
+    delete_recon_job,
     finalize_recon_job,
     get_recon_job,
     init_recon_tables,
@@ -3035,6 +3036,32 @@ def api_recon_run_status(job_id):
             "artifacts": artifacts,
         }
     )
+
+
+@app.route("/api/recon/run/<job_id>", methods=["DELETE"])
+def api_recon_run_delete(job_id):
+    fut = RECON_FUTURES.get(job_id)
+    if fut and not fut.done():
+        return jsonify({"error": "cannot delete a running recon job; cancel first"}), 409
+
+    conn = _get_db()
+    deleted = False
+    try:
+        job = get_recon_job(conn, job_id)
+        if not job:
+            return jsonify({"error": "recon job not found"}), 404
+        if job.get("status") in {"queued", "running"}:
+            return jsonify({"error": "cannot delete a queued/running recon job; cancel first"}), 409
+        deleted = delete_recon_job(conn, job_id=job_id)
+        conn.commit()
+    finally:
+        conn.close()
+
+    job_dir = JOB_TMP_DIR / f"recon_{job_id}"
+    shutil.rmtree(job_dir, ignore_errors=True)
+    RECON_FUTURES.pop(job_id, None)
+    RECON_META.pop(job_id, None)
+    return jsonify({"job_id": job_id, "deleted": bool(deleted)})
 
 
 @app.route("/api/recon/run/<job_id>/cancel", methods=["POST"])
