@@ -736,6 +736,7 @@
                 <div class="config-card lg:col-span-2">
                   <h4>Latest result</h4>
                   <div id="recon-result-meta" class="muted">No scan selected.</div>
+                  <div id="recon-result-insights" class="muted" style="margin-top:4px;"></div>
                   <div class="chip-row" id="recon-result-chips"></div>
                   <div class="row" style="margin-top: 10px; gap: 8px;">
                     <button class="secondary" id="recon-export-json" disabled>Export JSON</button>
@@ -750,10 +751,11 @@
                           <th>Confidence</th>
                           <th>Status</th>
                           <th>URL</th>
+                          <th>Details</th>
                         </tr>
                       </thead>
                       <tbody id="recon-findings-body">
-                        <tr><td colspan="4" class="muted">No findings yet.</td></tr>
+                        <tr><td colspan="5" class="muted">No findings yet.</td></tr>
                       </tbody>
                     </table>
                   </div>
@@ -3027,6 +3029,50 @@
       if (m > 0) return `${m}m ${s}s`;
       return `${s}s`;
     }
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+    function reconDetailText(finding) {
+      const category = String(finding?.category || '').toLowerCase();
+      const evidence = finding?.evidence_json && typeof finding.evidence_json === 'object'
+        ? finding.evidence_json
+        : {};
+      if (category === 'telephony') {
+        const parts = [];
+        if (evidence.country) parts.push(`Country: ${evidence.country}`);
+        if (evidence.countryCode) parts.push(`Country Code: +${evidence.countryCode}`);
+        if (evidence.carrier) parts.push(`Carrier: ${evidence.carrier}`);
+        if (evidence.carrier_id) parts.push(`Carrier ID: ${evidence.carrier_id}`);
+        if (evidence.caller_id || evidence.caller_name) parts.push(`Caller ID: ${evidence.caller_id || evidence.caller_name}`);
+        if (evidence.e164) parts.push(`E.164: ${evidence.e164}`);
+        if (evidence.local) parts.push(`Local: ${evidence.local}`);
+        if (evidence.international) parts.push(`Intl: ${evidence.international}`);
+        if (typeof evidence.valid === 'boolean') parts.push(`Valid: ${evidence.valid ? 'yes' : 'no'}`);
+        return parts.join(' · ');
+      }
+      if (category === 'phone_osint') {
+        if (evidence.error) return `Scanner error: ${evidence.error}`;
+        const result = evidence.result && typeof evidence.result === 'object' ? evidence.result : {};
+        const parts = [];
+        if (result.country || result.country_name) parts.push(`Country: ${result.country || result.country_name}`);
+        if (result.country_code) parts.push(`Country Code: +${result.country_code}`);
+        if (result.carrier || result.operator) parts.push(`Carrier: ${result.carrier || result.operator}`);
+        if (result.carrier_id) parts.push(`Carrier ID: ${result.carrier_id}`);
+        if (result.caller_id || result.caller_name) parts.push(`Caller ID: ${result.caller_id || result.caller_name}`);
+        if (result.line_type || result.type) parts.push(`Type: ${result.line_type || result.type}`);
+        if (result.e164) parts.push(`E.164: ${result.e164}`);
+        if (!parts.length && Object.keys(result).length) {
+          parts.push(`Fields: ${Object.keys(result).slice(0, 4).join(', ')}`);
+        }
+        return parts.join(' · ');
+      }
+      return '';
+    }
     function renderReconQueue(data) {
       const meta = document.getElementById('recon-queue-meta');
       const body = document.getElementById('recon-queue-body');
@@ -3115,10 +3161,12 @@
     function renderReconFindings(findings) {
       const body = document.getElementById('recon-findings-body');
       const chips = document.getElementById('recon-result-chips');
+      const insights = document.getElementById('recon-result-insights');
       if (!body || !chips) return;
       if (!Array.isArray(findings) || !findings.length) {
-        body.innerHTML = '<tr><td colspan="4" class="muted">No findings yet.</td></tr>';
+        body.innerHTML = '<tr><td colspan="5" class="muted">No findings yet.</td></tr>';
         chips.innerHTML = '';
+        if (insights) insights.textContent = '';
         return;
       }
       const high = findings.filter(f => (f.confidence_tier || '').toLowerCase() === 'high').length;
@@ -3129,16 +3177,24 @@
         <span class="chip warn">Medium ${medium}</span>
         <span class="chip neutral">Low ${low}</span>
       `;
+      const phoneInsight = findings.find(f => String(f.category || '').toLowerCase() === 'telephony');
+      if (insights) {
+        const details = phoneInsight ? reconDetailText(phoneInsight) : '';
+        insights.textContent = details ? `Phone summary: ${details}` : '';
+      }
       body.innerHTML = findings.map(f => {
         const tone = reconToneForConfidence(f.confidence_tier);
         const url = f.url ? `<a href="${f.url}" target="_blank" rel="noopener">${f.url}</a>` : '—';
+        const detailText = reconDetailText(f);
+        const detailsCell = detailText ? `<span class="muted">${escapeHtml(detailText)}</span>` : '—';
         return `
           <tr>
-            <td>${f.platform || '—'}</td>
-            <td><span class="chip ${tone}">${f.confidence_tier || 'low'}</span></td>
-            <td>${f.tool_status || '—'}</td>
+            <td>${escapeHtml(f.platform || '—')}</td>
+            <td><span class="chip ${tone}">${escapeHtml(f.confidence_tier || 'low')}</span></td>
+            <td>${escapeHtml(f.tool_status || '—')}</td>
             <td>${url}</td>
-          </tr>
+            <td>${detailsCell}</td>
+            </tr>
         `;
       }).join('');
     }
