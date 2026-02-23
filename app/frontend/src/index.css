@@ -102,6 +102,11 @@ input {
   margin-top: 1rem;
 }
 
+.card-grid.compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 0.6rem;
+}
+
 .split-grid {
   display: grid;
   gap: 0.9rem;
@@ -287,7 +292,7 @@ td {
     background: #0f172a;
     border-top: 1px solid rgba(203, 213, 225, 0.2);
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(6, 1fr);
     z-index: 30;
   }
 

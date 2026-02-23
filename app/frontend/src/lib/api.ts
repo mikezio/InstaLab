@@ -9,6 +9,18 @@ import {
   type ReconHistoryItem,
   type ReconJobResult,
   type ReconQueue,
+  type TargetSummaryItem,
+  type ScheduleItem,
+  type LoginItem,
+  type ConfigPayload,
+  type RelationshipEvent,
+  type RelationshipHistoryRow,
+  targetsSummarySchema,
+  scheduleSchema,
+  loginSchema,
+  configSchema,
+  relationshipEventSchema,
+  relationshipHistorySchema,
 } from "./schemas";
 
 const API_BASE = "/api";
@@ -87,4 +99,39 @@ export async function deleteRecon(jobId: string): Promise<void> {
   await fetchJson(`/recon/run/${encodeURIComponent(jobId)}`, {
     method: "DELETE",
   });
+}
+
+export async function getTargetsSummary(): Promise<TargetSummaryItem[]> {
+  const data = await fetchJson<unknown>("/targets_summary");
+  return targetsSummarySchema.parse(data);
+}
+
+export async function getSchedules(): Promise<ScheduleItem[]> {
+  const data = await fetchJson<unknown>("/schedules");
+  return scheduleSchema.parse(data);
+}
+
+export async function getLogins(): Promise<LoginItem[]> {
+  const data = await fetchJson<unknown>("/logins");
+  return loginSchema.parse(data);
+}
+
+export async function getConfig(): Promise<ConfigPayload> {
+  const data = await fetchJson<unknown>("/config");
+  return configSchema.parse(data);
+}
+
+export async function getRelationshipEvents(target: string): Promise<RelationshipEvent[]> {
+  const data = await fetchJson<unknown>(`/relationship_events?target=${encodeURIComponent(target)}&limit=200`);
+  return relationshipEventSchema.parse(data);
+}
+
+export async function getRelationshipHistory(
+  target: string,
+  relationType: "followers" | "following"
+): Promise<RelationshipHistoryRow[]> {
+  const data = await fetchJson<unknown>(
+    `/relationship_history?target=${encodeURIComponent(target)}&relation_type=${encodeURIComponent(relationType)}&limit=100`
+  );
+  return relationshipHistorySchema.parse(data);
 }
