@@ -713,6 +713,7 @@
                   </select>
                   <label for="recon-query" style="margin-top:8px;">Query</label>
                   <input id="recon-query" type="text" placeholder="@username / user@example.com / +15551234567">
+                  <div class="config-help" id="recon-mode-help">Username and email use Blackbird. Phone uses PhoneInfoga.</div>
                   <div class="row" style="margin-top: 10px; gap: 10px; flex-wrap: wrap;">
                     <label style="display:flex; align-items:center; gap:6px; margin:0;">
                       <input id="recon-opt-ai" type="checkbox">
@@ -743,6 +744,7 @@
                     <button class="secondary" id="recon-export-csv" disabled>Export CSV</button>
                     <button class="secondary" id="recon-download-report" disabled>Download Report PDF</button>
                   </div>
+                  <div id="recon-phone-profile" class="config-help" style="margin-top:10px; display:none;"></div>
                   <div class="list-wrap" style="margin-top: 12px;">
                     <table>
                       <thead>
@@ -3073,6 +3075,71 @@
       }
       return '';
     }
+    function firstNonEmpty(values) {
+      for (const value of values || []) {
+        if (value === null || value === undefined) continue;
+        const text = String(value).trim();
+        if (text) return text;
+      }
+      return '';
+    }
+    function derivePhoneProfile(findings) {
+      const telephony = (findings || []).find(f => String(f?.category || '').toLowerCase() === 'telephony');
+      const scannerResults = (findings || [])
+        .filter(f => String(f?.category || '').toLowerCase() === 'phone_osint')
+        .map(f => (f?.evidence_json && typeof f.evidence_json === 'object' ? f.evidence_json.result : null))
+        .filter(v => v && typeof v === 'object');
+      const t = telephony?.evidence_json && typeof telephony.evidence_json === 'object' ? telephony.evidence_json : {};
+      const profile = {
+        callerId: firstNonEmpty([t.caller_id, t.caller_name]),
+        carrier: firstNonEmpty([t.carrier, ...scannerResults.map(r => r.carrier || r.operator)]),
+        carrierId: firstNonEmpty([t.carrier_id, ...scannerResults.map(r => r.carrier_id)]),
+        lineType: firstNonEmpty([t.line_type, ...scannerResults.map(r => r.line_type || r.type)]),
+        country: firstNonEmpty([t.country, ...scannerResults.map(r => r.country || r.country_name)]),
+        countryCode: firstNonEmpty([t.countryCode, ...scannerResults.map(r => r.country_code)]),
+        e164: firstNonEmpty([t.e164, ...scannerResults.map(r => r.e164)]),
+        local: firstNonEmpty([t.local, ...scannerResults.map(r => r.local)]),
+        valid: typeof t.valid === 'boolean' ? t.valid : null,
+      };
+      const riskReasons = [];
+      const lineTypeLc = String(profile.lineType || '').toLowerCase();
+      if (profile.valid === false) riskReasons.push('number flagged invalid by telephony parser');
+      if (lineTypeLc.includes('voip')) riskReasons.push('line type appears to be VoIP');
+      if (lineTypeLc.includes('virtual')) riskReasons.push('line type appears virtual');
+      if (!profile.carrier) riskReasons.push('carrier unresolved from available sources');
+      let score = 90;
+      if (profile.valid === false) score -= 45;
+      if (lineTypeLc.includes('voip') || lineTypeLc.includes('virtual')) score -= 20;
+      if (!profile.carrier) score -= 15;
+      if (!profile.country) score -= 10;
+      score = Math.max(0, Math.min(100, score));
+      const risk = score >= 75 ? 'Low' : (score >= 45 ? 'Medium' : 'High');
+      return {profile, risk, score, riskReasons, hasData: Boolean(telephony || scannerResults.length)};
+    }
+    function renderReconPhoneProfile(findings) {
+      const el = document.getElementById('recon-phone-profile');
+      if (!el) return;
+      const summary = derivePhoneProfile(findings || []);
+      if (!summary.hasData) {
+        el.style.display = 'none';
+        el.innerHTML = '';
+        return;
+      }
+      const cc = summary.profile.countryCode ? `+${summary.profile.countryCode}` : '—';
+      const reasons = summary.riskReasons.length ? summary.riskReasons.join(' | ') : 'no immediate high-risk indicators from current sources';
+      el.style.display = 'block';
+      el.innerHTML = `
+        <strong>Caller Profile</strong><br>
+        Caller ID: ${escapeHtml(summary.profile.callerId || 'Not found')} ·
+        Carrier: ${escapeHtml(summary.profile.carrier || 'Unknown')} ·
+        Carrier ID: ${escapeHtml(summary.profile.carrierId || 'Unknown')} ·
+        Line Type: ${escapeHtml(summary.profile.lineType || 'Unknown')}<br>
+        Country: ${escapeHtml(summary.profile.country || 'Unknown')} (${escapeHtml(cc)}) ·
+        E.164: ${escapeHtml(summary.profile.e164 || 'Unknown')} ·
+        Local: ${escapeHtml(summary.profile.local || 'Unknown')}<br>
+        Risk: ${escapeHtml(summary.risk)} (${summary.score}/100 confidence) · Signals: ${escapeHtml(reasons)}
+      `;
+    }
     function renderReconQueue(data) {
       const meta = document.getElementById('recon-queue-meta');
       const body = document.getElementById('recon-queue-body');
@@ -3110,6 +3177,7 @@
       const mode = document.getElementById('recon-mode')?.value || 'username';
       const ai = document.getElementById('recon-opt-ai');
       const pdf = document.getElementById('recon-opt-pdf');
+      const modeHelp = document.getElementById('recon-mode-help');
       if (!ai || !pdf) return;
       const isBlackbirdMode = mode === 'username' || mode === 'email';
       ai.disabled = !isBlackbirdMode;
@@ -3117,6 +3185,15 @@
       if (!isBlackbirdMode) {
         ai.checked = false;
         pdf.checked = false;
+      }
+      if (modeHelp) {
+        if (mode === 'phone') {
+          modeHelp.textContent = 'Phone mode uses PhoneInfoga enrichment and does not generate PDF reports.';
+        } else if (mode === 'email') {
+          modeHelp.textContent = 'Email mode uses Blackbird discovery.';
+        } else {
+          modeHelp.textContent = 'Username mode uses Blackbird discovery.';
+        }
       }
     }
     async function loadReconHealth() {
@@ -3167,6 +3244,7 @@
         body.innerHTML = '<tr><td colspan="5" class="muted">No findings yet.</td></tr>';
         chips.innerHTML = '';
         if (insights) insights.textContent = '';
+        renderReconPhoneProfile([]);
         return;
       }
       const high = findings.filter(f => (f.confidence_tier || '').toLowerCase() === 'high').length;
@@ -3197,6 +3275,7 @@
             </tr>
         `;
       }).join('');
+      renderReconPhoneProfile(findings);
     }
     async function loadReconJob(jobId) {
       if (!jobId) return;
@@ -3214,8 +3293,10 @@
         const btnReport = document.getElementById('recon-download-report');
         if (btnJson) btnJson.disabled = false;
         if (btnCsv) btnCsv.disabled = false;
-        const hasPdf = Array.isArray(data.artifacts) && data.artifacts.some(a => String(a.artifact_type || '').toLowerCase() === 'pdf');
-        if (btnReport) btnReport.disabled = !hasPdf;
+        const isPhoneMode = String(job.mode || '').toLowerCase() === 'phone';
+        const hasPdf = Array.isArray(data.artifacts)
+          && data.artifacts.some(a => String(a.artifact_type || '').toLowerCase().startsWith('pdf'));
+        if (btnReport) btnReport.disabled = !hasPdf || isPhoneMode;
       } catch (e) {
         log('Recon load error: ' + e.message);
         showToast('Recon load failed: ' + e.message, 'bad');
@@ -3272,10 +3353,10 @@
           <td>${r.mode || '—'}</td>
           <td>${r.query_value || '—'}</td>
           <td>${r.status || '—'}</td>
-          <td>${r.findings_count ?? 0} ${Number(r.report_count || 0) > 0 ? '<span class="chip good">PDF</span>' : ''}</td>
+          <td>${r.findings_count ?? 0} ${(String(r.mode || '').toLowerCase() !== 'phone' && Number(r.report_count || 0) > 0) ? '<span class="chip good">PDF</span>' : ''}</td>
           <td>
             <button class="secondary" data-recon-open="${r.id}">Open</button>
-            ${Number(r.report_count || 0) > 0
+            ${(String(r.mode || '').toLowerCase() !== 'phone' && Number(r.report_count || 0) > 0)
               ? `<button class="secondary" data-recon-report="${r.id}">Report</button>`
               : ''}
             ${['queued', 'running'].includes(String(r.status || '').toLowerCase())
