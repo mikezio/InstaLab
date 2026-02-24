@@ -65,10 +65,19 @@ def validate_run_request(data: dict) -> dict:
     login = validate_username(data.get("login", ""), "login")
     
     scraper_backend = (data.get("scraper_backend") or "").strip().lower()
-    allowed_backends = {"private", "private_api", "private-api", "browser", "guided_browser", "playwright"}
+    backend_aliases = {
+        "instagrapi": "private",
+        "ingrapi": "private",
+        "private_api": "private",
+        "private-api": "private",
+        "guided_browser": "browser",
+        "playwright": "browser",
+    }
+    scraper_backend = backend_aliases.get(scraper_backend, scraper_backend)
+    allowed_backends = {"private", "browser"}
     if scraper_backend and scraper_backend not in allowed_backends:
         raise ValidationError(
-            "scraper_backend must be one of: private, browser"
+            "scraper_backend must be one of: instagrapi/private, browser"
         )
     
     return {

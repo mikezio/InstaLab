@@ -281,6 +281,8 @@ RUN_LOGIN_MODE_ALIASES = {
 
 SCRAPER_BACKEND_ALLOWED = {"private", "browser"}
 SCRAPER_BACKEND_ALIASES = {
+    "instagrapi": "private",
+    "ingrapi": "private",
     "private_api": "private",
     "private-api": "private",
     "osintgram": "private",

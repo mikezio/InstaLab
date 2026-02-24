@@ -1349,8 +1349,8 @@ function SettingsPage() {
                   <label key={key}>
                     {labelForKey(key)}
                     <select value={String(value)} onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}>
-                      <option value="browser">browser</option>
-                      <option value="private">private</option>
+                      <option value="browser">browser (web session)</option>
+                      <option value="private">instagrapi (private API)</option>
                     </select>
                   </label>
                 );
