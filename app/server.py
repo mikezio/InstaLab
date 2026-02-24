@@ -278,6 +278,15 @@ RUN_LOGIN_MODE_ALIASES = {
     "no-login": "anonymous",
 }
 
+SCRAPER_BACKEND_ALLOWED = {"private", "browser"}
+SCRAPER_BACKEND_ALIASES = {
+    "private_api": "private",
+    "private-api": "private",
+    "osintgram": "private",
+    "guided_browser": "browser",
+    "playwright": "browser",
+}
+
 
 def _normalize_run_login_mode(value: str | None) -> str:
     mode = str(value or "auto").strip().lower()
@@ -289,6 +298,18 @@ def _normalize_run_login_mode(value: str | None) -> str:
 
 def _is_anonymous_run_login_mode(value: str | None) -> bool:
     return _normalize_run_login_mode(value) == "anonymous"
+
+
+def _normalize_scraper_backend(value: str | None) -> str:
+    backend = str(value or "browser").strip().lower()
+    backend = SCRAPER_BACKEND_ALIASES.get(backend, backend)
+    if backend not in SCRAPER_BACKEND_ALLOWED:
+        return "browser"
+    return backend
+
+
+def _is_private_backend_name(value: str | None) -> bool:
+    return _normalize_scraper_backend(value) == "private"
 
 CONFIG_DEFAULTS = {
     "run_stall_seconds": int(os.getenv("RUN_STALL_SECONDS", "1200")),
@@ -313,6 +334,7 @@ CONFIG_DEFAULTS = {
     "run_trace_enabled": os.getenv("RUN_TRACE_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
     "run_profile_only": os.getenv("RUN_PROFILE_ONLY", "false").lower() in {"1", "true", "yes", "on"},
     "run_login_mode": _normalize_run_login_mode(os.getenv("RUN_LOGIN_MODE", "auto")),
+    "run_scraper_backend": _normalize_scraper_backend(os.getenv("INSTALAB_SCRAPER_BACKEND", "browser")),
     "private_device_settings_json": os.getenv("INSTALAB_PRIVATE_DEVICE_SETTINGS_JSON", ""),
     "private_user_agent": os.getenv("INSTALAB_PRIVATE_USER_AGENT", ""),
     "proxy_enabled": os.getenv("INSTALAB_PROXY_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
@@ -378,6 +400,7 @@ CONFIG_SCHEMA = {
     "run_trace_enabled": {"type": "bool"},
     "run_profile_only": {"type": "bool"},
     "run_login_mode": {"type": "str", "allowed": RUN_LOGIN_MODE_ALLOWED},
+    "run_scraper_backend": {"type": "str", "allowed": SCRAPER_BACKEND_ALLOWED},
     "private_device_settings_json": {"type": "str"},
     "private_user_agent": {"type": "str"},
     "proxy_enabled": {"type": "bool"},
@@ -901,7 +924,12 @@ def _health_check_sessions():
 
 
 def _health_check_scraper():
-    backend = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
+    backend = _normalize_scraper_backend(
+        _get_config_value(
+            "run_scraper_backend",
+            os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "browser",
+        )
+    )
     
     # Check cache first
     now = time.time()
@@ -912,16 +940,23 @@ def _health_check_scraper():
     
     details = {"backend": backend}
     status = "ok"
-    if backend in {"private", "private_api", "private-api", "osintgram"}:
+    if _is_private_backend_name(backend):
         try:
             import instagrapi  # noqa: F401
             details["private_api"] = "ok"
         except Exception as exc:  # noqa: BLE001
             status = "fail"
             details["private_api"] = f"error: {exc}"
+    elif backend == "browser":
+        try:
+            import playwright  # noqa: F401
+            details["browser"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            status = "fail"
+            details["browser"] = f"error: {exc}"
     else:
         status = "fail"
-        details["private_api"] = "backend disabled (set INSTALAB_SCRAPER_BACKEND=private)"
+        details["backend"] = f"unsupported backend: {backend}"
     
     result = {"status": status, "details": details}
     # Update cache
@@ -932,8 +967,13 @@ def _health_check_scraper():
 
 
 def _is_private_backend() -> bool:
-    backend = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
-    return backend in {"private", "private_api", "private-api", "osintgram"}
+    backend = _normalize_scraper_backend(
+        _get_config_value(
+            "run_scraper_backend",
+            os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "browser",
+        )
+    )
+    return _is_private_backend_name(backend)
 
 
 def _health_check_runs():
@@ -1092,6 +1132,8 @@ def _coerce_config_value(key, value, strict=False):
         if ctype == "str":
             if key == "run_login_mode":
                 sv = _normalize_run_login_mode(value)
+            elif key == "run_scraper_backend":
+                sv = _normalize_scraper_backend(value)
             else:
                 sv = str(value).strip()
             allowed = schema.get("allowed")
@@ -2295,8 +2337,10 @@ def _record_count_check(
 
 
 def _run_count_check(login_username, target_username):
+    scraper_backend = _normalize_scraper_backend(_get_config_value("run_scraper_backend", "browser"))
     login_mode = _normalize_run_login_mode(_get_config_value("run_login_mode", "auto"))
-    creds = _get_credentials(login_username, require_auth=not _is_anonymous_run_login_mode(login_mode))
+    require_private_auth = not _is_anonymous_run_login_mode(login_mode) and _is_private_backend_name(scraper_backend)
+    creds = _get_credentials(login_username, require_auth=require_private_auth)
     job_dir = JOB_TMP_DIR / f"count_{uuid4().hex}"
     job_dir.mkdir(parents=True, exist_ok=True)
     result_path = job_dir / "result.json"
@@ -2304,8 +2348,8 @@ def _run_count_check(login_username, target_username):
     err_path = job_dir / "worker.err"
 
     env = os.environ.copy()
-    env["INSTALAB_SCRAPER_BACKEND"] = "private"
-    env["SCRAPER_BACKEND"] = "private"
+    env["INSTALAB_SCRAPER_BACKEND"] = scraper_backend
+    env["SCRAPER_BACKEND"] = scraper_backend
     env["RUN_LOGIN_MODE"] = login_mode
     if creds.get("login_password"):
         env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
@@ -2735,8 +2779,10 @@ def _stream_worker_output(proc: subprocess.Popen, out_path: Path, err_path: Path
 
 def run_snapshot(login_username, target_username, job_id=None, two_factor_code=None, challenge_code=None):
     _ensure_job_tmp_dir()
+    scraper_backend = _normalize_scraper_backend(_get_config_value("run_scraper_backend", "browser"))
     login_mode = _normalize_run_login_mode(_get_config_value("run_login_mode", "auto"))
-    creds = _get_credentials(login_username, require_auth=not _is_anonymous_run_login_mode(login_mode))
+    require_private_auth = not _is_anonymous_run_login_mode(login_mode) and _is_private_backend_name(scraper_backend)
+    creds = _get_credentials(login_username, require_auth=require_private_auth)
     job = ACTIVE_JOBS.get(login_username)
     run_id = job_id or uuid4().hex
     job_dir = JOB_TMP_DIR / f"job_{run_id}"
@@ -2747,8 +2793,8 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     err_path = job_dir / "worker.err"
 
     env = os.environ.copy()
-    env["INSTALAB_SCRAPER_BACKEND"] = "private"
-    env["SCRAPER_BACKEND"] = "private"
+    env["INSTALAB_SCRAPER_BACKEND"] = scraper_backend
+    env["SCRAPER_BACKEND"] = scraper_backend
     env["RUN_LOGIN_MODE"] = login_mode
     if creds.get("login_password"):
         env["RUN_LOGIN_PASSWORD"] = creds["login_password"]

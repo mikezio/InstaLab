@@ -224,6 +224,7 @@ export const configValuesSchema = z.object({
   run_item_delay_min: z.number().optional(),
   run_item_delay_max: z.number().optional(),
   run_login_mode: z.string().optional(),
+  run_scraper_backend: z.string().optional(),
   run_trace_enabled: z.boolean().optional(),
   proxy_enabled: z.boolean().optional(),
   proxy_host: z.string().optional(),

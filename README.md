@@ -1,6 +1,6 @@
 # InstaLab
 
-InstaLab is an operations console for Instagram snapshot runs (followers/following), scheduling, run history, insights, and unfollow cleanup. It runs as a two-container stack: Flask API + Django UI. The backend uses Instagram’s private API via **instagrapi** with session caching in Postgres.
+InstaLab is an operations console for Instagram snapshot runs (followers/following), scheduling, run history, insights, and unfollow cleanup. It runs as a two-container stack: Flask API + Django UI. Collection supports two backends: **browser** (Playwright session, default) and **private** (`instagrapi`).
 
 ## What you get
 - Single‑pane UI for queueing runs, viewing history, and monitoring status.
@@ -43,9 +43,10 @@ If you already have Postgres running, set the `INSTALAB_DB_*` values in `.env` a
 - **Postgres only.** Set `INSTALAB_DB_TYPE=postgres`.
 - Default DB name/user: `instalab` (see `docker-compose.local-postgres.yml`).
 
-## Authentication flow (private API)
-- Logins are stored in Postgres `login_accounts` and encrypted at rest.
-- A first successful login caches session settings; subsequent runs reuse the session.
+## Authentication flow
+- Browser backend (default): run `/api/unfollow/init` once to create Playwright storage state at `INSTALAB_BROWSER_STORAGE_PATH`, then runs reuse that signed-in browser session.
+- Private backend (`instagrapi`): logins are stored in Postgres `login_accounts` and encrypted at rest.
+- For private backend, a first successful login caches session settings; subsequent runs reuse the session.
 - 2FA is supported via TOTP or SMS/email challenge codes.
 - Device profile settings are persisted to avoid “new device” loops.
 

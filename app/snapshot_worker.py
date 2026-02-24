@@ -11,10 +11,15 @@ from contextlib import contextmanager
 
 def _select_backend():
     name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
-    if name not in {"private", "private_api", "private-api", "osintgram"}:
-        raise RuntimeError("private API backend only; set INSTALAB_SCRAPER_BACKEND=private")
-    from private_api_tracker import has_session, snapshot_profile  # type: ignore
-    return has_session, snapshot_profile
+    if name in {"private", "private_api", "private-api", "osintgram"}:
+        from private_api_tracker import has_session, snapshot_profile  # type: ignore
+        return has_session, snapshot_profile
+    if name in {"browser", "guided_browser", "playwright"}:
+        from browser_tracker import has_session, snapshot_profile  # type: ignore
+        return has_session, snapshot_profile
+    raise RuntimeError(
+        "unsupported backend; set INSTALAB_SCRAPER_BACKEND=private or INSTALAB_SCRAPER_BACKEND=browser"
+    )
 
 
 def _write_json(path, payload):

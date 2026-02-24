@@ -1344,6 +1344,17 @@ function SettingsPage() {
                   </label>
                 );
               }
+              if (key === "run_scraper_backend") {
+                return (
+                  <label key={key}>
+                    {labelForKey(key)}
+                    <select value={String(value)} onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}>
+                      <option value="browser">browser</option>
+                      <option value="private">private</option>
+                    </select>
+                  </label>
+                );
+              }
               if (typeof value === "boolean") {
                 return (
                   <label key={key}>

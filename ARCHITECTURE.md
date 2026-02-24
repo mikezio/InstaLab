@@ -23,7 +23,7 @@ flowchart LR
   ui --> api[Flask API]
   api --> pg[(Postgres)]
   api --> worker[Snapshot/Count/Unfollow Workers]
-  worker --> ig[Instagram Private API]
+  worker --> ig[Instagram Web/App APIs]
   worker --> pg
   worker --> files[/data/instalab/job_runs/]
   ui <-- api
@@ -34,8 +34,8 @@ flowchart LR
 1. **Run request** – `POST /api/run` with `login_username` + `target_username`.
 2. **Locks** – per‑login and per‑target locks prevent overlapping jobs.
 3. **Worker spawn** – `snapshot_worker.py` starts with env‑based configuration.
-4. **Login/session** – instagrapi loads cached session settings (Postgres + file fallback) or performs login.
-5. **Fetch** – private API calls fetch profile, followers, and followees.
+4. **Login/session** – backend-specific auth is loaded (browser storage state or private API session settings).
+5. **Fetch** – selected backend fetches profile, followers, and followees.
 6. **Persist** – results written to Postgres (`runs`, `run_followers`, `run_followees`, history tables).
 7. **Artifacts** – `progress.json`, `result.json`, `worker.out`, `worker.err`, `trace.jsonl` saved in job dir.
 
@@ -47,7 +47,7 @@ sequenceDiagram
   participant API as Flask API
   participant W as snapshot_worker.py
   participant P as Postgres
-  participant IG as Instagram Private API
+  participant IG as Instagram
 
   UI->>API: POST /api/run (login_username, target_username)
   API->>API: Acquire login + target locks
@@ -94,9 +94,18 @@ Job artifacts:
 - Emits progress phases: `login → totals → followers → following`.
 - Writes `progress.json` and `result.json`.
 - Streams stdout/stderr to job files.
-- Uses **instagrapi** via `private_api_tracker.snapshot_profile()`.
+- Selects backend from `INSTALAB_SCRAPER_BACKEND` / `run_scraper_backend`:
+  - `browser` -> `browser_tracker.snapshot_profile()`
+  - `private` -> `private_api_tracker.snapshot_profile()`
 
-### 3) Private API tracker (`app/private_api_tracker.py`)
+### 3) Browser tracker (`app/browser_tracker.py`)
+
+Core behaviors:
+- Uses Playwright + persisted browser `storage_state` for authenticated collection.
+- Scrapes profile counts and followers/following dialogs from the Instagram web UI.
+- Writes run metadata through shared DB helpers (`tracker_db.py`).
+
+### 4) Private API tracker (`app/private_api_tracker.py`)
 
 Core behaviors:
 - Instagrapi client with persisted **device profile + UUIDs**.
@@ -111,7 +120,7 @@ Core behaviors:
   - **Code TTL = 2 minutes**
 - Optional per‑run trace logging (`trace.jsonl`) capturing request/response summaries.
 
-### 4) Login storage (`app/login_store.py`)
+### 5) Login storage (`app/login_store.py`)
 
 - Table: `login_accounts`
 - Encrypted fields via Fernet:
@@ -121,7 +130,7 @@ Core behaviors:
   - `new_password_enc`
 - Session settings stored in JSONB column `session_settings`.
 
-### 5) Django UI (`app/django_app/`)
+### 6) Django UI (`app/django_app/`)
 
 - Renders dashboard + settings.
 - Proxies `/api/*` to Flask API.
@@ -131,13 +140,13 @@ Core behaviors:
   - TOTP management
   - Worker log + trace tail
 
-### 6) Count worker (`app/count_worker.py`)
+### 7) Count worker (`app/count_worker.py`)
 
 - Lightweight follower/following count check.
 - Stores `count_checks` records.
 - Can auto‑trigger snapshot when delta exceeds threshold.
 
-### 7) Unfollow worker (`app/unfollow_bot.py`)
+### 8) Unfollow worker (`app/unfollow_bot.py`)
 
 - Uses the latest non‑followback list from snapshot runs.
 - Enforces batch size and delay settings.
