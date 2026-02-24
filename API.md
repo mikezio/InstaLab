@@ -21,6 +21,7 @@ This document describes the Flask API endpoints available in InstaLab.
 - [Monitor](#monitor)
 - [Summary](#summary)
 - [Configuration](#configuration)
+- [Integrations](#integrations)
 - [Recon](#recon)
 - [Schedules](#schedules)
 - [Import](#import)
@@ -328,6 +329,39 @@ Returns current config + defaults (masked for sensitive values).
 ### PUT `/api/config`
 
 Update config values. If `proxy_enabled` is true, host/port/user/pass are required.
+
+---
+
+## Integrations
+
+### WhatsApp Cloud API
+
+### GET `/api/integrations/whatsapp/webhook`
+
+Webhook verification endpoint for Meta WhatsApp Cloud API (`hub.mode`, `hub.verify_token`, `hub.challenge`).
+
+### POST `/api/integrations/whatsapp/webhook`
+
+Inbound webhook endpoint for WhatsApp messages. Supported text commands:
+
+- `status`
+- `run <login_username> <target_username>`
+- `cancel <login_username> <target_username>`
+- `help`
+
+### POST `/api/integrations/whatsapp/test`
+
+Send a test WhatsApp message via Cloud API.
+
+**Request (optional):**
+```json
+{
+  "to": "+15551234567",
+  "message": "InstaLab test message"
+}
+```
+
+If `to` is omitted, the endpoint uses configured `whatsapp_notify_to`.
 
 ---
 

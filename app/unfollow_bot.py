@@ -374,3 +374,111 @@ def init_login(
         page.wait_for_timeout(60000)  # 60s placeholder; user can close when done
         context.storage_state(path=storage_path)
         browser.close()
+
+
+def create_account_guided(
+    *,
+    email: str,
+    full_name: str,
+    username: str,
+    password: str,
+    max_wait_seconds: int = 300,
+    cancel_check: Optional[Callable[[], bool]] = None,
+    log: Optional[Callable[[str], None]] = None,
+    proxy_server: Optional[str] = None,
+    proxy_username: Optional[str] = None,
+    proxy_password: Optional[str] = None,
+) -> dict:
+    """Open Instagram signup, auto-fill form fields, then wait for manual verification steps."""
+    log = log or (lambda *_: None)
+    cancel_check = cancel_check or (lambda: False)
+    max_wait_seconds = max(60, min(int(max_wait_seconds or 300), 900))
+    started = time.time()
+    last_url = ""
+
+    with sync_playwright() as p:
+        launch_args = {
+            "headless": False,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+            ],
+        }
+        if proxy_server:
+            launch_args["proxy"] = {
+                "server": proxy_server,
+                "username": proxy_username or "",
+                "password": proxy_password or "",
+            }
+        browser = p.chromium.launch(**launch_args)
+        context = browser.new_context(
+            user_agent=DEFAULT_UA,
+            locale="en-US",
+            timezone_id="America/New_York",
+            viewport={"width": 1366, "height": 768},
+        )
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            "Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});"
+        )
+        page = context.new_page()
+        page.set_default_timeout(20000)
+
+        try:
+            page.goto("https://www.instagram.com/accounts/emailsignup/", wait_until="domcontentloaded")
+            _maybe_accept_cookies(page)
+            page.wait_for_timeout(800)
+
+            page.locator('input[name="emailOrPhone"]').first.fill(email)
+            page.locator('input[name="fullName"]').first.fill(full_name)
+            page.locator('input[name="username"]').first.fill(username)
+            page.locator('input[name="password"]').first.fill(password)
+            log("filled signup form")
+
+            submit_clicked = False
+            for label in ("Sign up", "Sign Up"):
+                try:
+                    btn = page.get_by_role("button", name=label)
+                    if btn.count() > 0:
+                        btn.first.click(timeout=3000)
+                        submit_clicked = True
+                        break
+                except Exception:
+                    continue
+            if not submit_clicked:
+                try:
+                    page.keyboard.press("Enter")
+                    submit_clicked = True
+                except Exception:
+                    pass
+            if submit_clicked:
+                log("submitted signup form; waiting for verification/account completion")
+            else:
+                log("could not auto-submit form; continue manually in the open browser")
+
+            detected_login = False
+            while (time.time() - started) < max_wait_seconds:
+                if cancel_check():
+                    return {
+                        "completed": False,
+                        "cancelled": True,
+                        "last_url": last_url,
+                        "reason": "cancelled",
+                    }
+                try:
+                    last_url = page.url or ""
+                except Exception:
+                    last_url = ""
+                if not _login_required(page) and "emailsignup" not in last_url:
+                    detected_login = True
+                    break
+                page.wait_for_timeout(1000)
+
+            return {
+                "completed": bool(detected_login),
+                "cancelled": False,
+                "last_url": last_url,
+                "reason": "completed" if detected_login else "timeout",
+            }
+        finally:
+            context.close()
+            browser.close()

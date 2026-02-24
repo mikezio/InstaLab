@@ -79,8 +79,15 @@ def main():
     backend_name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
     proxy_set = bool(os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"))
     proxy_enabled_flag = str(os.environ.get("INSTALAB_PROXY_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
+    proxy_session_id = (os.environ.get("RUN_PROXY_SESSION_ID") or "").strip()
+    run_pre_login_flow = str(os.environ.get("RUN_PRE_LOGIN_FLOW", "")).strip().lower() in {"1", "true", "yes", "on"}
+    run_post_login_flow = str(os.environ.get("RUN_POST_LOGIN_FLOW", "")).strip().lower() in {"1", "true", "yes", "on"}
     proxy_access_mode = "native"
     print(f"Proxy enabled: {'yes' if proxy_set else 'no'}")
+    if proxy_session_id:
+        print(f"Proxy session id: {proxy_session_id}")
+    print(f"Run pre-login flow: {'enabled' if run_pre_login_flow else 'disabled'}")
+    print(f"Run post-login flow: {'enabled' if run_post_login_flow else 'disabled'}")
     if proxy_enabled_flag and not proxy_set:
         with _trace_span(
             "instalab.snapshot",
@@ -129,6 +136,8 @@ def main():
 
     delay_min = float(os.environ.get("RUN_ITEM_DELAY_MIN", "0") or 0)
     delay_max = float(os.environ.get("RUN_ITEM_DELAY_MAX", "0") or 0)
+    fetch_order = (os.environ.get("RUN_FETCH_ORDER") or "followers_first").strip().lower()
+    initial_fetch_delay_seconds = float(os.environ.get("RUN_INITIAL_FETCH_DELAY_SECONDS", "0") or 0)
     pause_every_min = int(os.environ.get("RUN_PAUSE_EVERY_MIN", "0") or 0)
     pause_every_max = int(os.environ.get("RUN_PAUSE_EVERY_MAX", "0") or 0)
     pause_seconds_min = float(os.environ.get("RUN_PAUSE_SECONDS_MIN", "0") or 0)
@@ -163,6 +172,8 @@ def main():
                     login_mode=login_mode,
                     item_delay_min=delay_min,
                     item_delay_max=delay_max,
+                    fetch_order=fetch_order,
+                    initial_fetch_delay_seconds=initial_fetch_delay_seconds,
                     pause_every_min=pause_every_min,
                     pause_every_max=pause_every_max,
                     pause_seconds_min=pause_seconds_min,

@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, Response, jsonify, request, send_from_directory, redirect
+import requests
 
 from tracker_db import (
     backfill_relationship_events,
@@ -40,7 +41,7 @@ from tracker_db import (
     write_run_metadata,
     _init_db as _init_run_db,
 )
-from unfollow_bot import AuthRequiredError, ensure_auth_state, unfollow_users, init_login
+from unfollow_bot import AuthRequiredError, create_account_guided, ensure_auth_state, unfollow_users, init_login
 from db import get_db, get_columns, ddl, is_postgres
 from login_store import (
     clear_session_settings,
@@ -73,6 +74,7 @@ from recon_store import (
 )
 from recon_worker import ReconExecutionError, run_recon_scan
 from validation import ValidationError, sanitize_sql_limit
+from proxy_utils import load_proxy_from_env
 
 # Ensure consistent HOME for session/cache files
 os.environ.setdefault("HOME", "/home/stremio")
@@ -299,10 +301,15 @@ CONFIG_DEFAULTS = {
     "run_request_timeout": float(os.getenv("RUN_REQUEST_TIMEOUT", "600")),
     "run_item_delay_min": float(os.getenv("RUN_ITEM_DELAY_MIN", "0")),
     "run_item_delay_max": float(os.getenv("RUN_ITEM_DELAY_MAX", "0")),
+    "run_fetch_order": str(os.getenv("RUN_FETCH_ORDER", "followers_first")).strip().lower(),
+    "run_initial_fetch_delay_seconds": float(os.getenv("RUN_INITIAL_FETCH_DELAY_SECONDS", "8")),
     "run_pause_every_min": int(os.getenv("RUN_PAUSE_EVERY_MIN", "0")),
     "run_pause_every_max": int(os.getenv("RUN_PAUSE_EVERY_MAX", "0")),
     "run_pause_seconds_min": float(os.getenv("RUN_PAUSE_SECONDS_MIN", "0")),
     "run_pause_seconds_max": float(os.getenv("RUN_PAUSE_SECONDS_MAX", "0")),
+    "run_pre_login_flow": os.getenv("RUN_PRE_LOGIN_FLOW", "false").lower() in {"1", "true", "yes", "on"},
+    "run_post_login_flow": os.getenv("RUN_POST_LOGIN_FLOW", "false").lower() in {"1", "true", "yes", "on"},
+    "run_rate_limit_cooldown_seconds": int(os.getenv("RUN_RATE_LIMIT_COOLDOWN_SECONDS", "900")),
     "run_trace_enabled": os.getenv("RUN_TRACE_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
     "run_profile_only": os.getenv("RUN_PROFILE_ONLY", "false").lower() in {"1", "true", "yes", "on"},
     "run_login_mode": _normalize_run_login_mode(os.getenv("RUN_LOGIN_MODE", "auto")),
@@ -314,6 +321,7 @@ CONFIG_DEFAULTS = {
     "proxy_host": os.getenv("INSTALAB_PROXY_HOST", "gate.decodo.com"),
     "proxy_port": int(os.getenv("INSTALAB_PROXY_PORT", "7000")),
     "proxy_username": os.getenv("INSTALAB_PROXY_USERNAME", ""),
+    "proxy_username_pool": os.getenv("INSTALAB_PROXY_USERNAME_POOL", ""),
     "proxy_password": os.getenv("INSTALAB_PROXY_PASSWORD", ""),
     "unfollow_max_per_run": 25,
     "unfollow_delay_min": 25,
@@ -340,6 +348,15 @@ CONFIG_DEFAULTS = {
     "recon_blackbird_results_dir": os.getenv("RECON_BLACKBIRD_RESULTS_DIR", "/tmp/instalab-blackbird/results"),
     "recon_phoneinfoga_enabled": os.getenv("RECON_PHONEINFOGA_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
     "recon_phoneinfoga_cmd": os.getenv("RECON_PHONEINFOGA_CMD", "/usr/local/bin/phoneinfoga"),
+    "whatsapp_enabled": os.getenv("INSTALAB_WHATSAPP_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
+    "whatsapp_command_enabled": os.getenv("INSTALAB_WHATSAPP_COMMAND_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+    "whatsapp_notify_enabled": os.getenv("INSTALAB_WHATSAPP_NOTIFY_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+    "whatsapp_verify_token": os.getenv("INSTALAB_WHATSAPP_VERIFY_TOKEN", ""),
+    "whatsapp_access_token": os.getenv("INSTALAB_WHATSAPP_ACCESS_TOKEN", ""),
+    "whatsapp_phone_number_id": os.getenv("INSTALAB_WHATSAPP_PHONE_NUMBER_ID", ""),
+    "whatsapp_api_version": os.getenv("INSTALAB_WHATSAPP_API_VERSION", "v22.0"),
+    "whatsapp_allowlist": os.getenv("INSTALAB_WHATSAPP_ALLOWLIST", ""),
+    "whatsapp_notify_to": os.getenv("INSTALAB_WHATSAPP_NOTIFY_TO", ""),
 }
 CONFIG_SCHEMA = {
     "run_stall_seconds": {"type": "int", "min": 60, "max": 21600},
@@ -349,10 +366,15 @@ CONFIG_SCHEMA = {
     "run_request_timeout": {"type": "float", "min": 10, "max": 3600},
     "run_item_delay_min": {"type": "float", "min": 0.0, "max": 10.0},
     "run_item_delay_max": {"type": "float", "min": 0.0, "max": 10.0},
+    "run_fetch_order": {"type": "str", "allowed": {"followers_first", "following_first"}},
+    "run_initial_fetch_delay_seconds": {"type": "float", "min": 0.0, "max": 120.0},
     "run_pause_every_min": {"type": "int", "min": 0, "max": 1000},
     "run_pause_every_max": {"type": "int", "min": 0, "max": 1000},
     "run_pause_seconds_min": {"type": "float", "min": 0.0, "max": 300.0},
     "run_pause_seconds_max": {"type": "float", "min": 0.0, "max": 300.0},
+    "run_pre_login_flow": {"type": "bool"},
+    "run_post_login_flow": {"type": "bool"},
+    "run_rate_limit_cooldown_seconds": {"type": "int", "min": 60, "max": 86400},
     "run_trace_enabled": {"type": "bool"},
     "run_profile_only": {"type": "bool"},
     "run_login_mode": {"type": "str", "allowed": RUN_LOGIN_MODE_ALLOWED},
@@ -364,6 +386,7 @@ CONFIG_SCHEMA = {
     "proxy_host": {"type": "str"},
     "proxy_port": {"type": "int", "min": 1, "max": 65535},
     "proxy_username": {"type": "str"},
+    "proxy_username_pool": {"type": "str"},
     "proxy_password": {"type": "str"},
     "unfollow_max_per_run": {"type": "int", "min": 1, "max": 500},
     "unfollow_delay_min": {"type": "int", "min": 1, "max": 600},
@@ -393,8 +416,17 @@ CONFIG_SCHEMA = {
     "recon_blackbird_results_dir": {"type": "str"},
     "recon_phoneinfoga_enabled": {"type": "bool"},
     "recon_phoneinfoga_cmd": {"type": "str"},
+    "whatsapp_enabled": {"type": "bool"},
+    "whatsapp_command_enabled": {"type": "bool"},
+    "whatsapp_notify_enabled": {"type": "bool"},
+    "whatsapp_verify_token": {"type": "str"},
+    "whatsapp_access_token": {"type": "str"},
+    "whatsapp_phone_number_id": {"type": "str"},
+    "whatsapp_api_version": {"type": "str"},
+    "whatsapp_allowlist": {"type": "str"},
+    "whatsapp_notify_to": {"type": "str"},
 }
-SENSITIVE_CONFIG_KEYS = {"proxy_password"}
+SENSITIVE_CONFIG_KEYS = {"proxy_password", "whatsapp_access_token", "whatsapp_verify_token"}
 CONFIG_CACHE = {"data": {}, "ts": 0.0}
 CONFIG_CACHE_TTL = 5.0
 
@@ -1160,6 +1192,158 @@ def _set_config_values(updates: dict):
     return cleaned
 
 
+def _normalize_whatsapp_number(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    keep_plus = raw.startswith("+")
+    digits = re.sub(r"\D+", "", raw)
+    if not digits:
+        return ""
+    return f"+{digits}" if keep_plus else digits
+
+
+def _whatsapp_allowlist_set(cfg: dict | None = None) -> set[str]:
+    conf = cfg or _get_config()
+    raw = str(conf.get("whatsapp_allowlist") or "").strip()
+    if not raw:
+        return set()
+    values = set()
+    for item in raw.split(","):
+        normalized = _normalize_whatsapp_number(item)
+        if normalized:
+            values.add(normalized)
+    return values
+
+
+def _whatsapp_is_configured(cfg: dict | None = None) -> bool:
+    conf = cfg or _get_config()
+    if not _parse_bool(conf.get("whatsapp_enabled", False)):
+        return False
+    return bool(
+        str(conf.get("whatsapp_access_token") or "").strip()
+        and str(conf.get("whatsapp_phone_number_id") or "").strip()
+    )
+
+
+def _whatsapp_sender_allowed(sender: str, cfg: dict | None = None) -> bool:
+    normalized = _normalize_whatsapp_number(sender)
+    allowed = _whatsapp_allowlist_set(cfg)
+    if not allowed:
+        return True
+    return normalized in allowed
+
+
+def _whatsapp_graph_url(cfg: dict | None = None) -> str:
+    conf = cfg or _get_config()
+    api_version = str(conf.get("whatsapp_api_version") or "v22.0").strip() or "v22.0"
+    phone_number_id = str(conf.get("whatsapp_phone_number_id") or "").strip()
+    return f"https://graph.facebook.com/{api_version}/{phone_number_id}/messages"
+
+
+def _whatsapp_send_text(to_number: str, body: str, cfg: dict | None = None) -> tuple[bool, str]:
+    conf = cfg or _get_config()
+    if not _whatsapp_is_configured(conf):
+        return False, "whatsapp integration not configured"
+    to_number = _normalize_whatsapp_number(to_number)
+    if not to_number:
+        return False, "destination number missing"
+    access_token = str(conf.get("whatsapp_access_token") or "").strip()
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to_number.lstrip("+"),
+        "type": "text",
+        "text": {"preview_url": False, "body": str(body or "").strip()[:4096]},
+    }
+    try:
+        resp = requests.post(
+            _whatsapp_graph_url(conf),
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=20,
+        )
+        if resp.status_code >= 400:
+            return False, f"graph api {resp.status_code}: {resp.text[:300]}"
+        return True, "ok"
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def _whatsapp_command_help() -> str:
+    return (
+        "InstaLab commands:\n"
+        "status\n"
+        "run <login_username> <target_username>\n"
+        "cancel <login_username> <target_username>\n"
+        "help"
+    )
+
+
+def _whatsapp_handle_command(sender: str, text: str) -> str:
+    cfg = _get_config()
+    if not _parse_bool(cfg.get("whatsapp_command_enabled", True)):
+        return "WhatsApp commands are disabled."
+    if not _whatsapp_sender_allowed(sender, cfg):
+        return "Sender not authorized for InstaLab commands."
+    command = str(text or "").strip()
+    if not command:
+        return _whatsapp_command_help()
+    tokens = command.split()
+    verb = tokens[0].lower()
+    if verb in {"help", "/help", "?"}:
+        return _whatsapp_command_help()
+    if verb in {"status", "/status"}:
+        active = len(ACTIVE_JOBS)
+        queued = 0
+        for jid, fut in RUN_FUTURES.items():
+            if fut and not fut.done():
+                meta = RUN_META.get(jid) or {}
+                if meta.get("state") == "queued":
+                    queued += 1
+        return f"InstaLab status: active={active}, queued={queued}."
+    if verb in {"run", "/run"}:
+        if len(tokens) < 3:
+            return "Usage: run <login_username> <target_username>"
+        login_username = tokens[1].strip()
+        target_username = tokens[2].strip().lstrip("@")
+        if not login_username or not target_username:
+            return "Usage: run <login_username> <target_username>"
+        if _is_blocked_login(login_username):
+            return f"Blocked login: {login_username}"
+        if login_username not in _get_login_lookup():
+            return f"Unknown login: {login_username}"
+        if _get_run_lock(login_username).locked():
+            return "Run already in progress for this login."
+        if _is_target_busy(target_username):
+            return "Another run is already in progress for this target."
+        job_id = _queue_run(login_username, target_username, source="whatsapp")
+        return f"Queued run {job_id} for @{target_username} via {login_username}."
+    if verb in {"cancel", "/cancel"}:
+        if len(tokens) < 3:
+            return "Usage: cancel <login_username> <target_username>"
+        login_username = tokens[1].strip()
+        target_username = tokens[2].strip().lstrip("@")
+        if not login_username or not target_username:
+            return "Usage: cancel <login_username> <target_username>"
+        CANCEL_REQUESTS.add((login_username, target_username))
+        return f"Cancel requested for @{target_username} via {login_username}."
+    return "Unknown command.\n" + _whatsapp_command_help()
+
+
+def _whatsapp_notify_run_event(event: str, login_username: str, target_username: str, detail: str) -> None:
+    cfg = _get_config()
+    if not _parse_bool(cfg.get("whatsapp_notify_enabled", True)):
+        return
+    to_number = _normalize_whatsapp_number(cfg.get("whatsapp_notify_to"))
+    if not to_number:
+        return
+    body = f"InstaLab {event}\nlogin: {login_username}\ntarget: @{target_username}\n{detail}"
+    ok, err = _whatsapp_send_text(to_number, body, cfg)
+    if not ok:
+        print(f"[whatsapp] notify failed: {err}", file=sys.stderr)
+
+
 def _build_proxy_server(host: str, port: int) -> str:
     return f"http://{host}:{int(port)}"
 
@@ -1172,8 +1356,45 @@ def _build_proxy_url(host: str, port: int, username: str | None = None, password
     return f"http://{host}:{int(port)}"
 
 
+def _parse_proxy_username_pool(raw: str | None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in str(raw or "").split(","):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        dedupe_key = candidate.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        out.append(candidate)
+    return out
+
+
+def _select_proxy_username_from_pool(
+    username_pool: list[str], *, login_username: str | None = None, session_id: str | None = None
+) -> str:
+    if not username_pool:
+        return ""
+    login = str(login_username or "").strip().lower()
+    if login:
+        # Spread active logins across pool entries deterministically before hashing fallback.
+        known_logins = sorted(
+            {
+                str(profile.get("login_username") or "").strip().lower()
+                for profile in _get_login_profiles()
+                if str(profile.get("login_username") or "").strip()
+            }
+        )
+        if login in known_logins:
+            return username_pool[known_logins.index(login) % len(username_pool)]
+    selector = str(session_id or login or "default")
+    idx = int(hashlib.sha256(selector.encode("utf-8")).hexdigest()[:8], 16) % len(username_pool)
+    return username_pool[idx]
+
+
  
-def _get_proxy_config(session_id: str | None = None):
+def _get_proxy_config(session_id: str | None = None, login_username: str | None = None):
     enabled = _parse_bool(_get_config_value("proxy_enabled", False))
     provider = str(_get_config_value("proxy_provider", "decodo") or "decodo").strip().lower()
     access_mode = str(_get_config_value("proxy_access_mode", "native") or "native").strip().lower()
@@ -1186,6 +1407,12 @@ def _get_proxy_config(session_id: str | None = None):
         host = host[8:]
     port = int(_get_config_value("proxy_port", 7000) or 7000)
     username = str(_get_config_value("proxy_username", "") or "").strip()
+    username_pool_raw = str(_get_config_value("proxy_username_pool", "") or "").strip()
+    username_pool = _parse_proxy_username_pool(username_pool_raw)
+    if username_pool:
+        username = _select_proxy_username_from_pool(
+            username_pool, login_username=login_username, session_id=session_id
+        )
     password = str(_get_config_value("proxy_password", "") or "").strip()
     # Decodo sticky sessions are controlled via username suffix.
     # Example: user-<zone>-country-us-session-<token>
@@ -1217,13 +1444,17 @@ def _generate_proxy_session_id(*, login_username: str | None = None, length: int
     if login_username:
         # Keep proxy identity stable per login account across runs.
         normalized = str(login_username).strip().lower()
-        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        # Include proxy username so geo-target changes (country/state/city) rotate sticky session.
+        proxy_user = str(_get_config_value("proxy_username", "") or "").strip().lower()
+        proxy_pool = str(_get_config_value("proxy_username_pool", "") or "").strip().lower()
+        seed = f"{normalized}|{proxy_user}|{proxy_pool}"
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
         return digest[:target_len]
     return secrets.token_hex(max(4, target_len // 2))
 
 
-def _apply_proxy_env(env: dict, *, session_id: str | None = None):
-    proxy = _get_proxy_config(session_id=session_id)
+def _apply_proxy_env(env: dict, *, session_id: str | None = None, login_username: str | None = None):
+    proxy = _get_proxy_config(session_id=session_id, login_username=login_username)
     if not proxy.get("enabled"):
         env["INSTALAB_PROXY_ENABLED"] = "false"
         return
@@ -1510,6 +1741,241 @@ def _unfollow_snapshot():
     return job
 
 
+def _log_account_create(msg: str):
+    ts = datetime.now(LOCAL_TZ).strftime("%H:%M:%S")
+    ACCOUNT_CREATE_LOG.insert(0, f"[{ts}] {msg}")
+    del ACCOUNT_CREATE_LOG[200:]
+
+
+def _account_create_snapshot():
+    job = dict(ACCOUNT_CREATE_JOB)
+    started_at = job.get("started_at")
+    finished_at = job.get("finished_at")
+    elapsed = None
+    if started_at:
+        try:
+            start = datetime.fromisoformat(started_at)
+            if job.get("state") in ("running", "cancelling"):
+                end = datetime.now(LOCAL_TZ)
+            elif finished_at:
+                end = datetime.fromisoformat(finished_at)
+            else:
+                end = datetime.now(LOCAL_TZ)
+            elapsed = int((end - start).total_seconds())
+        except Exception:
+            elapsed = None
+    job["elapsed_seconds"] = elapsed
+    return job
+
+
+def _extract_retry_after_seconds(message: str | None) -> int | None:
+    text = str(message or "")
+    if not text:
+        return None
+    match = re.search(r"retry[- ]after[^0-9]*(\d+)", text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except Exception:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def _account_create_retry_policy(error_code: str, error_message: str) -> tuple[str, list[int]]:
+    code = str(error_code or "").strip().lower()
+    message = str(error_message or "").strip().lower()
+    if code in {"ssl_or_proxy_error"}:
+        return ("network", [3, 8, 15, 30])
+    if code in {"rate_limited", "feedback_required"}:
+        return ("throttle", [20, 45, 90, 180])
+    if code in {"private_api_error"}:
+        if "429" in message or "too many requests" in message or "thrott" in message:
+            return ("throttle", [20, 45, 90, 180])
+        if "ssl" in message or "proxy" in message or "connection" in message or "timeout" in message:
+            return ("network", [3, 8, 15, 30])
+    return ("fatal", [])
+
+
+def _account_create_worker(
+    *,
+    created_placeholder: bool,
+    strategy: str,
+    email: str,
+    full_name: str,
+    login_username: str,
+    login_password: str,
+    phone_number: str,
+    birth_year: int | None,
+    birth_month: int | None,
+    birth_day: int | None,
+    max_wait_seconds: int,
+):
+    strategy = (strategy or "private_api").strip().lower()
+    if strategy not in {"private_api", "guided_browser"}:
+        strategy = "private_api"
+    ACCOUNT_CREATE_JOB.update(
+        {
+            "state": "running",
+            "started_at": datetime.now(LOCAL_TZ).isoformat(),
+            "finished_at": None,
+            "strategy": strategy,
+            "email": email,
+            "full_name": full_name,
+            "login_username": login_username,
+            "max_wait_seconds": int(max_wait_seconds),
+            "message": None,
+            "last_url": None,
+            "saved_login": False,
+        }
+    )
+    _log_account_create(f"starting account creation using strategy={strategy}")
+
+    def _cancel_check():
+        return ACCOUNT_CREATE_CANCEL.is_set()
+
+    def _sleep_cancelable(seconds: int) -> bool:
+        deadline = time.time() + max(0, int(seconds))
+        while time.time() < deadline:
+            if ACCOUNT_CREATE_CANCEL.is_set():
+                return False
+            time.sleep(1)
+        return True
+
+    try:
+        proxy = _get_proxy_config(
+            session_id=_generate_proxy_session_id(login_username=login_username),
+            login_username=login_username,
+        )
+        if strategy == "private_api":
+            from private_api_tracker import PrivateAPIError, signup_account_private_api
+
+            _log_account_create("sending signup via instagrapi private API")
+            result = None
+            max_attempts = 5
+            for attempt in range(1, max_attempts + 1):
+                if ACCOUNT_CREATE_CANCEL.is_set():
+                    ACCOUNT_CREATE_JOB["state"] = "cancelled"
+                    ACCOUNT_CREATE_JOB["message"] = "cancel requested"
+                    _log_account_create("cancelled")
+                    return
+                # First attempt uses stable per-login sticky session; retries rotate session id.
+                if attempt == 1:
+                    session_id = _generate_proxy_session_id(login_username=login_username)
+                else:
+                    session_id = _generate_proxy_session_id()
+                proxy_url = None
+                proxy = _get_proxy_config(session_id=session_id, login_username=login_username)
+                if proxy.get("enabled") and proxy.get("host") and proxy.get("port"):
+                    proxy_url = _build_proxy_url(
+                        proxy.get("host"),
+                        int(proxy.get("port")),
+                        proxy.get("username") or "",
+                        proxy.get("password") or "",
+                    )
+                if not proxy_url:
+                    raise RuntimeError("proxy unavailable for private_api signup")
+                _log_account_create(
+                    f"signup attempt {attempt}/3 via proxy session {session_id[:8]}"
+                )
+                try:
+                    result = signup_account_private_api(
+                        login_username=login_username,
+                        login_password=login_password,
+                        email=email,
+                        full_name=full_name,
+                        phone_number=phone_number,
+                        year=birth_year,
+                        month=birth_month,
+                        day=birth_day,
+                        poll_seconds=max_wait_seconds,
+                        poll_interval=5.0,
+                        proxy_url=proxy_url,
+                        request_sleep_seconds=0.8,
+                    )
+                    break
+                except PrivateAPIError as exc:
+                    group, schedule = _account_create_retry_policy(exc.code, str(exc))
+                    retry_after = _extract_retry_after_seconds(str(exc))
+                    if group != "fatal" and attempt < max_attempts:
+                        schedule_index = min(attempt - 1, len(schedule) - 1) if schedule else 0
+                        wait_seconds = int(schedule[schedule_index]) if schedule else 10
+                        if retry_after:
+                            wait_seconds = max(wait_seconds, int(retry_after))
+                        _log_account_create(
+                            f"{group} error ({exc.code}) on attempt {attempt}; retrying in {wait_seconds}s with rotated proxy session"
+                        )
+                        if not _sleep_cancelable(wait_seconds):
+                            ACCOUNT_CREATE_JOB["state"] = "cancelled"
+                            ACCOUNT_CREATE_JOB["message"] = "cancel requested"
+                            _log_account_create("cancelled")
+                            return
+                        continue
+                    raise
+            if not result:
+                raise RuntimeError("signup did not return a result")
+            _log_account_create(f"instagrapi signup completed for @{result.get('username') or login_username}")
+        else:
+            _log_account_create("opening browser and bootstrapping signup form")
+            result = create_account_guided(
+                email=email,
+                full_name=full_name,
+                username=login_username,
+                password=login_password,
+                max_wait_seconds=max_wait_seconds,
+                cancel_check=_cancel_check,
+                log=_log_account_create,
+                proxy_server=proxy.get("server") if proxy.get("enabled") else None,
+                proxy_username=proxy.get("username"),
+                proxy_password=proxy.get("password"),
+            )
+            ACCOUNT_CREATE_JOB["last_url"] = result.get("last_url")
+            cancelled = bool(result.get("cancelled")) or ACCOUNT_CREATE_CANCEL.is_set()
+            if cancelled:
+                ACCOUNT_CREATE_JOB["state"] = "cancelled"
+                ACCOUNT_CREATE_JOB["message"] = "cancel requested"
+                _log_account_create("cancelled")
+                return
+            if not result.get("completed"):
+                ACCOUNT_CREATE_JOB["state"] = "error"
+                ACCOUNT_CREATE_JOB["message"] = "signup not completed before timeout"
+                _log_account_create("timeout: account creation was not detected")
+                return
+
+        upsert_login(
+            login_username=login_username,
+            login_password=login_password or None,
+            totp_seed=None,
+            cookie_file=f"cookies_{login_username}.txt",
+            disabled=False,
+            source="db",
+        )
+        disable_login(login_username, False)
+        _clear_login_cache()
+        ACCOUNT_CREATE_JOB["saved_login"] = True
+        ACCOUNT_CREATE_JOB["state"] = "done"
+        ACCOUNT_CREATE_JOB["message"] = "account created and added to Login Vault"
+        _log_account_create(f"created @{login_username} and saved to Login Vault")
+    except Exception as exc:  # noqa: BLE001
+        ACCOUNT_CREATE_JOB["state"] = "error"
+        ACCOUNT_CREATE_JOB["message"] = str(exc)
+        _log_account_create(f"error: {exc}")
+    finally:
+        if created_placeholder and not ACCOUNT_CREATE_JOB.get("saved_login"):
+            try:
+                delete_login(login_username)
+                _clear_login_cache()
+                _log_account_create(f"removed placeholder login @{login_username} after failed/cancelled signup")
+            except Exception:
+                pass
+        ACCOUNT_CREATE_JOB["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
+        ACCOUNT_CREATE_CANCEL.clear()
+        if ACCOUNT_CREATE_LOCK.locked():
+            ACCOUNT_CREATE_LOCK.release()
+
+
 def _resolve_unfollow_login(login_username: str | None):
     login_username = (login_username or "").strip()
     if login_username:
@@ -1570,7 +2036,7 @@ def _unfollow_worker(usernames, login_username, target_username, dry_run, max_ac
 
     try:
         session_id = _generate_proxy_session_id(login_username=login_username)
-        proxy = _get_proxy_config(session_id=session_id)
+        proxy = _get_proxy_config(session_id=session_id, login_username=login_username)
         result = unfollow_users(
             usernames,
             UNFOLLOW_STORAGE,
@@ -1860,7 +2326,10 @@ def _run_count_check(login_username, target_username):
     else:
         env.pop("RUN_USER_AGENT", None)
     session_id = _generate_proxy_session_id(login_username=creds["login_username"])
-    _apply_proxy_env(env, session_id=session_id)
+    _apply_proxy_env(env, session_id=session_id, login_username=creds["login_username"])
+    env["RUN_PROXY_SESSION_ID"] = session_id
+    env["RUN_PRE_LOGIN_FLOW"] = "true" if _parse_bool(_get_config_value("run_pre_login_flow", False)) else "false"
+    env["RUN_POST_LOGIN_FLOW"] = "true" if _parse_bool(_get_config_value("run_post_login_flow", False)) else "false"
     http_timeout_seconds = float(
         _get_config_value("run_http_timeout_seconds", _get_config_value("run_request_timeout", 120))
     )
@@ -2286,7 +2755,8 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     else:
         env.pop("RUN_LOGIN_PASSWORD", None)
     session_id = _generate_proxy_session_id(login_username=login_username)
-    _apply_proxy_env(env, session_id=session_id)
+    _apply_proxy_env(env, session_id=session_id, login_username=login_username)
+    env["RUN_PROXY_SESSION_ID"] = session_id
     if two_factor_code or challenge_code:
         try:
             clear_challenge_code(login_username)
@@ -2321,16 +2791,22 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     request_sleep_seconds = float(_get_config_value("run_private_request_sleep_seconds", 0))
     item_delay_min = float(_get_config_value("run_item_delay_min", 0.25))
     item_delay_max = float(_get_config_value("run_item_delay_max", 0.75))
+    fetch_order = str(_get_config_value("run_fetch_order", "followers_first") or "followers_first").strip().lower()
+    initial_fetch_delay_seconds = float(_get_config_value("run_initial_fetch_delay_seconds", 8.0))
     pause_every_min = int(_get_config_value("run_pause_every_min", 0) or 0)
     pause_every_max = int(_get_config_value("run_pause_every_max", 0) or 0)
     pause_seconds_min = float(_get_config_value("run_pause_seconds_min", 0) or 0)
     pause_seconds_max = float(_get_config_value("run_pause_seconds_max", 0) or 0)
     trace_enabled = _parse_bool(_get_config_value("run_trace_enabled", False))
     profile_only = _parse_bool(_get_config_value("run_profile_only", False))
+    pre_login_flow = _parse_bool(_get_config_value("run_pre_login_flow", False))
+    post_login_flow = _parse_bool(_get_config_value("run_post_login_flow", False))
     stall_seconds = int(_get_config_value("run_stall_seconds", 1200))
     max_seconds = int(_get_config_value("run_max_seconds", 10800))
     env["RUN_ITEM_DELAY_MIN"] = str(item_delay_min)
     env["RUN_ITEM_DELAY_MAX"] = str(item_delay_max)
+    env["RUN_FETCH_ORDER"] = fetch_order
+    env["RUN_INITIAL_FETCH_DELAY_SECONDS"] = str(initial_fetch_delay_seconds)
     env["RUN_PAUSE_EVERY_MIN"] = str(pause_every_min)
     env["RUN_PAUSE_EVERY_MAX"] = str(pause_every_max)
     env["RUN_PAUSE_SECONDS_MIN"] = str(pause_seconds_min)
@@ -2338,6 +2814,8 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     env["RUN_HTTP_TIMEOUT_SECONDS"] = str(http_timeout_seconds)
     env["RUN_PRIVATE_REQUEST_SLEEP_SECONDS"] = str(request_sleep_seconds)
     env["RUN_TRACE_ENABLED"] = "true" if trace_enabled else "false"
+    env["RUN_PRE_LOGIN_FLOW"] = "true" if pre_login_flow else "false"
+    env["RUN_POST_LOGIN_FLOW"] = "true" if post_login_flow else "false"
     if trace_enabled:
         env["RUN_TRACE_PATH"] = str(job_dir / "trace.jsonl")
     env["RUN_PROFILE_ONLY"] = "true" if profile_only else "false"
@@ -2509,6 +2987,8 @@ RUN_FUTURES = {}
 RUN_META = {}
 RUN_LOCKS = {}
 RUN_LOCKS_GUARD = threading.Lock()
+RUN_COOLDOWN_UNTIL = {}
+RUN_COOLDOWN_GUARD = threading.Lock()
 ACTIVE_JOBS = {}
 LAST_JOB_BY_LOGIN = {}
 RECON_FUTURES = {}
@@ -2539,6 +3019,22 @@ UNFOLLOW_JOB = {
 }
 UNFOLLOW_LOG = []
 UNFOLLOW_STORAGE = str(BASE_DIR / ".playwright" / "instagram_storage.json")
+ACCOUNT_CREATE_LOCK = threading.Lock()
+ACCOUNT_CREATE_CANCEL = threading.Event()
+ACCOUNT_CREATE_JOB = {
+    "state": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "strategy": "private_api",
+    "email": None,
+    "full_name": None,
+    "login_username": None,
+    "max_wait_seconds": 300,
+    "message": None,
+    "last_url": None,
+    "saved_login": False,
+}
+ACCOUNT_CREATE_LOG = []
 RUN_WATCHDOG_STOP = threading.Event()
 
 
@@ -2550,6 +3046,44 @@ def _get_run_lock(login_username: str) -> threading.Lock:
             lock = threading.Lock()
             RUN_LOCKS[key] = lock
     return lock
+
+
+def _clear_run_cooldown(login_username: str) -> None:
+    if not login_username:
+        return
+    with RUN_COOLDOWN_GUARD:
+        RUN_COOLDOWN_UNTIL.pop(login_username, None)
+
+
+def _set_run_cooldown(login_username: str, error_code: str | None, error_message: str | None) -> int:
+    if not login_username:
+        return 0
+    base = int(_get_config_value("run_rate_limit_cooldown_seconds", 900) or 900)
+    retry_after = _extract_retry_after_seconds(error_message)
+    wait_seconds = max(base, int(retry_after or 0))
+    until_ts = time.time() + wait_seconds
+    with RUN_COOLDOWN_GUARD:
+        RUN_COOLDOWN_UNTIL[login_username] = {
+            "until_ts": until_ts,
+            "error_code": str(error_code or ""),
+            "error_message": str(error_message or ""),
+        }
+    return wait_seconds
+
+
+def _get_run_cooldown_remaining(login_username: str) -> int:
+    if not login_username:
+        return 0
+    with RUN_COOLDOWN_GUARD:
+        payload = RUN_COOLDOWN_UNTIL.get(login_username)
+        if not payload:
+            return 0
+        until_ts = float(payload.get("until_ts") or 0)
+        remaining = int(round(until_ts - time.time()))
+        if remaining <= 0:
+            RUN_COOLDOWN_UNTIL.pop(login_username, None)
+            return 0
+        return remaining
 
 
 def _watchdog_loop():
@@ -2878,11 +3412,17 @@ app = Flask(__name__)
 @app.route("/api/logins", methods=["GET"])
 def api_logins():
     entries = [e for e in list_logins(include_secrets=False) if not e.get("disabled")]
+    try:
+        from private_api_tracker import get_auth_state
+    except Exception:  # pragma: no cover
+        get_auth_state = None
     payload = []
     for entry in entries:
         username = entry.get("login_username")
         path = _private_settings_path(username)
         session_cached = bool(entry.get("session_settings")) or path.exists()
+        auth_state = get_auth_state(username) if callable(get_auth_state) else {}
+        fail_streak = int(entry.get("session_fail_streak") or 0)
         payload.append(
             {
                 "login_username": username,
@@ -2895,9 +3435,222 @@ def api_logins():
                 "has_totp_seed": bool(entry.get("has_totp_seed")),
                 "last_login_at": entry.get("last_login_at"),
                 "last_error": entry.get("last_error"),
+                "session_fail_streak": fail_streak,
+                "session_last_fail_at": entry.get("session_last_fail_at"),
+                "session_marked_stale": fail_streak >= 3,
+                "two_factor_method": auth_state.get("two_factor_method"),
+                "auth_last_event": auth_state.get("last_event"),
+                "auth_last_event_at": auth_state.get("last_event_at"),
             }
         )
     return jsonify(payload)
+
+
+@app.route("/api/logins/auth/trace", methods=["GET"])
+def api_logins_auth_trace():
+    login_username = (request.args.get("login_username") or "").strip()
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    if login_username not in _get_login_lookup():
+        return jsonify({"error": "unknown login_username"}), 404
+    try:
+        limit = int(request.args.get("limit") or 30)
+    except Exception:
+        limit = 30
+    try:
+        from private_api_tracker import get_auth_trace
+
+        rows = get_auth_trace(login_username, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to fetch auth trace: {exc}"}), 500
+    return jsonify({"login_username": login_username, "trace": rows})
+
+
+@app.route("/api/logins/auth/preflight", methods=["POST"])
+def api_logins_auth_preflight():
+    data = request.get_json(silent=True) or {}
+    login_username = (data.get("login_username") or "").strip()
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    if login_username not in _get_login_lookup():
+        return jsonify({"error": "unknown login_username"}), 404
+    entry = get_login(login_username, include_secrets=False) or {}
+    fail_streak = int(entry.get("session_fail_streak") or 0)
+    proxy = _get_proxy_config(
+        session_id=_generate_proxy_session_id(login_username=login_username),
+        login_username=login_username,
+    )
+    proxy_url = None
+    if proxy.get("enabled") and proxy.get("host") and proxy.get("port"):
+        proxy_url = _build_proxy_url(
+            proxy.get("host"),
+            int(proxy.get("port")),
+            proxy.get("username") or "",
+            proxy.get("password") or "",
+        )
+    try:
+        from private_api_tracker import get_auth_state, get_auth_trace, get_instagram_clock_skew
+
+        auth_state = get_auth_state(login_username)
+        trace = get_auth_trace(login_username, limit=20)
+        clock_skew = get_instagram_clock_skew(proxy_url=proxy_url, timeout_seconds=12.0)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to run auth preflight: {exc}"}), 500
+
+    warnings: list[str] = []
+    abs_skew = int(clock_skew.get("abs_skew_seconds") or 0) if clock_skew.get("ok") else None
+    if abs_skew is not None and abs_skew > 15:
+        warnings.append(f"clock skew is high ({abs_skew}s); TOTP can fail when skew exceeds ~15s")
+    if fail_streak >= 3:
+        warnings.append("session marked stale after repeated session validation failures; re-init login is recommended")
+    if auth_state.get("two_factor_method") == "unknown":
+        warnings.append("two-factor method not confirmed yet; run one login to detect TOTP/SMS/email path")
+    if auth_state.get("two_factor_method") in {"sms", "email"} and entry.get("has_totp_seed"):
+        warnings.append("account reports non-TOTP 2FA method; stored TOTP seed may not be used for this login")
+
+    return jsonify(
+        {
+            "ok": True,
+            "login_username": login_username,
+            "private_session_exists": bool(entry.get("session_settings")) or _private_settings_path(login_username).exists(),
+            "has_password": bool(entry.get("has_password")),
+            "has_totp_seed": bool(entry.get("has_totp_seed")),
+            "session_fail_streak": fail_streak,
+            "session_marked_stale": fail_streak >= 3,
+            "session_last_fail_at": entry.get("session_last_fail_at"),
+            "two_factor_method": auth_state.get("two_factor_method"),
+            "clock_skew": clock_skew,
+            "warnings": warnings,
+            "trace": trace,
+        }
+    )
+
+
+@app.route("/api/logins/create/status", methods=["GET"])
+def api_logins_create_status():
+    return jsonify({"job": _account_create_snapshot(), "log": ACCOUNT_CREATE_LOG[:40]})
+
+
+@app.route("/api/logins/create/cancel", methods=["POST"])
+def api_logins_create_cancel():
+    if not ACCOUNT_CREATE_LOCK.locked():
+        return jsonify({"error": "no account creation job running"}), 400
+    ACCOUNT_CREATE_CANCEL.set()
+    ACCOUNT_CREATE_JOB["state"] = "cancelling"
+    ACCOUNT_CREATE_JOB["message"] = "cancel requested"
+    return jsonify({"cancelled": True})
+
+
+@app.route("/api/logins/create/start", methods=["POST"])
+def api_logins_create_start():
+    if ACCOUNT_CREATE_LOCK.locked():
+        return jsonify({"error": "account creation job already running"}), 409
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip()
+    full_name = (data.get("full_name") or "").strip()
+    login_username = _sanitize_login_username(data.get("login_username") or "")
+    login_password = (data.get("login_password") or "").strip()
+    phone_number = (data.get("phone_number") or "").strip()
+    strategy = (data.get("strategy") or "private_api").strip().lower()
+    try:
+        max_wait_seconds = int(data.get("max_wait_seconds") or 300)
+    except Exception:
+        max_wait_seconds = 300
+    max_wait_seconds = max(60, min(max_wait_seconds, 900))
+    birth_year = data.get("birth_year")
+    birth_month = data.get("birth_month")
+    birth_day = data.get("birth_day")
+    try:
+        birth_year = int(birth_year) if birth_year not in (None, "") else None
+    except Exception:
+        birth_year = None
+    try:
+        birth_month = int(birth_month) if birth_month not in (None, "") else None
+    except Exception:
+        birth_month = None
+    try:
+        birth_day = int(birth_day) if birth_day not in (None, "") else None
+    except Exception:
+        birth_day = None
+
+    if not email or "@" not in email:
+        return jsonify({"error": "valid email is required"}), 400
+    if not full_name:
+        return jsonify({"error": "full_name is required"}), 400
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    if len(login_password) < 6:
+        return jsonify({"error": "login_password must be at least 6 characters"}), 400
+    if strategy not in {"private_api", "guided_browser"}:
+        return jsonify({"error": "strategy must be private_api or guided_browser"}), 400
+    if strategy == "private_api":
+        proxy_check = _get_proxy_config(
+            session_id=_generate_proxy_session_id(login_username=login_username),
+            login_username=login_username,
+        )
+        if not proxy_check.get("enabled"):
+            return jsonify({"error": "private_api signup requires proxy_enabled=true"}), 400
+        if not proxy_check.get("host") or not proxy_check.get("port"):
+            return jsonify({"error": "private_api signup requires proxy host/port"}), 400
+        if not proxy_check.get("username") or not proxy_check.get("password"):
+            return jsonify({"error": "private_api signup requires proxy username/password"}), 400
+    if strategy == "guided_browser" and not os.getenv("DISPLAY"):
+        return jsonify({"error": "guided_browser strategy requires a display server (DISPLAY not set)"}), 400
+    if _is_blocked_login(login_username):
+        return jsonify({"error": "login_username is blocked"}), 400
+    if _get_run_lock(login_username).locked():
+        return jsonify({"error": "run already in progress for this login"}), 409
+    if UNFOLLOW_LOCK.locked() and (UNFOLLOW_JOB.get("login_username") or "") == login_username:
+        return jsonify({"error": "unfollow job running for this login"}), 409
+    if get_login(login_username, include_secrets=False):
+        return jsonify({"error": "login_username already exists in vault"}), 409
+
+    created_placeholder = False
+    try:
+        upsert_login(
+            login_username=login_username,
+            login_password=login_password or None,
+            totp_seed=None,
+            cookie_file=f"cookies_{login_username}.txt",
+            disabled=False,
+            source="db",
+        )
+        _clear_login_cache()
+        created_placeholder = True
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to prepare login placeholder: {exc}"}), 500
+
+    if not ACCOUNT_CREATE_LOCK.acquire(blocking=False):
+        if created_placeholder:
+            try:
+                delete_login(login_username)
+                _clear_login_cache()
+            except Exception:
+                pass
+        return jsonify({"error": "account creation job already running"}), 409
+    ACCOUNT_CREATE_CANCEL.clear()
+    executor.submit(
+        _account_create_worker,
+        created_placeholder=created_placeholder,
+        strategy=strategy,
+        email=email,
+        full_name=full_name,
+        login_username=login_username,
+        login_password=login_password,
+        phone_number=phone_number,
+        birth_year=birth_year,
+        birth_month=birth_month,
+        birth_day=birth_day,
+        max_wait_seconds=max_wait_seconds,
+    )
+    return jsonify(
+        {
+            "started": True,
+            "strategy": strategy,
+            "login_username": login_username,
+            "max_wait_seconds": max_wait_seconds,
+        }
+    )
 
 
 @app.route("/api/logins/add", methods=["POST"])
@@ -3011,6 +3764,49 @@ def api_logins_new_password():
         return jsonify({"ok": True, "login_username": login_username})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"failed to store new password: {exc}"}), 500
+
+
+@app.route("/api/logins/password/reset-request", methods=["POST"])
+def api_logins_password_reset_request():
+    data = request.get_json(silent=True) or {}
+    login_username = (data.get("login_username") or "").strip()
+    email_or_username = (data.get("email_or_username") or "").strip()
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    if login_username not in _get_login_lookup():
+        return jsonify({"error": "unknown login_username"}), 404
+    if _get_run_lock(login_username).locked():
+        return jsonify({"error": "run already in progress for this login"}), 409
+    if UNFOLLOW_LOCK.locked() and (UNFOLLOW_JOB.get("login_username") or "") == login_username:
+        return jsonify({"error": "unfollow job running for this login"}), 409
+    identifier = email_or_username or login_username
+    if not identifier:
+        return jsonify({"error": "email_or_username is required"}), 400
+    try:
+        from private_api_tracker import request_password_reset
+
+        proxy = load_proxy_from_env()
+        proxy_url = proxy.get("url") if proxy else None
+        http_timeout_seconds = _float_config("private_http_timeout_seconds", 30.0)
+        user_agent = str(_get_config_value("private_user_agent", "") or "").strip() or None
+        result = request_password_reset(
+            email_or_username=identifier,
+            proxy_url=proxy_url,
+            http_timeout_seconds=http_timeout_seconds,
+            user_agent=user_agent,
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "login_username": login_username,
+                "email_or_username": identifier,
+                "http_status": result.get("http_status"),
+                "payload": result.get("payload"),
+                "via_proxy": bool(proxy_url),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to request password reset: {exc}"}), 500
 
 
 @app.route("/api/logins/totp/seed", methods=["POST"])
@@ -4120,6 +4916,13 @@ def _is_target_busy(target_username: str) -> bool:
 def _queue_run(login_username, target_username, *, source="api", two_factor_code=None, challenge_code=None, rebuild=True):
     job_id = str(uuid4())
     LAST_JOB_BY_LOGIN[login_username] = job_id
+    if source == "whatsapp":
+        _whatsapp_notify_run_event(
+            "run_queued",
+            login_username,
+            target_username,
+            f"job_id: {job_id}",
+        )
 
     def _runner():
         started = datetime.now(LOCAL_TZ).isoformat()
@@ -4162,14 +4965,35 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
                 job["following_total"] = res.get("followees_count")
                 job["phase"] = "done"
             RUN_META[job_id]["state"] = "done"
+            _clear_run_cooldown(login_username)
+            _whatsapp_notify_run_event(
+                "run_done",
+                login_username,
+                target_username,
+                f"job_id: {job_id}",
+            )
             return {"status": "success", "started_at": started, "finished_at": finished, "result": res}
         except Exception as exc:  # noqa: BLE001
             finished = datetime.now(LOCAL_TZ).isoformat()
             RUN_META[job_id]["state"] = "error"
-            payload = {"status": "error", "started_at": started, "finished_at": finished, "error": str(exc)}
             code = getattr(exc, "code", None)
+            cooldown_seconds = 0
+            if str(code or "").strip().lower() in {"rate_limited", "feedback_required"}:
+                cooldown_seconds = _set_run_cooldown(login_username, code, str(exc))
+            _whatsapp_notify_run_event(
+                "run_error",
+                login_username,
+                target_username,
+                (
+                    f"job_id: {job_id} · error: {exc}"
+                    + (f" · cooldown: {cooldown_seconds}s" if cooldown_seconds > 0 else "")
+                ),
+            )
+            payload = {"status": "error", "started_at": started, "finished_at": finished, "error": str(exc)}
             if code:
                 payload["error_code"] = code
+            if cooldown_seconds > 0:
+                payload["cooldown_seconds"] = cooldown_seconds
             return payload
 
     RUN_META[job_id] = {
@@ -4196,6 +5020,19 @@ def api_run():
         return jsonify({"error": "login_username and target_username are required"}), 400
     if _is_blocked_login(login_username):
         return jsonify({"error": "login_username is blocked"}), 400
+    cooldown_seconds = _get_run_cooldown_remaining(login_username)
+    if cooldown_seconds > 0:
+        return (
+            jsonify(
+                {
+                    "error": "login is in cooldown after Instagram throttle response",
+                    "error_code": "rate_limited",
+                    "login_username": login_username,
+                    "cooldown_seconds": cooldown_seconds,
+                }
+            ),
+            429,
+        )
 
     # refuse if this login already running, or unfollow is running on same login
     if _get_run_lock(login_username).locked():
@@ -4476,9 +5313,11 @@ def api_config_update():
             host = cleaned.get("proxy_host") or _get_config_value("proxy_host", "")
             port = cleaned.get("proxy_port") or _get_config_value("proxy_port", 0)
             user = cleaned.get("proxy_username") or _get_config_value("proxy_username", "")
+            user_pool = cleaned.get("proxy_username_pool") or _get_config_value("proxy_username_pool", "")
             pwd = cleaned.get("proxy_password") or _get_config_value("proxy_password", "")
-            if not host or not port or not user or not pwd:
-                raise ValueError("Proxy enabled requires host, port, username, and password")
+            has_pool = bool(str(user_pool or "").strip())
+            if not host or not port or (not user and not has_pool) or not pwd:
+                raise ValueError("Proxy enabled requires host, port, password, and username or username pool")
         updated = _set_config_values(cleaned)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -4492,6 +5331,59 @@ def api_config_update():
         pass
     cfg = _get_config(force=True)
     return jsonify({"updated": list(updated.keys()), "config": _mask_config_for_api(cfg)})
+
+
+@app.route("/api/integrations/whatsapp/webhook", methods=["GET"])
+def api_whatsapp_webhook_verify():
+    cfg = _get_config()
+    verify_token = str(cfg.get("whatsapp_verify_token") or "").strip()
+    mode = request.args.get("hub.mode", "")
+    token = request.args.get("hub.verify_token", "")
+    challenge = request.args.get("hub.challenge", "")
+    if mode == "subscribe" and verify_token and token == verify_token:
+        return Response(challenge, mimetype="text/plain")
+    return jsonify({"error": "verification failed"}), 403
+
+
+@app.route("/api/integrations/whatsapp/webhook", methods=["POST"])
+def api_whatsapp_webhook_receive():
+    cfg = _get_config()
+    if not _whatsapp_is_configured(cfg):
+        return jsonify({"ok": True, "ignored": "integration disabled"}), 200
+    payload = request.get_json(silent=True) or {}
+    try:
+        entries = payload.get("entry") or []
+        for entry in entries:
+            changes = (entry or {}).get("changes") or []
+            for change in changes:
+                value = (change or {}).get("value") or {}
+                messages = value.get("messages") or []
+                for msg in messages:
+                    sender = _normalize_whatsapp_number(msg.get("from"))
+                    mtype = str(msg.get("type") or "").strip().lower()
+                    if mtype != "text":
+                        continue
+                    text_body = ((msg.get("text") or {}).get("body") or "").strip()
+                    if not text_body:
+                        continue
+                    reply = _whatsapp_handle_command(sender, text_body)
+                    _whatsapp_send_text(sender, reply, cfg)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[whatsapp] webhook processing error: {exc}", file=sys.stderr)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/integrations/whatsapp/test", methods=["POST"])
+def api_whatsapp_test():
+    cfg = _get_config()
+    to_number = _normalize_whatsapp_number((request.get_json(silent=True) or {}).get("to") or cfg.get("whatsapp_notify_to"))
+    message = str((request.get_json(silent=True) or {}).get("message") or "InstaLab WhatsApp test").strip()
+    if not to_number:
+        return jsonify({"error": "destination number missing (set whatsapp_notify_to or pass {to})"}), 400
+    ok, detail = _whatsapp_send_text(to_number, message, cfg)
+    if not ok:
+        return jsonify({"ok": False, "error": detail}), 502
+    return jsonify({"ok": True, "to": to_number})
 
 
 @app.route("/api/unfollow/status", methods=["GET"])

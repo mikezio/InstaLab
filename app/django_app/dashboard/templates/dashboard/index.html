@@ -1307,6 +1307,31 @@
             <div class="config-help">Use this to add new accounts or refresh a password.</div>
           </div>
           <div class="config-card">
+            <h4>Account factory (automated signup)</h4>
+            <form id="acct-create-form" onsubmit="return false;">
+              <label for="acct-create-strategy">Signup mode</label>
+              <select id="acct-create-strategy">
+                <option value="private_api">instagrapi private API (recommended)</option>
+                <option value="guided_browser">Guided browser fallback</option>
+              </select>
+              <label for="acct-create-email">Email</label>
+              <input id="acct-create-email" type="email" placeholder="name@example.com" autocomplete="email">
+              <label for="acct-create-fullname">Full name</label>
+              <input id="acct-create-fullname" type="text" placeholder="Display name">
+              <label for="acct-create-username">Username</label>
+              <input id="acct-create-username" type="text" placeholder="new_instagram_username" autocomplete="username">
+              <label for="acct-create-password">Password</label>
+              <input id="acct-create-password" type="password" placeholder="Strong password" autocomplete="new-password">
+              <div class="row" style="gap: 8px; margin-top: 12px;">
+                <button type="button" id="acct-create-start">Start account creation</button>
+                <button type="button" class="secondary" id="acct-create-cancel">Cancel</button>
+              </div>
+            </form>
+            <div class="config-help">For private API mode, submit the verification code in Challenge code (SMS/email) using the same username.</div>
+            <div class="config-help" id="acct-create-status">Idle.</div>
+            <pre id="acct-create-log" class="logtail"></pre>
+          </div>
+          <div class="config-card">
             <h4>TOTP / 2FA</h4>
             <form id="totp-form" onsubmit="return false;">
               <label for="totp-login">Login</label>
@@ -1408,6 +1433,8 @@
     let activeFilter = 'all';
     let focusLogin = '';
     let logtailTimer = null;
+    let accountCreateTimer = null;
+    let accountCreateLastState = '';
     let toastTimer;
     let statusTimer = null;
     let unfollowTimer = null;
@@ -1996,12 +2023,15 @@
       modal.style.display = 'flex';
       renderLoginManager();
       startLogtailAutoRefresh();
+      fetchAccountCreateStatus({silent: true});
+      startAccountCreateAutoRefresh();
     }
 
     function closeAccountsModal() {
       const modal = document.getElementById('accounts-modal');
       if (modal) modal.style.display = 'none';
       stopLogtailAutoRefresh();
+      stopAccountCreateAutoRefresh();
     }
 
     async function saveConfig() {
@@ -2215,6 +2245,92 @@
         await loadLogins();
       } catch (e) {
         showToast('Add login failed: ' + e.message, 'bad');
+      }
+    }
+
+    function stopAccountCreateAutoRefresh() {
+      if (accountCreateTimer) {
+        clearInterval(accountCreateTimer);
+        accountCreateTimer = null;
+      }
+    }
+
+    function startAccountCreateAutoRefresh() {
+      stopAccountCreateAutoRefresh();
+      const modal = document.getElementById('accounts-modal');
+      if (!modal || modal.style.display !== 'flex') return;
+      fetchAccountCreateStatus({silent: true});
+      accountCreateTimer = setInterval(() => fetchAccountCreateStatus({silent: true}), 5000);
+    }
+
+    async function fetchAccountCreateStatus({silent = false} = {}) {
+      const statusEl = document.getElementById('acct-create-status');
+      const logEl = document.getElementById('acct-create-log');
+      try {
+        const data = await fetchJSON('/logins/create/status');
+        const job = data.job || {};
+        const state = (job.state || 'idle').toString();
+        const login = job.login_username ? ` @${job.login_username}` : '';
+        const elapsed = Number(job.elapsed_seconds || 0);
+        const msg = job.message ? ` · ${job.message}` : '';
+        if (statusEl) statusEl.textContent = `State: ${state}${login}${elapsed ? ` · ${elapsed}s` : ''}${msg}`;
+        if (logEl) logEl.textContent = (data.log || []).join('\n') || '(no account creation logs yet)';
+        if (state === 'done' && job.saved_login && accountCreateLastState !== 'done') {
+          await loadLogins();
+          showToast(`Account @${job.login_username || ''} added to Login Vault.`, 'good');
+          const userEl = document.getElementById('acct-new-login-username');
+          const passEl = document.getElementById('acct-new-login-password');
+          if (userEl && job.login_username) userEl.value = job.login_username;
+          if (passEl) passEl.value = '';
+        } else if (!silent && state === 'error' && job.message) {
+          showToast(`Account creation failed: ${job.message}`, 'bad');
+        }
+        accountCreateLastState = state;
+      } catch (e) {
+        if (statusEl) statusEl.textContent = `State: error · ${e.message}`;
+        if (!silent) showToast(`Account creation status failed: ${e.message}`, 'bad');
+      }
+    }
+
+    async function startAccountCreate() {
+      const strategy = (document.getElementById('acct-create-strategy')?.value || 'private_api').trim();
+      const email = (document.getElementById('acct-create-email')?.value || '').trim();
+      const full_name = (document.getElementById('acct-create-fullname')?.value || '').trim();
+      const login_username = (document.getElementById('acct-create-username')?.value || '').trim();
+      const login_password = (document.getElementById('acct-create-password')?.value || '').trim();
+      if (!email || !full_name || !login_username || !login_password) {
+        showToast('Email, full name, username, and password are required', 'bad');
+        return;
+      }
+      try {
+        await fetchJSON('/logins/create/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            strategy,
+            email,
+            full_name,
+            login_username,
+            login_password,
+          }),
+        });
+        showToast(`Account creation started for @${login_username}.`, 'neutral');
+        const challengeLogin = document.getElementById('challenge-login-select');
+        if (challengeLogin) challengeLogin.value = login_username;
+        accountCreateLastState = '';
+        await fetchAccountCreateStatus({silent: true});
+        startAccountCreateAutoRefresh();
+      } catch (e) {
+        showToast(`Start account creation failed: ${e.message}`, 'bad');
+      }
+    }
+
+    async function cancelAccountCreate() {
+      try {
+        await fetchJSON('/logins/create/cancel', {method: 'POST', body: JSON.stringify({})});
+        showToast('Account creation cancel requested', 'neutral');
+        await fetchAccountCreateStatus({silent: true});
+      } catch (e) {
+        showToast(`Cancel failed: ${e.message}`, 'bad');
       }
     }
 
@@ -4630,6 +4746,10 @@
     if (cfgResetBtn) cfgResetBtn.onclick = () => fillConfigForm(true);
     const acctAddLoginBtn = document.getElementById('acct-add-login');
     if (acctAddLoginBtn) acctAddLoginBtn.onclick = addLoginFromConfig;
+    const acctCreateStartBtn = document.getElementById('acct-create-start');
+    if (acctCreateStartBtn) acctCreateStartBtn.onclick = startAccountCreate;
+    const acctCreateCancelBtn = document.getElementById('acct-create-cancel');
+    if (acctCreateCancelBtn) acctCreateCancelBtn.onclick = cancelAccountCreate;
     const totpGenerateBtn = document.getElementById('totp-generate');
     if (totpGenerateBtn) totpGenerateBtn.onclick = handleTotpGenerate;
     const totpEnableBtn = document.getElementById('totp-enable');

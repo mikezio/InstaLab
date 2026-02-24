@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from db import ddl, get_db, is_postgres
+from db import ddl, get_columns, get_db, is_postgres
 from crypto_utils import decrypt_value, encrypt_value
 
 
@@ -53,6 +53,8 @@ def init_login_table() -> None:
                     challenge_code_enc TEXT,
                     challenge_code_at TEXT,
                     new_password_enc TEXT,
+                    session_fail_streak INTEGER NOT NULL DEFAULT 0,
+                    session_last_fail_at TEXT,
                     cookie_file TEXT,
                     disabled INTEGER NOT NULL DEFAULT 0,
                     source TEXT,
@@ -66,6 +68,11 @@ def init_login_table() -> None:
             )
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_login_accounts_disabled ON login_accounts(disabled)")
+        cols = get_columns(conn, LOGIN_TABLE)
+        if "session_fail_streak" not in cols:
+            conn.execute("ALTER TABLE login_accounts ADD COLUMN session_fail_streak INTEGER NOT NULL DEFAULT 0")
+        if "session_last_fail_at" not in cols:
+            conn.execute("ALTER TABLE login_accounts ADD COLUMN session_last_fail_at TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -76,7 +83,7 @@ def list_logins(include_secrets: bool = False) -> list[dict]:
     try:
         cur = conn.execute(
             """
-            SELECT login_username, login_password_enc, totp_seed_enc, cookie_file, disabled,
+            SELECT login_username, login_password_enc, totp_seed_enc, session_fail_streak, session_last_fail_at, cookie_file, disabled,
                    source, session_settings, created_at, updated_at, last_login_at, last_error
             FROM login_accounts
             ORDER BY login_username
@@ -107,7 +114,7 @@ def get_login(login_username: str, include_secrets: bool = False) -> dict | None
         cur = conn.execute(
             """
             SELECT login_username, login_password_enc, totp_seed_enc, challenge_code_enc, challenge_code_at,
-                   new_password_enc, cookie_file, disabled, source, session_settings,
+                   new_password_enc, session_fail_streak, session_last_fail_at, cookie_file, disabled, source, session_settings,
                    created_at, updated_at, last_login_at, last_error
             FROM login_accounts
             WHERE login_username = ?
@@ -400,3 +407,44 @@ def delete_login(login_username: str) -> None:
 
 def disable_login(login_username: str, disabled: bool = True) -> None:
     upsert_login(login_username=login_username, disabled=disabled)
+
+
+def record_session_validation_failure(login_username: str) -> int:
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            UPDATE login_accounts
+            SET session_fail_streak = COALESCE(session_fail_streak, 0) + 1,
+                session_last_fail_at = ?,
+                updated_at = ?
+            WHERE login_username = ?
+            """,
+            (_utc_now(), _utc_now(), login_username),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    entry = get_login(login_username, include_secrets=False) or {}
+    try:
+        return int(entry.get("session_fail_streak") or 0)
+    except Exception:
+        return 0
+
+
+def reset_session_validation_failures(login_username: str) -> None:
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            UPDATE login_accounts
+            SET session_fail_streak = 0,
+                session_last_fail_at = NULL,
+                updated_at = ?
+            WHERE login_username = ?
+            """,
+            (_utc_now(), login_username),
+        )
+        conn.commit()
+    finally:
+        conn.close()

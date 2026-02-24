@@ -10,19 +10,30 @@ import json
 import os
 import random
 import re
+import threading
 import time
-from datetime import datetime
+import urllib.request
+from collections import deque
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import hashlib
 from uuid import uuid4
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
+import requests
 from instagrapi import Client
 from instagrapi.exceptions import (
+    AgeEligibilityError,
     BadPassword,
     ChallengeRequired,
     ChallengeError,
     FeedbackRequired,
     ClientThrottledError,
+    EmailInvalidError,
+    EmailNotAvailableError,
+    EmailVerificationSendError,
     LoginRequired,
     LegacyForceSetNewPasswordForm,
     PleaseWaitFewMinutes,
@@ -30,12 +41,18 @@ from instagrapi.exceptions import (
     TwoFactorRequired,
 )
 from instagrapi import utils as instagrapi_utils
+from instagrapi.mixins.totp import TOTP
+from requests.exceptions import ProxyError as RequestsProxyError
+from requests.exceptions import SSLError as RequestsSSLError
 
 from tracker_db import write_run_metadata, write_run_profile_counts
 from login_store import (
+    clear_session_settings,
     consume_challenge_code,
     consume_new_password,
     get_login,
+    record_session_validation_failure,
+    reset_session_validation_failures,
     set_last_error,
     set_last_login,
     set_login_password,
@@ -55,20 +72,77 @@ TWO_FACTOR_POLL_SECONDS = int(os.getenv("RUN_2FA_POLL_SECONDS", "180") or 180)
 TWO_FACTOR_POLL_INTERVAL = float(os.getenv("RUN_2FA_POLL_INTERVAL", "5") or 5)
 REQUEST_SLEEP_MAX = float(os.getenv("INSTALAB_PRIVATE_REQUEST_SLEEP_MAX", "2.0") or 2.0)
 REQUEST_SLEEP_FALLBACK = float(os.getenv("INSTALAB_PRIVATE_REQUEST_SLEEP", "1.0") or 1.0)
+PRE_LOGIN_FLOW_ENABLED = str(os.getenv("RUN_PRE_LOGIN_FLOW", "false")).strip().lower() in {"1", "true", "yes", "on"}
+POST_LOGIN_FLOW_ENABLED = str(os.getenv("RUN_POST_LOGIN_FLOW", "false")).strip().lower() in {"1", "true", "yes", "on"}
 ANONYMOUS_LOGIN_MODES = {"anonymous", "public", "no_login", "no-login", "anon"}
 
 DEFAULT_DEVICE_SETTINGS = {
     "app_version": "414.0.0.40.83",
-    "android_version": 28,
-    "android_release": "9",
-    "dpi": "480dpi",
-    "resolution": "1080x1920",
-    "manufacturer": "OnePlus",
-    "device": "devitron",
-    "model": "6T Dev",
-    "cpu": "qcom",
-    "version_code": "382006479",
+    "android_version": 33,
+    "android_release": "13",
+    "dpi": "420dpi",
+    "resolution": "1080x2400",
+    "manufacturer": "Google",
+    "device": "panther",
+    "model": "Pixel 7",
+    "cpu": "arm64-v8a",
+    "version_code": "382006496",
 }
+DEVICE_PROFILE_POOL = [
+    {
+        "manufacturer": "Google",
+        "device": "panther",
+        "model": "Pixel 7",
+        "resolution": "1080x2400",
+        "dpi": "420dpi",
+        "android_version": 33,
+        "android_release": "13",
+        "cpu": "arm64-v8a",
+    },
+    {
+        "manufacturer": "Google",
+        "device": "husky",
+        "model": "Pixel 8 Pro",
+        "resolution": "1344x2992",
+        "dpi": "480dpi",
+        "android_version": 34,
+        "android_release": "14",
+        "cpu": "arm64-v8a",
+    },
+    {
+        "manufacturer": "samsung",
+        "device": "dm3q",
+        "model": "SM-S918B",
+        "resolution": "1440x3088",
+        "dpi": "560dpi",
+        "android_version": 34,
+        "android_release": "14",
+        "cpu": "exynos2200",
+    },
+    {
+        "manufacturer": "samsung",
+        "device": "a54x",
+        "model": "SM-A546E",
+        "resolution": "1080x2340",
+        "dpi": "420dpi",
+        "android_version": 33,
+        "android_release": "13",
+        "cpu": "exynos1380",
+    },
+    {
+        "manufacturer": "Xiaomi",
+        "device": "marble",
+        "model": "23049PCD8G",
+        "resolution": "1220x2712",
+        "dpi": "480dpi",
+        "android_version": 33,
+        "android_release": "13",
+        "cpu": "arm64-v8a",
+    },
+]
+TOTP_INTERVAL_SECONDS = 30
+SESSION_STALE_THRESHOLD = int(os.getenv("INSTALAB_SESSION_STALE_THRESHOLD", "3") or 3)
+AUTH_TRACE_LIMIT = int(os.getenv("INSTALAB_AUTH_TRACE_LIMIT", "400") or 400)
 
 
 class PrivateAPIError(RuntimeError):
@@ -130,6 +204,97 @@ SENSITIVE_TRACE_KEYS = {
 PAGINATED_FRIENDSHIPS_ENDPOINT_RE = re.compile(
     r"^friendships/(?P<target_id>\d+)/(?P<kind>followers|following)/?$"
 )
+AUTH_TRACE = deque(maxlen=max(50, AUTH_TRACE_LIMIT))
+AUTH_TRACE_LOCK = threading.Lock()
+AUTH_STATE: dict[str, dict] = {}
+
+
+def _auth_trace(login_username: str, event: str, **details) -> None:
+    username = str(login_username or "").strip()
+    if not username:
+        return
+    payload = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "login_username": username,
+        "event": str(event or "").strip() or "event",
+    }
+    for key, value in details.items():
+        if value is None:
+            continue
+        payload[str(key)] = value
+    with AUTH_TRACE_LOCK:
+        AUTH_TRACE.appendleft(payload)
+        state = dict(AUTH_STATE.get(username) or {})
+        state["last_event_at"] = payload["at"]
+        state["last_event"] = payload["event"]
+        for key in (
+            "two_factor_method",
+            "session_fail_streak",
+            "session_marked_stale",
+            "session_validation_ok",
+            "totp_source",
+            "error_code",
+            "error",
+        ):
+            if key in payload:
+                state[key] = payload.get(key)
+        AUTH_STATE[username] = state
+
+
+def get_auth_trace(login_username: str, limit: int = 30) -> list[dict]:
+    username = str(login_username or "").strip()
+    limit = max(1, min(int(limit or 30), 200))
+    with AUTH_TRACE_LOCK:
+        rows = [row for row in AUTH_TRACE if row.get("login_username") == username]
+    return rows[:limit]
+
+
+def get_auth_state(login_username: str) -> dict:
+    username = str(login_username or "").strip()
+    with AUTH_TRACE_LOCK:
+        return dict(AUTH_STATE.get(username) or {})
+
+
+def _derive_two_factor_method(two_factor_info) -> str:
+    info = two_factor_info if isinstance(two_factor_info, dict) else {}
+    if info.get("totp_two_factor_on"):
+        return "totp"
+    if info.get("sms_two_factor_on"):
+        return "sms"
+    if info.get("email_two_factor_on"):
+        return "email"
+    return "unknown"
+
+
+def get_instagram_clock_skew(proxy_url: str | None = None, timeout_seconds: float = 12.0) -> dict:
+    url = "https://i.instagram.com/"
+    opener = None
+    if proxy_url:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        if opener:
+            response = opener.open(req, timeout=max(1.0, float(timeout_seconds)))
+        else:
+            response = urllib.request.urlopen(req, timeout=max(1.0, float(timeout_seconds)))
+        with response:
+            date_header = response.headers.get("Date")
+        if not date_header:
+            return {"ok": False, "error": "instagram response missing Date header"}
+        server_dt = parsedate_to_datetime(date_header).astimezone(timezone.utc)
+        local_dt = datetime.now(timezone.utc)
+        skew_seconds = int((local_dt - server_dt).total_seconds())
+        return {
+            "ok": True,
+            "source": "instagram_date_header",
+            "date_header": date_header,
+            "skew_seconds": skew_seconds,
+            "abs_skew_seconds": abs(skew_seconds),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def _truncate(value, limit=2000):
@@ -403,6 +568,48 @@ def _normalize_two_factor_code(code: str | None) -> str:
     return re.sub(r"[^0-9]", "", str(code))
 
 
+def _normalize_totp_seed(seed: str | None) -> str:
+    if not seed:
+        return ""
+    value = str(seed).strip()
+    if not value:
+        return ""
+    if value.lower().startswith("otpauth://"):
+        try:
+            parsed = urlparse(value)
+            secret = parse_qs(parsed.query).get("secret", [""])[0]
+            value = str(secret or "").strip()
+        except Exception:
+            value = ""
+    value = re.sub(r"[\s-]+", "", value).upper()
+    value = re.sub(r"[^A-Z2-7=]", "", value)
+    return value.rstrip("=")
+
+
+def _totp_code_for_timestamp(seed: str, when: float | None = None) -> str:
+    normalized_seed = _normalize_totp_seed(seed)
+    if not normalized_seed:
+        raise ValueError("invalid TOTP seed")
+    totp = TOTP(normalized_seed)
+    if when is None:
+        return totp.code()
+    timecode = int(float(when) / TOTP_INTERVAL_SECONDS)
+    return totp.generate_otp(timecode)
+
+
+def _totp_candidate_codes(seed: str, when: float | None = None) -> list[str]:
+    base = float(time.time() if when is None else when)
+    candidates: list[str] = []
+    for offset in (0, -TOTP_INTERVAL_SECONDS, TOTP_INTERVAL_SECONDS):
+        try:
+            code = _totp_code_for_timestamp(seed, base + offset)
+        except Exception:
+            continue
+        if code and code not in candidates:
+            candidates.append(code)
+    return candidates
+
+
 def _challenge_code_handler_factory(login_username: str, code: str | None):
     normalized = _normalize_two_factor_code(code)
 
@@ -438,7 +645,15 @@ def _poll_two_factor_code(login_username: str) -> str:
     return ""
 
 
-def _raise_login_error(exc: Exception) -> None:
+def _raise_login_error(exc: Exception, last_json: dict | None = None) -> None:
+    payload = last_json if isinstance(last_json, dict) else {}
+    err_type = str(payload.get("error_type") or "").strip().lower()
+    msg = str(payload.get("message") or "").strip().lower()
+    if err_type == "invalid_user" or "can't find an account" in msg:
+        raise PrivateAPIError(
+            "invalid_username",
+            "instagram could not find this login account (invalid username)",
+        )
     if isinstance(exc, ChallengeRequired):
         checkpoint_url = getattr(exc, "checkpoint_url", None) or getattr(exc, "url", None)
         if checkpoint_url and "unsupported_version" in checkpoint_url:
@@ -457,6 +672,12 @@ def _raise_login_error(exc: Exception) -> None:
     if isinstance(exc, TwoFactorRequired):
         raise PrivateAPIError("two_factor_required", "two_factor_required; provide RUN_2FA_CODE")
     if isinstance(exc, BadPassword):
+        lowered = str(exc).strip().lower()
+        if "change your ip address" in lowered or "blacklist" in lowered:
+            raise PrivateAPIError(
+                "proxy_blocked_or_bad_password",
+                "instagram rejected login: password may be wrong or proxy IP reputation is blocked",
+            )
         raise PrivateAPIError("bad_password", "invalid password")
     if isinstance(exc, LoginRequired):
         raise PrivateAPIError("login_required", "private API login required")
@@ -504,7 +725,17 @@ def _wrap_requests_timeout(session, timeout_seconds: float | None) -> None:
         return
 
 
-def _load_device_settings(device_settings_json: str | None) -> dict:
+def _default_device_settings_for_login(login_username: str | None = None) -> dict:
+    username = str(login_username or "").strip().lower()
+    if not username:
+        return dict(DEFAULT_DEVICE_SETTINGS)
+    idx = int(hashlib.sha256(username.encode("utf-8")).hexdigest()[:8], 16) % len(DEVICE_PROFILE_POOL)
+    merged = dict(DEFAULT_DEVICE_SETTINGS)
+    merged.update(DEVICE_PROFILE_POOL[idx])
+    return merged
+
+
+def _load_device_settings(device_settings_json: str | None, *, login_username: str | None = None) -> dict:
     raw = (device_settings_json or os.getenv(DEVICE_SETTINGS_ENV) or os.getenv(DEVICE_SETTINGS_GLOBAL_ENV) or "").strip()
     if raw:
         try:
@@ -513,7 +744,7 @@ def _load_device_settings(device_settings_json: str | None) -> dict:
                 return parsed
         except Exception:
             pass
-    return dict(DEFAULT_DEVICE_SETTINGS)
+    return _default_device_settings_for_login(login_username)
 
 
 def _load_user_agent(user_agent: str | None) -> str | None:
@@ -561,8 +792,6 @@ def _apply_device_settings(
     client.set_device(merged)
     if user_agent:
         client.set_user_agent(user_agent)
-    else:
-        client.set_user_agent("")
     try:
         _save_settings(login_username, client.get_settings())
     except Exception:
@@ -630,8 +859,15 @@ def _build_client(
         login_password = entry.get("login_password") or ""
     if not totp_seed:
         totp_seed = entry.get("totp_seed")
+    normalized_totp_seed = _normalize_totp_seed(totp_seed)
     if not login_password and not settings:
         raise RuntimeError("missing RUN_LOGIN_PASSWORD (no private session cached)")
+    _auth_trace(
+        login_username,
+        "build_client_start",
+        login_mode=_normalize_login_mode(login_mode),
+        has_settings=bool(settings),
+    )
 
     if settings:
         cl = Client(settings=settings or {})
@@ -650,15 +886,25 @@ def _build_client(
                 pass
     cl.username = login_username
     cl.password = login_password
-    desired_device_settings = _load_device_settings(device_settings_json)
+    device_settings_raw = (
+        device_settings_json
+        or os.getenv(DEVICE_SETTINGS_ENV)
+        or os.getenv(DEVICE_SETTINGS_GLOBAL_ENV)
+        or ""
+    ).strip()
+    has_device_override = bool(device_settings_raw)
+    desired_device_settings = _load_device_settings(device_settings_json, login_username=login_username)
     user_agent_override = _load_user_agent(user_agent)
-    updated_device = _apply_device_settings(
-        cl,
-        login_username,
-        desired_device_settings,
-        user_agent_override,
-        force=not settings,
-    )
+    should_apply_device_settings = (not settings) or has_device_override or bool(user_agent_override)
+    updated_device = False
+    if should_apply_device_settings:
+        updated_device = _apply_device_settings(
+            cl,
+            login_username,
+            desired_device_settings,
+            user_agent_override,
+            force=not settings,
+        )
     if updated_device:
         try:
             settings = cl.get_settings()
@@ -666,6 +912,10 @@ def _build_client(
             pass
 
     def _handle_exception(client, exc):
+        if isinstance(exc, BadPassword):
+            # Preserve this signal so we do not trigger extra automatic reauth attempts.
+            client._instalab_bad_password = True
+            raise exc
         if isinstance(exc, ChallengeRequired):
             if _is_unsupported_version(client.last_json, exc):
                 if not getattr(client, "_instalab_device_upgrade", False):
@@ -679,14 +929,15 @@ def _build_client(
                     client._instalab_device_upgrade = True
                     _login_with_password()
                     return
-            # Attempt to resolve checkpoint/challenge using handler + stored code.
-            client.challenge_resolve(client.last_json)
-            try:
-                _save_settings(login_username, client.get_settings())
-            except Exception:
-                pass
-            return
+            # Do not auto-resolve unknown challenge flows here.
+            # Repeated resolver attempts can amplify risk signals.
+            raise exc
         if isinstance(exc, LoginRequired):
+            if getattr(client, "_instalab_bad_password", False):
+                raise exc
+            if loginrequired_reauth_count["value"] >= 1:
+                raise exc
+            loginrequired_reauth_count["value"] += 1
             _login_with_password()
             try:
                 _save_settings(login_username, client.get_settings())
@@ -729,6 +980,7 @@ def _build_client(
     if trace_enabled and trace_path:
         _enable_trace(cl, login_username, trace_path)
     new_password_used = {"value": None}
+    loginrequired_reauth_count = {"value": 0}
 
     def _change_password_handler(username):
         try:
@@ -741,11 +993,6 @@ def _build_client(
 
     cl.change_password_handler = _change_password_handler
     verification_code = _normalize_two_factor_code(two_factor_code)
-    if not verification_code and totp_seed:
-        try:
-            verification_code = cl.totp_generate_code(totp_seed) or ""
-        except Exception:
-            verification_code = ""
 
     def _login_with_trust():
         enc_password = cl.password_encrypt(login_password or "")
@@ -805,28 +1052,74 @@ def _build_client(
         except Exception:
             pass
         try:
-            try:
-                cl.pre_login_flow()
-            except Exception:
-                pass
+            if PRE_LOGIN_FLOW_ENABLED:
+                try:
+                    cl.pre_login_flow()
+                except Exception:
+                    pass
             _login_with_trust()
         except TwoFactorRequired:
-            code = verification_code.strip()
-            if not code:
+            two_factor_info = cl.last_json.get("two_factor_info", {}) or {}
+            detected_method = _derive_two_factor_method(two_factor_info)
+            _auth_trace(login_username, "two_factor_required", two_factor_method=detected_method)
+            if verification_code:
+                _auth_trace(
+                    login_username,
+                    "two_factor_submit",
+                    two_factor_method=detected_method,
+                    totp_source="manual_code",
+                )
+                print("Two-factor code supplied (env/request)", flush=True)
+                _two_factor_login_with_trust(verification_code.strip())
+            elif normalized_totp_seed:
+                print("Two-factor required: using configured TOTP seed", flush=True)
+                last_exc = None
+                for code in _totp_candidate_codes(normalized_totp_seed):
+                    try:
+                        _auth_trace(
+                            login_username,
+                            "two_factor_submit",
+                            two_factor_method=detected_method,
+                            totp_source="seed_window",
+                        )
+                        _two_factor_login_with_trust(code)
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                if last_exc:
+                    raise last_exc
+            else:
                 print("Two-factor required: waiting for code", flush=True)
                 code = _poll_two_factor_code(login_username)
-            if not code:
-                raise TwoFactorRequired("Two-factor authentication required (missing code)")
-            print("Two-factor code received", flush=True)
-            _two_factor_login_with_trust(code)
-        try:
-            cl.login_flow()
-        except Exception:
-            pass
+                if not code:
+                    raise TwoFactorRequired("Two-factor authentication required (missing code)")
+                print("Two-factor code received", flush=True)
+                _auth_trace(
+                    login_username,
+                    "two_factor_submit",
+                    two_factor_method=detected_method,
+                    totp_source="challenge_store",
+                )
+                _two_factor_login_with_trust(code)
+        if POST_LOGIN_FLOW_ENABLED:
+            try:
+                cl.login_flow()
+            except Exception:
+                pass
         try:
             cl.last_login = time.time()
         except Exception:
             pass
+
+    def _probe_session():
+        """Low-noise session validation probe; avoid feed/timeline churn."""
+        try:
+            cl.account_info()
+            return
+        except Exception:
+            pass
+        cl.private_request("accounts/current_user/?edit=true")
 
     try:
         mode = _normalize_login_mode(login_mode)
@@ -838,16 +1131,63 @@ def _build_client(
                 _login_with_password()
             else:
                 try:
-                    cl.get_timeline_feed()
+                    _probe_session()
+                    reset_session_validation_failures(login_username)
+                    _auth_trace(login_username, "session_validation_ok", session_validation_ok=True)
                 except LoginRequired:
+                    streak = record_session_validation_failure(login_username)
+                    _auth_trace(
+                        login_username,
+                        "session_validation_failed",
+                        error_code="login_required",
+                        session_fail_streak=streak,
+                    )
+                    if streak >= SESSION_STALE_THRESHOLD:
+                        clear_session_settings(login_username)
+                        _auth_trace(
+                            login_username,
+                            "session_marked_stale",
+                            session_marked_stale=True,
+                            session_fail_streak=streak,
+                        )
                     if mode == "session":
                         raise
                     _login_with_password()
                 except TwoFactorRequired:
+                    streak = record_session_validation_failure(login_username)
+                    _auth_trace(
+                        login_username,
+                        "session_validation_failed",
+                        error_code="two_factor_required",
+                        session_fail_streak=streak,
+                    )
+                    if streak >= SESSION_STALE_THRESHOLD:
+                        clear_session_settings(login_username)
+                        _auth_trace(
+                            login_username,
+                            "session_marked_stale",
+                            session_marked_stale=True,
+                            session_fail_streak=streak,
+                        )
                     if mode == "session":
                         raise
                     _login_with_password()
                 except Exception:
+                    streak = record_session_validation_failure(login_username)
+                    _auth_trace(
+                        login_username,
+                        "session_validation_failed",
+                        error_code="session_probe_error",
+                        session_fail_streak=streak,
+                    )
+                    if streak >= SESSION_STALE_THRESHOLD:
+                        clear_session_settings(login_username)
+                        _auth_trace(
+                            login_username,
+                            "session_marked_stale",
+                            session_marked_stale=True,
+                            session_fail_streak=streak,
+                        )
                     if mode == "session":
                         raise
                     _login_with_password()
@@ -860,16 +1200,21 @@ def _build_client(
             set_last_error(login_username, str(exc))
         except Exception:
             pass
-        _raise_login_error(exc)
+        _raise_login_error(exc, getattr(cl, "last_json", None))
 
     try:
         _save_settings(login_username, cl.get_settings())
     except Exception:
         pass
     try:
+        reset_session_validation_failures(login_username)
+    except Exception:
+        pass
+    try:
         set_last_login(login_username)
     except Exception:
         pass
+    _auth_trace(login_username, "login_success", session_validation_ok=True)
     if new_password_used["value"]:
         try:
             set_login_password(login_username, new_password_used["value"])
@@ -983,10 +1328,13 @@ def enable_totp(
         device_settings_json=device_settings_json,
         user_agent=user_agent,
     )
+    normalized_seed = _normalize_totp_seed(totp_seed)
+    if not normalized_seed:
+        raise ValueError("invalid totp seed")
     if not verification_code:
-        verification_code = client.totp_generate_code(totp_seed)
+        verification_code = _totp_code_for_timestamp(normalized_seed)
     backup_codes = client.totp_enable(verification_code)
-    set_totp_seed(login_username, totp_seed)
+    set_totp_seed(login_username, normalized_seed)
     return backup_codes
 
 
@@ -1024,8 +1372,152 @@ def disable_totp(
 
 
 def generate_totp_code(seed: str) -> str:
-    client = Client()
-    return client.totp_generate_code(seed)
+    return _totp_code_for_timestamp(seed)
+
+
+def request_password_reset(
+    *,
+    email_or_username: str,
+    proxy_url: str | None = None,
+    http_timeout_seconds: float | None = None,
+    user_agent: str | None = None,
+) -> dict:
+    identifier = (email_or_username or "").strip()
+    if not identifier:
+        raise ValueError("email_or_username is required")
+    timeout_seconds = float(http_timeout_seconds or 30.0)
+    if timeout_seconds <= 0:
+        timeout_seconds = 30.0
+    effective_user_agent = _load_user_agent(user_agent) or (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_6) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/11.1.2 Safari/605.1.15"
+    )
+    headers = {
+        "x-requested-with": "XMLHttpRequest",
+        "x-csrftoken": instagrapi_utils.gen_token(),
+        "Connection": "Keep-Alive",
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip,deflate",
+        "Accept-Language": "en-US",
+        "User-Agent": effective_user_agent,
+    }
+    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+    response = requests.post(
+        "https://www.instagram.com/accounts/account_recovery_send_ajax/",
+        data={"email_or_username": identifier, "recaptcha_challenge_field": ""},
+        headers=headers,
+        proxies=proxies,
+        timeout=timeout_seconds,
+    )
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {"raw": (response.text or "")[:500]}
+    if response.status_code >= 400:
+        raise RuntimeError(f"password reset request failed: http {response.status_code} payload={payload}")
+    return {"http_status": response.status_code, "payload": payload}
+
+
+def signup_account_private_api(
+    *,
+    login_username: str,
+    login_password: str,
+    email: str,
+    full_name: str,
+    phone_number: str = "",
+    year: int | None = None,
+    month: int | None = None,
+    day: int | None = None,
+    poll_seconds: int = 300,
+    poll_interval: float = 5.0,
+    proxy_url: str | None = None,
+    http_timeout_seconds=None,
+    request_sleep_seconds=None,
+):
+    if not proxy_url:
+        proxy = load_proxy_from_env()
+        proxy_url = proxy.get("url") if proxy else None
+    client = _build_public_client(
+        proxy_url,
+        http_timeout_seconds=http_timeout_seconds,
+        request_sleep_seconds=request_sleep_seconds,
+        request_timeout=120.0,
+    )
+    # Compatibility shim: some instagrapi versions reference `self.device_id`
+    # in signup() even though only `android_device_id` is initialized.
+    if not getattr(client, "device_id", None):
+        try:
+            client.device_id = getattr(client, "android_device_id", None) or client.generate_android_device_id()
+        except Exception:
+            client.device_id = getattr(client, "android_device_id", "")
+    # signup() polls challenge_code_handler for the email OTP code.
+    # We route that through the same challenge-code store used elsewhere.
+    base_challenge_handler = _challenge_code_handler_factory(login_username, None)
+    client.challenge_code_handler = base_challenge_handler
+    client.wait_seconds = max(1, int(poll_interval or 5.0))
+
+    started = time.time()
+
+    def _timed_out() -> bool:
+        return (time.time() - started) > max(60, int(poll_seconds or 300))
+
+    def _timed_handler(username, choice):
+        if _timed_out():
+            return False
+        return base_challenge_handler(username, choice)
+
+    client.challenge_code_handler = _timed_handler
+
+    try:
+        user = client.signup(
+            username=login_username,
+            password=login_password,
+            email=email,
+            phone_number=phone_number or "",
+            full_name=full_name or "",
+            year=year,
+            month=month,
+            day=day,
+        )
+    except EmailInvalidError as exc:
+        raise PrivateAPIError("email_invalid", str(exc))
+    except EmailNotAvailableError as exc:
+        raise PrivateAPIError("email_not_available", str(exc))
+    except EmailVerificationSendError as exc:
+        raise PrivateAPIError("email_send_failed", str(exc))
+    except AgeEligibilityError as exc:
+        raise PrivateAPIError("age_not_eligible", str(exc))
+    except (RequestsSSLError, RequestsProxyError) as exc:
+        raise PrivateAPIError(
+            "ssl_or_proxy_error",
+            f"signup transport error (ssl/proxy): {exc}",
+        )
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "ssl" in msg and ("wrong version number" in msg or "certificate verify failed" in msg):
+            raise PrivateAPIError(
+                "ssl_or_proxy_error",
+                f"signup transport error (ssl/proxy): {exc}",
+            )
+        if "429" in msg or "too many requests" in msg or "too many 429" in msg:
+            raise PrivateAPIError(
+                "rate_limited",
+                "instagram rate limited signup (429); retry later or rotate proxy session",
+            )
+        _raise_login_error(exc, getattr(client, "last_json", None))
+
+    try:
+        _save_settings(login_username, client.get_settings())
+    except Exception:
+        pass
+    try:
+        set_last_login(login_username)
+    except Exception:
+        pass
+    return {
+        "username": getattr(user, "username", login_username),
+        "pk": getattr(user, "pk", None),
+    }
 
 
 def fetch_counts(
@@ -1114,6 +1606,8 @@ def snapshot_profile(
     login_mode="auto",
     item_delay_min=0.0,
     item_delay_max=0.0,
+    fetch_order="followers_first",
+    initial_fetch_delay_seconds=0.0,
     pause_every_min=0,
     pause_every_max=0,
     pause_seconds_min=0.0,
@@ -1239,75 +1733,98 @@ def snapshot_profile(
         _enable_progress_private_request(client)
 
     try:
-        t0 = time.time()
-        if progress:
-            try:
-                progress("followers", 0)
-            except Exception:
-                pass
+        settle = float(initial_fetch_delay_seconds or 0.0)
+        if settle > 0:
+            if progress:
+                try:
+                    progress("settle", int(settle))
+                except Exception:
+                    pass
+            time.sleep(min(settle, 120.0))
+        order = str(fetch_order or "followers_first").strip().lower()
+        if order not in {"followers_first", "following_first"}:
+            order = "followers_first"
 
-        if anonymous_mode:
-            with _trace_span(
-                "instalab.public_api.user_followers",
-                login_username=login_username,
-                target_username=target_username,
-                target_id=target_id,
-            ):
-                follower_items = client.user_followers_gql(str(target_id), amount=0)
-            followers = [u.username for u in follower_items if getattr(u, "username", None)]
+        def _fetch_followers():
+            t0 = time.time()
+            if progress:
+                try:
+                    progress("followers", 0)
+                except Exception:
+                    pass
+            if anonymous_mode:
+                with _trace_span(
+                    "instalab.public_api.user_followers",
+                    login_username=login_username,
+                    target_username=target_username,
+                    target_id=target_id,
+                ):
+                    follower_items = client.user_followers_gql(str(target_id), amount=0)
+                vals = [u.username for u in follower_items if getattr(u, "username", None)]
+            else:
+                with _trace_span(
+                    "instalab.private_api.user_followers",
+                    login_username=login_username,
+                    target_username=target_username,
+                    target_id=target_id,
+                ):
+                    followers_map = client.user_followers(target_id, amount=0)
+                vals = [u.username for u in followers_map.values() if getattr(u, "username", None)]
+            secs = int(time.time() - t0)
+            if progress:
+                try:
+                    progress("followers", len(vals))
+                except Exception:
+                    pass
+            return vals, secs
+
+        def _fetch_following():
+            t0 = time.time()
+            if progress:
+                try:
+                    progress("following", 0)
+                except Exception:
+                    pass
+            if anonymous_mode:
+                with _trace_span(
+                    "instalab.public_api.user_following",
+                    login_username=login_username,
+                    target_username=target_username,
+                    target_id=target_id,
+                ):
+                    followee_items = client.user_following_gql(str(target_id), amount=0)
+                vals = [u.username for u in followee_items if getattr(u, "username", None)]
+            else:
+                with _trace_span(
+                    "instalab.private_api.user_following",
+                    login_username=login_username,
+                    target_username=target_username,
+                    target_id=target_id,
+                ):
+                    followees_map = client.user_following(target_id, amount=0)
+                vals = [u.username for u in followees_map.values() if getattr(u, "username", None)]
+            secs = int(time.time() - t0)
+            if progress:
+                try:
+                    progress("following", len(vals))
+                except Exception:
+                    pass
+            return vals, secs
+
+        if order == "following_first":
+            followees, followees_fetch_seconds = _fetch_following()
+            _sleep_jitter(item_delay_min, item_delay_max)
+            _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
+            if cancel_check and cancel_check():
+                raise RuntimeError("cancelled")
+            followers, followers_fetch_seconds = _fetch_followers()
         else:
-            with _trace_span(
-                "instalab.private_api.user_followers",
-                login_username=login_username,
-                target_username=target_username,
-                target_id=target_id,
-            ):
-                followers_map = client.user_followers(target_id, amount=0)
-            followers = [u.username for u in followers_map.values() if getattr(u, "username", None)]
-        followers_fetch_seconds = int(time.time() - t0)
-        if progress:
-            try:
-                progress("followers", len(followers))
-            except Exception:
-                pass
-
-        _sleep_jitter(item_delay_min, item_delay_max)
-        _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
-
-        if cancel_check and cancel_check():
-            raise RuntimeError("cancelled")
-
-        t1 = time.time()
-        if progress:
-            try:
-                progress("following", 0)
-            except Exception:
-                pass
-
-        if anonymous_mode:
-            with _trace_span(
-                "instalab.public_api.user_following",
-                login_username=login_username,
-                target_username=target_username,
-                target_id=target_id,
-            ):
-                followee_items = client.user_following_gql(str(target_id), amount=0)
-            followees = [u.username for u in followee_items if getattr(u, "username", None)]
-        else:
-            with _trace_span(
-                "instalab.private_api.user_following",
-                login_username=login_username,
-                target_username=target_username,
-                target_id=target_id,
-            ):
-                followees_map = client.user_following(target_id, amount=0)
-            followees = [u.username for u in followees_map.values() if getattr(u, "username", None)]
-        followees_fetch_seconds = int(time.time() - t1)
-        if progress:
-            try:
-                progress("following", len(followees))
-            except Exception:
-                pass
+            followers, followers_fetch_seconds = _fetch_followers()
+            _sleep_jitter(item_delay_min, item_delay_max)
+            _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
+            if cancel_check and cancel_check():
+                raise RuntimeError("cancelled")
+            followees, followees_fetch_seconds = _fetch_following()
 
         non_followbacks = sorted(set(followees) - set(followers))
         followers_rate = round(len(followers) / followers_fetch_seconds, 3) if followers_fetch_seconds else None
