@@ -7,6 +7,7 @@ import random
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -277,7 +278,16 @@ def _with_browser_context(login_username: str, login_mode: str, fn):
 
     headless = str(os.getenv("INSTALAB_BROWSER_HEADLESS", "true")).strip().lower() in {"1", "true", "yes", "on"}
     launch_proxy = str(os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or "").strip()
-    browser_proxy = {"server": launch_proxy} if launch_proxy else None
+    browser_proxy = None
+    if launch_proxy:
+        parsed = urlparse(launch_proxy)
+        if parsed.hostname and parsed.port:
+            proxy_payload = {"server": f"{parsed.scheme or 'http'}://{parsed.hostname}:{parsed.port}"}
+            if parsed.username:
+                proxy_payload["username"] = parsed.username
+            if parsed.password:
+                proxy_payload["password"] = parsed.password
+            browser_proxy = proxy_payload
     user_agent = str(os.getenv("INSTALAB_BROWSER_USER_AGENT", "") or "").strip() or DEFAULT_UA
 
     with sync_playwright() as p:
