@@ -139,7 +139,9 @@ export async function getConfig(): Promise<ConfigPayload> {
   return configSchema.parse(data);
 }
 
-export async function updateConfig(payload: Partial<ConfigValues> & { proxy_password?: string }): Promise<ConfigPayload> {
+export async function updateConfig(
+  payload: Partial<ConfigValues> & { proxy_password?: string; _apply_backend_profile?: boolean }
+): Promise<ConfigPayload> {
   const data = await fetchJson<unknown>("/config", {
     method: "PUT",
     body: JSON.stringify(payload),

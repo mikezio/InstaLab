@@ -1250,6 +1250,36 @@ function SettingsPage() {
   const cfgQ = useQuery({ queryKey: ["config"], queryFn: getConfig, refetchInterval: 30000 });
   const [draft, setDraft] = useState<Record<string, string | number | boolean>>({});
   const [proxyPassword, setProxyPassword] = useState("");
+  const [loadedBackend, setLoadedBackend] = useState<string>("");
+
+  const backendProfiles: Record<string, Record<string, string | number | boolean>> = {
+    private: {
+      run_http_timeout_seconds: 60,
+      run_request_timeout: 60,
+      run_private_request_sleep_seconds: 0.8,
+      run_item_delay_min: 0.6,
+      run_item_delay_max: 1.4,
+      run_initial_fetch_delay_seconds: 6,
+      run_pause_every_min: 120,
+      run_pause_every_max: 180,
+      run_pause_seconds_min: 20,
+      run_pause_seconds_max: 45,
+      run_rate_limit_cooldown_seconds: 3600,
+    },
+    browser: {
+      run_http_timeout_seconds: 60,
+      run_request_timeout: 60,
+      run_private_request_sleep_seconds: 0,
+      run_item_delay_min: 0.25,
+      run_item_delay_max: 0.75,
+      run_initial_fetch_delay_seconds: 1,
+      run_pause_every_min: 0,
+      run_pause_every_max: 0,
+      run_pause_seconds_min: 0,
+      run_pause_seconds_max: 0,
+      run_rate_limit_cooldown_seconds: 1800,
+    },
+  };
 
   useEffect(() => {
     const c = cfgQ.data?.config;
@@ -1261,6 +1291,7 @@ function SettingsPage() {
       }
     }
     setDraft(nextDraft);
+    setLoadedBackend(String(c.run_scraper_backend || ""));
   }, [cfgQ.data]);
 
   const updateCfgMutation = useMutation({
@@ -1293,10 +1324,14 @@ function SettingsPage() {
       .join(" ");
 
   const onSaveConfig = () => {
-    const payload: Partial<ConfigValues> & { proxy_password?: string } = {};
+    const payload: Partial<ConfigValues> & { proxy_password?: string; _apply_backend_profile?: boolean } = {};
     for (const [key, value] of Object.entries(draft)) {
       if (key.endsWith("_set")) continue;
       (payload as Record<string, string | number | boolean>)[key] = value;
+    }
+    const selectedBackend = String(draft.run_scraper_backend || "");
+    if (selectedBackend && loadedBackend && selectedBackend !== loadedBackend) {
+      payload._apply_backend_profile = true;
     }
     if (proxyPassword.trim()) payload.proxy_password = proxyPassword.trim();
     updateCfgMutation.mutate(payload);
@@ -1348,10 +1383,20 @@ function SettingsPage() {
                 return (
                   <label key={key}>
                     {labelForKey(key)}
-                    <select value={String(value)} onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}>
+                    <select
+                      value={String(value)}
+                      onChange={(e) =>
+                        setDraft((prev) => {
+                          const nextBackend = e.target.value === "private" ? "private" : "browser";
+                          const profile = backendProfiles[nextBackend] || {};
+                          return { ...prev, run_scraper_backend: nextBackend, ...profile };
+                        })
+                      }
+                    >
                       <option value="browser">browser (web session)</option>
                       <option value="private">instagrapi (private API)</option>
                     </select>
+                    <span className="hint">Switching backend auto-loads the tuned delay/rate profile.</span>
                   </label>
                 );
               }

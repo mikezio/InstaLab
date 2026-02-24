@@ -290,6 +290,37 @@ SCRAPER_BACKEND_ALIASES = {
     "playwright": "browser",
 }
 
+RUN_BACKEND_TUNING_PROFILES = {
+    # Safer cadence for instagrapi/private API to reduce throttling risk.
+    "private": {
+        "run_http_timeout_seconds": 60.0,
+        "run_request_timeout": 60.0,
+        "run_private_request_sleep_seconds": 0.8,
+        "run_item_delay_min": 0.6,
+        "run_item_delay_max": 1.4,
+        "run_initial_fetch_delay_seconds": 6.0,
+        "run_pause_every_min": 120,
+        "run_pause_every_max": 180,
+        "run_pause_seconds_min": 20.0,
+        "run_pause_seconds_max": 45.0,
+        "run_rate_limit_cooldown_seconds": 3600,
+    },
+    # Browser collector can run faster while keeping basic jitter.
+    "browser": {
+        "run_http_timeout_seconds": 60.0,
+        "run_request_timeout": 60.0,
+        "run_private_request_sleep_seconds": 0.0,
+        "run_item_delay_min": 0.25,
+        "run_item_delay_max": 0.75,
+        "run_initial_fetch_delay_seconds": 1.0,
+        "run_pause_every_min": 0,
+        "run_pause_every_max": 0,
+        "run_pause_seconds_min": 0.0,
+        "run_pause_seconds_max": 0.0,
+        "run_rate_limit_cooldown_seconds": 1800,
+    },
+}
+
 
 def _normalize_run_login_mode(value: str | None) -> str:
     mode = str(value or "auto").strip().lower()
@@ -313,6 +344,12 @@ def _normalize_scraper_backend(value: str | None) -> str:
 
 def _is_private_backend_name(value: str | None) -> bool:
     return _normalize_scraper_backend(value) == "private"
+
+
+def _backend_tuning_profile(value: str | None) -> dict:
+    backend = _normalize_scraper_backend(value)
+    profile = RUN_BACKEND_TUNING_PROFILES.get(backend, {})
+    return dict(profile)
 
 CONFIG_DEFAULTS = {
     "run_stall_seconds": int(os.getenv("RUN_STALL_SECONDS", "1200")),
@@ -5357,12 +5394,24 @@ def api_config_update():
     data = request.get_json(force=True) or {}
     if not isinstance(data, dict) or not data:
         return jsonify({"error": "config payload required"}), 400
+    apply_backend_profile = False
+    profile_applied_backend = None
     try:
         cleaned = {}
         for key, value in data.items():
+            if key == "_apply_backend_profile":
+                apply_backend_profile = _parse_bool(value)
+                continue
             if key in SENSITIVE_CONFIG_KEYS and (value is None or str(value).strip() == ""):
                 continue
             cleaned[key] = value
+        if "run_scraper_backend" in cleaned:
+            cleaned["run_scraper_backend"] = _normalize_scraper_backend(cleaned.get("run_scraper_backend"))
+        if apply_backend_profile:
+            profile_applied_backend = str(
+                cleaned.get("run_scraper_backend", _get_config_value("run_scraper_backend", "browser"))
+            )
+            cleaned.update(_backend_tuning_profile(profile_applied_backend))
         # Keep legacy + new timeout keys aligned for older callers.
         if "run_request_timeout" in cleaned and "run_http_timeout_seconds" not in cleaned:
             cleaned["run_http_timeout_seconds"] = cleaned["run_request_timeout"]
@@ -5389,7 +5438,13 @@ def api_config_update():
     except Exception:
         pass
     cfg = _get_config(force=True)
-    return jsonify({"updated": list(updated.keys()), "config": _mask_config_for_api(cfg)})
+    return jsonify(
+        {
+            "updated": list(updated.keys()),
+            "profile_applied_backend": profile_applied_backend,
+            "config": _mask_config_for_api(cfg),
+        }
+    )
 
 
 @app.route("/api/integrations/whatsapp/webhook", methods=["GET"])
