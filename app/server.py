@@ -75,6 +75,7 @@ from recon_store import (
 from recon_worker import ReconExecutionError, run_recon_scan
 from validation import ValidationError, sanitize_sql_limit
 from proxy_utils import load_proxy_from_env
+from browser_tracker import browser_storage_path_for_login
 
 # Ensure consistent HOME for session/cache files
 os.environ.setdefault("HOME", "/home/stremio")
@@ -3084,6 +3085,16 @@ ACCOUNT_CREATE_LOG = []
 RUN_WATCHDOG_STOP = threading.Event()
 
 
+def _collector_storage_path(login_username: str) -> str:
+    username = str(login_username or "").strip()
+    if not username:
+        return UNFOLLOW_STORAGE
+    try:
+        return str(browser_storage_path_for_login(username))
+    except Exception:
+        return UNFOLLOW_STORAGE
+
+
 def _get_run_lock(login_username: str) -> threading.Lock:
     key = login_username or "_default"
     with RUN_LOCKS_GUARD:
@@ -5432,6 +5443,55 @@ def api_whatsapp_test():
     return jsonify({"ok": True, "to": to_number})
 
 
+@app.route("/api/collector/auth/status", methods=["GET"])
+def api_collector_auth_status():
+    login_username = str(request.args.get("login_username") or "").strip()
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    storage_path = _collector_storage_path(login_username)
+    storage_file = Path(storage_path)
+    return jsonify(
+        {
+            "login_username": login_username,
+            "scraper_backend": _normalize_scraper_backend(_get_config_value("run_scraper_backend", "browser")),
+            "storage_path": storage_path,
+            "storage_exists": storage_file.exists(),
+            "auth_ready": ensure_auth_state(storage_path),
+            "storage_mtime": storage_file.stat().st_mtime if storage_file.exists() else None,
+        }
+    )
+
+
+@app.route("/api/collector/auth/init", methods=["POST"])
+def api_collector_auth_init():
+    data = request.get_json(force=True) or {}
+    login_username = str(data.get("login_username") or "").strip()
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    try:
+        max_wait_seconds = int(data.get("max_wait_seconds") or 300)
+    except Exception:
+        max_wait_seconds = 300
+    storage_path = _collector_storage_path(login_username)
+    proxy = _get_proxy_config(session_id=_generate_proxy_session_id())
+    executor.submit(
+        init_login,
+        storage_path,
+        proxy.get("server") if proxy.get("enabled") else None,
+        proxy.get("username"),
+        proxy.get("password"),
+        max_wait_seconds,
+    )
+    return jsonify(
+        {
+            "started": True,
+            "note": "interactive collector login opened",
+            "login_username": login_username,
+            "storage_path": storage_path,
+        }
+    )
+
+
 @app.route("/api/unfollow/status", methods=["GET"])
 def api_unfollow_status():
     try:
@@ -5577,6 +5637,11 @@ def api_unfollow_cancel():
 
 @app.route("/api/unfollow/init", methods=["POST"])
 def api_unfollow_init():
+    data = request.get_json(silent=True) or {}
+    try:
+        max_wait_seconds = int(data.get("max_wait_seconds") or 300)
+    except Exception:
+        max_wait_seconds = 300
     if UNFOLLOW_LOCK.locked():
         return jsonify({"error": "unfollow job running"}), 409
     # Launch interactive login in background (requires display on server)
@@ -5587,6 +5652,7 @@ def api_unfollow_init():
         proxy.get("server") if proxy.get("enabled") else None,
         proxy.get("username"),
         proxy.get("password"),
+        max_wait_seconds,
     )
     return jsonify({"started": True, "note": "interactive login opened"})
 
