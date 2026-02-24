@@ -266,7 +266,20 @@ def _collect_usernames_via_api(
         if resp.status >= 400:
             raise BrowserTrackerError("api_error", f"instagram API error {resp.status} while fetching {kind}")
 
-        payload = resp.json()
+        try:
+            payload = resp.json()
+        except Exception:
+            body = ""
+            try:
+                body = (resp.text() or "")[:200]
+            except Exception:
+                body = ""
+            lowered = body.lower()
+            if "<!doctype html" in lowered or "<html" in lowered:
+                if "login" in lowered:
+                    raise BrowserTrackerError("auth_required", "browser session expired; interactive login required")
+                raise BrowserTrackerError("rate_limited", f"instagram returned HTML instead of JSON while fetching {kind}")
+            raise BrowserTrackerError("api_error", f"unexpected non-JSON response while fetching {kind}")
         users = payload.get("users") or []
         before = len(usernames)
         for user in users:
@@ -673,6 +686,11 @@ def snapshot_profile(
             "followees_count": following_total,
             "followers": followers,
             "followees": followees,
+            "followers_collected_count": len(followers),
+            "followees_collected_count": len(followees),
+            "followers_missing_count": max(0, int(followers_total) - len(followers)),
+            "followees_missing_count": max(0, int(following_total) - len(followees)),
+            "partial_collection": (len(followers) < int(followers_total)) or (len(followees) < int(following_total)),
             "non_followbacks_count": len(non_followbacks),
             "followers_added": len((changes.get("followers") or {}).get("added") or []),
             "followers_removed": len((changes.get("followers") or {}).get("removed") or []),
