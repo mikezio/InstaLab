@@ -628,14 +628,17 @@ function OperationsPage() {
   const runPayload = runJobQ.data?.payload;
   const runMeta = runJobQ.data?.meta;
   const runDone = Boolean(runJobQ.data?.done);
+  const runErrorCode = String(runPayload?.error_code || "").toLowerCase();
   const promptHint = (runJobDetailQ.data?.worker_out_tail || "").toLowerCase().includes("waiting for code");
+  const interactiveChallenge =
+    runErrorCode === "two_factor_required" ||
+    runErrorCode === "challenge_required" ||
+    (String(runMeta?.state || "").toLowerCase() === "running" && promptHint);
   const runNeedsCode =
-    !runDone &&
-    (promptHint ||
-      String(runPayload?.error_code || "").toLowerCase() === "two_factor_required" ||
-      String(runPayload?.error_code || "").toLowerCase() === "challenge_required");
+    !runDone && interactiveChallenge;
   useEffect(() => {
-    if (runNeedsCode) setShowCodeModal(true);
+    setShowCodeModal(runNeedsCode);
+    if (!runNeedsCode) setVerificationCode("");
   }, [runNeedsCode]);
 
   return (
