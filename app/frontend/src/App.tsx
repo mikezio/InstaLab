@@ -401,168 +401,171 @@ function ExplorerPage() {
         <h1>Explorer</h1>
         <p>Run history and run-level relationship deltas for each tracked target account.</p>
       </header>
-      <article className="card">
-        <h3>Run History</h3>
-        <div className="form-grid">
-          <label>
-            Target
-            <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)}>
-              {(targetsQ.data ?? []).map((t, idx) => (
-                <option key={`${t.target_username || "target"}-${idx}`} value={t.target_username || ""}>
-                  {t.target_username || "-"}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Run</th>
-                <th>Timestamp</th>
-                <th>Collector</th>
-                <th>Followers</th>
-                <th>Following</th>
-                <th>NF</th>
-                <th>Duration</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(runsQ.data ?? []).map((run, idx) => (
-                <tr key={`${run.id || "run"}-${idx}`}>
-                  <td>{run.id ?? "-"}</td>
-                  <td>{formatTime(run.timestamp || undefined)}</td>
-                  <td>{run.login_username || "-"}</td>
-                  <td>{run.followers_count ?? "-"}</td>
-                  <td>{run.followees_count ?? "-"}</td>
-                  <td>{run.non_followbacks_count ?? "-"}</td>
-                  <td>{typeof run.duration_seconds === "number" ? `${run.duration_seconds}s` : "-"}</td>
-                  <td className="row gap">
-                    <button className="btn-secondary" onClick={() => setSelectedRunId(run.id ?? null)} disabled={!run.id}>
-                      View
-                    </button>
-                    <button
-                      className="btn-secondary"
-                      onClick={() => run.id && deleteRunMutation.mutate(run.id)}
-                      disabled={deleteRunMutation.isPending || !run.id}
-                    >
-                      Delete
-                    </button>
-                    <button
-                      className="btn-secondary"
-                      onClick={() => run.id && undoRunMutation.mutate(run.id)}
-                      disabled={undoRunMutation.isPending || !run.id}
-                    >
-                      Undo
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {!(runsQ.data ?? []).length ? (
+      <div className="split-grid">
+        <article className="card">
+          <h3>Run History</h3>
+          <div className="form-grid">
+            <label>
+              Target
+              <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)}>
+                {(targetsQ.data ?? []).map((t, idx) => (
+                  <option key={`${t.target_username || "target"}-${idx}`} value={t.target_username || ""}>
+                    {t.target_username || "-"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <p className="hint">Select a run to load details on the right.</p>
+          <div className="table-wrap" style={{ maxHeight: "60vh", overflowY: "auto" }}>
+            <table>
+              <thead>
                 <tr>
-                  <td colSpan={8} className="hint">No runs found for selected target.</td>
+                  <th>Run</th>
+                  <th>Timestamp</th>
+                  <th>Collector</th>
+                  <th>Followers</th>
+                  <th>Following</th>
+                  <th>NF</th>
+                  <th>Duration</th>
+                  <th>Actions</th>
                 </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-        {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
-        {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}
-      </article>
-      <article className="card">
-        <h3>Run Detail {selectedRunId ? `#${selectedRunId}` : ""}</h3>
-        {!detail ? <p className="hint">Select a run to load details.</p> : null}
-        {detail ? (
-          <>
-            <p className="hint">
-              @{detail.target_username || "-"} via @{detail.login_username || "-"} · {formatTime(detail.timestamp || undefined)}
-            </p>
-            <p className="hint">
-              Followers {detail.followers_count ?? "-"} ({detail.followers_added ?? 0} added / {detail.followers_removed ?? 0} removed) · Following {detail.followees_count ?? "-"} ({detail.followees_added ?? 0} added / {detail.followees_removed ?? 0} removed)
-            </p>
-            <div className="row gap">
-              <button
-                className="btn-secondary"
-                onClick={() =>
-                  downloadCsvRows(
-                    `${targetSlug}-followers.csv`,
-                    ["username"],
-                    (detail.followers ?? []).map((u) => [u])
-                  )
-                }
-              >
-                Export followers CSV
-              </button>
-              <button
-                className="btn-secondary"
-                onClick={() =>
-                  downloadCsvRows(
-                    `${targetSlug}-following.csv`,
-                    ["username"],
-                    (detail.followees ?? []).map((u) => [u])
-                  )
-                }
-              >
-                Export following CSV
-              </button>
-              <button
-                className="btn-secondary"
-                onClick={() =>
-                  downloadCsvRows(
-                    `${targetSlug}-no-follow-back.csv`,
-                    ["username"],
-                    (detail.non_followbacks ?? []).map((u) => [u])
-                  )
-                }
-              >
-                Export non-followbacks CSV
-              </button>
-            </div>
-            <div className="split-grid">
-              <section className="target-section">
-                <h4>Followers Added</h4>
-                <div className="entity-list">
-                  {(detail.followers_added_list ?? []).slice(0, 40).map((u, idx) => (
-                    <div key={`fa-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
-                  ))}
-                  {!(detail.followers_added_list ?? []).length ? <p className="hint">None</p> : null}
-                </div>
-              </section>
-              <section className="target-section">
-                <h4>Followers Removed</h4>
-                <div className="entity-list">
-                  {(detail.followers_removed_list ?? []).slice(0, 40).map((u, idx) => (
-                    <div key={`fr-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
-                  ))}
-                  {!(detail.followers_removed_list ?? []).length ? <p className="hint">None</p> : null}
-                </div>
-              </section>
-            </div>
-            <div className="split-grid">
-              <section className="target-section">
-                <h4>Following Added</h4>
-                <div className="entity-list">
-                  {(detail.followees_added_list ?? []).slice(0, 40).map((u, idx) => (
-                    <div key={`ea-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
-                  ))}
-                  {!(detail.followees_added_list ?? []).length ? <p className="hint">None</p> : null}
-                </div>
-              </section>
-              <section className="target-section">
-                <h4>Following Removed</h4>
-                <div className="entity-list">
-                  {(detail.followees_removed_list ?? []).slice(0, 40).map((u, idx) => (
-                    <div key={`er-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
-                  ))}
-                  {!(detail.followees_removed_list ?? []).length ? <p className="hint">None</p> : null}
-                </div>
-              </section>
-            </div>
-          </>
-        ) : null}
-      </article>
+              </thead>
+              <tbody>
+                {(runsQ.data ?? []).map((run, idx) => (
+                  <tr key={`${run.id || "run"}-${idx}`}>
+                    <td>{run.id ?? "-"}</td>
+                    <td>{formatTime(run.timestamp || undefined)}</td>
+                    <td>{run.login_username || "-"}</td>
+                    <td>{run.followers_count ?? "-"}</td>
+                    <td>{run.followees_count ?? "-"}</td>
+                    <td>{run.non_followbacks_count ?? "-"}</td>
+                    <td>{typeof run.duration_seconds === "number" ? `${run.duration_seconds}s` : "-"}</td>
+                    <td className="row gap">
+                      <button className="btn-secondary" onClick={() => setSelectedRunId(run.id ?? null)} disabled={!run.id}>
+                        View
+                      </button>
+                      <button
+                        className="btn-secondary"
+                        onClick={() => run.id && deleteRunMutation.mutate(run.id)}
+                        disabled={deleteRunMutation.isPending || !run.id}
+                      >
+                        Delete
+                      </button>
+                      <button
+                        className="btn-secondary"
+                        onClick={() => run.id && undoRunMutation.mutate(run.id)}
+                        disabled={undoRunMutation.isPending || !run.id}
+                      >
+                        Undo
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {!(runsQ.data ?? []).length ? (
+                  <tr>
+                    <td colSpan={8} className="hint">No runs found for selected target.</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+          {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
+          {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}
+        </article>
+        <article className="card">
+          <h3>Run Detail {selectedRunId ? `#${selectedRunId}` : ""}</h3>
+          {!detail ? <p className="hint">Select a run to load details.</p> : null}
+          {detail ? (
+            <>
+              <p className="hint">
+                @{detail.target_username || "-"} via @{detail.login_username || "-"} · {formatTime(detail.timestamp || undefined)}
+              </p>
+              <p className="hint">
+                Followers {detail.followers_count ?? "-"} ({detail.followers_added ?? 0} added / {detail.followers_removed ?? 0} removed) · Following {detail.followees_count ?? "-"} ({detail.followees_added ?? 0} added / {detail.followees_removed ?? 0} removed)
+              </p>
+              <div className="row gap">
+                <button
+                  className="btn-secondary"
+                  onClick={() =>
+                    downloadCsvRows(
+                      `${targetSlug}-followers.csv`,
+                      ["username"],
+                      (detail.followers ?? []).map((u) => [u])
+                    )
+                  }
+                >
+                  Export followers CSV
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={() =>
+                    downloadCsvRows(
+                      `${targetSlug}-following.csv`,
+                      ["username"],
+                      (detail.followees ?? []).map((u) => [u])
+                    )
+                  }
+                >
+                  Export following CSV
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={() =>
+                    downloadCsvRows(
+                      `${targetSlug}-no-follow-back.csv`,
+                      ["username"],
+                      (detail.non_followbacks ?? []).map((u) => [u])
+                    )
+                  }
+                >
+                  Export non-followbacks CSV
+                </button>
+              </div>
+              <div className="split-grid">
+                <section className="target-section">
+                  <h4>Followers Added</h4>
+                  <div className="entity-list">
+                    {(detail.followers_added_list ?? []).slice(0, 40).map((u, idx) => (
+                      <div key={`fa-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
+                    ))}
+                    {!(detail.followers_added_list ?? []).length ? <p className="hint">None</p> : null}
+                  </div>
+                </section>
+                <section className="target-section">
+                  <h4>Followers Removed</h4>
+                  <div className="entity-list">
+                    {(detail.followers_removed_list ?? []).slice(0, 40).map((u, idx) => (
+                      <div key={`fr-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
+                    ))}
+                    {!(detail.followers_removed_list ?? []).length ? <p className="hint">None</p> : null}
+                  </div>
+                </section>
+              </div>
+              <div className="split-grid">
+                <section className="target-section">
+                  <h4>Following Added</h4>
+                  <div className="entity-list">
+                    {(detail.followees_added_list ?? []).slice(0, 40).map((u, idx) => (
+                      <div key={`ea-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
+                    ))}
+                    {!(detail.followees_added_list ?? []).length ? <p className="hint">None</p> : null}
+                  </div>
+                </section>
+                <section className="target-section">
+                  <h4>Following Removed</h4>
+                  <div className="entity-list">
+                    {(detail.followees_removed_list ?? []).slice(0, 40).map((u, idx) => (
+                      <div key={`er-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
+                    ))}
+                    {!(detail.followees_removed_list ?? []).length ? <p className="hint">None</p> : null}
+                  </div>
+                </section>
+              </div>
+            </>
+          ) : null}
+        </article>
+      </div>
       <article className="card">
         <h3>Relationship Events</h3>
         <div className="form-grid">
