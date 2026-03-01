@@ -18,6 +18,10 @@ import {
   type RelationshipHistoryRow,
   type AuthTracePayload,
   type AuthPreflightPayload,
+  type RunHistoryItem,
+  type RunDetail,
+  type UnfollowStatus,
+  type UnfollowPreview,
   targetsSummarySchema,
   scheduleSchema,
   loginSchema,
@@ -26,6 +30,10 @@ import {
   relationshipHistorySchema,
   authTraceSchema,
   authPreflightSchema,
+  runHistorySchema,
+  runDetailSchema,
+  unfollowStatusSchema,
+  unfollowPreviewSchema,
 } from "./schemas";
 
 const API_BASE = "/api";
@@ -257,4 +265,72 @@ export async function getRelationshipHistory(
     `/relationship_history?target=${encodeURIComponent(target)}&relation_type=${encodeURIComponent(relationType)}&limit=100`
   );
   return relationshipHistorySchema.parse(data);
+}
+
+export async function getRuns(target: string, limit = 40): Promise<RunHistoryItem[]> {
+  const data = await fetchJson<unknown>(
+    `/runs?target=${encodeURIComponent(target)}&limit=${encodeURIComponent(String(limit))}`
+  );
+  return runHistorySchema.parse(data);
+}
+
+export async function getRunDetail(runId: number): Promise<RunDetail> {
+  const data = await fetchJson<unknown>(`/run/${encodeURIComponent(String(runId))}`);
+  return runDetailSchema.parse(data);
+}
+
+export async function deleteRun(runId: number): Promise<{ deleted: number; target?: string; undo?: boolean }> {
+  return fetchJson(`/run/${encodeURIComponent(String(runId))}`, {
+    method: "DELETE",
+  });
+}
+
+export async function undoRun(runId: number): Promise<{ restored: number }> {
+  return fetchJson(`/run/undo/${encodeURIComponent(String(runId))}`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function cancelRun(payload: {
+  login_username?: string;
+  target_username?: string;
+  job_id?: string;
+}): Promise<{ cancelled: boolean }> {
+  return fetchJson("/run/cancel", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getUnfollowStatus(login_username?: string): Promise<UnfollowStatus> {
+  const suffix = login_username ? `?login_username=${encodeURIComponent(login_username)}` : "";
+  const data = await fetchJson<unknown>(`/unfollow/status${suffix}`);
+  return unfollowStatusSchema.parse(data);
+}
+
+export async function getUnfollowPreview(login_username?: string): Promise<UnfollowPreview> {
+  const suffix = login_username ? `?login_username=${encodeURIComponent(login_username)}` : "";
+  const data = await fetchJson<unknown>(`/unfollow/preview${suffix}`);
+  return unfollowPreviewSchema.parse(data);
+}
+
+export async function startUnfollow(payload: {
+  login_username: string;
+  dry_run?: boolean;
+  max_actions?: number;
+  delay_min?: number;
+  delay_max?: number;
+}): Promise<{ started: boolean; count: number }> {
+  return fetchJson("/unfollow/start", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function cancelUnfollow(): Promise<{ cancelled: boolean }> {
+  return fetchJson("/unfollow/cancel", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }

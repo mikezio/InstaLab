@@ -7,8 +7,11 @@ import {
   getAccountCreateStatus,
   createSchedule,
   deleteLogin,
+  deleteRun,
   deleteSchedule,
   getAppStatus,
+  getRuns,
+  getRunDetail,
   getConfig,
   getLogins,
   getRelationshipEvents,
@@ -16,17 +19,23 @@ import {
   getRunStatus,
   getSchedules,
   getTargetsSummary,
+  getUnfollowStatus,
+  getUnfollowPreview,
   getAuthTrace,
   getRunJobDetail,
   getRunJobStatus,
   resetLogin,
   runAuthPreflight,
+  cancelRun,
+  cancelUnfollow,
   requestPasswordReset,
   startRun,
   startAccountCreate,
+  startUnfollow,
   setLoginNewPassword,
   submitChallengeCode,
   testProxy,
+  undoRun,
   updateConfig,
 } from "./lib/api";
 import type { ConfigValues } from "./lib/schemas";
@@ -59,15 +68,12 @@ function AppShell({ children }: { children: React.ReactNode }) {
             Command Center
           </NavLink>
           <NavLink to="/targets">Targets</NavLink>
+          <NavLink to="/explorer">Explorer</NavLink>
           <NavLink to="/operations">Operations</NavLink>
+          <NavLink to="/unfollow">Unfollow</NavLink>
           <NavLink to="/accounts">Accounts</NavLink>
           <NavLink to="/settings">Settings</NavLink>
         </nav>
-        <div className="sidebar-footer">
-          <a href="/legacy/" className="legacy-link">
-            Open Legacy UI
-          </a>
-        </div>
       </aside>
 
       <main className="content">{children}</main>
@@ -77,7 +83,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
           Home
         </NavLink>
         <NavLink to="/targets">Targets</NavLink>
+        <NavLink to="/explorer">Explore</NavLink>
         <NavLink to="/operations">Ops</NavLink>
+        <NavLink to="/unfollow">Unfollow</NavLink>
         <NavLink to="/accounts">Acct</NavLink>
         <NavLink to="/settings">Prefs</NavLink>
       </nav>
@@ -268,6 +276,194 @@ function TargetsPage() {
   );
 }
 
+function ExplorerPage() {
+  const qc = useQueryClient();
+  const targetsQ = useQuery({ queryKey: ["targets-summary"], queryFn: getTargetsSummary, refetchInterval: 30000 });
+  const [selectedTarget, setSelectedTarget] = useState("");
+  const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!selectedTarget && (targetsQ.data?.length || 0) > 0) {
+      setSelectedTarget(String(targetsQ.data?.[0]?.target_username || ""));
+    }
+  }, [selectedTarget, targetsQ.data]);
+
+  const runsQ = useQuery({
+    queryKey: ["runs", selectedTarget],
+    queryFn: () => getRuns(selectedTarget, 60),
+    enabled: Boolean(selectedTarget),
+    refetchInterval: 15000,
+  });
+
+  useEffect(() => {
+    const firstId = runsQ.data?.[0]?.id;
+    if (typeof firstId === "number" && !selectedRunId) {
+      setSelectedRunId(firstId);
+    }
+  }, [runsQ.data, selectedRunId]);
+
+  const runDetailQ = useQuery({
+    queryKey: ["run-detail", selectedRunId],
+    queryFn: () => getRunDetail(selectedRunId as number),
+    enabled: typeof selectedRunId === "number",
+    refetchInterval: 12000,
+  });
+
+  const deleteRunMutation = useMutation({
+    mutationFn: deleteRun,
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["runs", selectedTarget] }),
+        qc.invalidateQueries({ queryKey: ["targets-summary"] }),
+      ]);
+    },
+  });
+  const undoRunMutation = useMutation({
+    mutationFn: undoRun,
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["runs", selectedTarget] }),
+        qc.invalidateQueries({ queryKey: ["targets-summary"] }),
+      ]);
+    },
+  });
+
+  const detail = runDetailQ.data;
+
+  return (
+    <section>
+      <header className="page-header">
+        <h1>Explorer</h1>
+        <p>Run history and run-level relationship deltas for each tracked target account.</p>
+      </header>
+      <article className="card">
+        <h3>Run History</h3>
+        <div className="form-grid">
+          <label>
+            Target
+            <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)}>
+              {(targetsQ.data ?? []).map((t, idx) => (
+                <option key={`${t.target_username || "target"}-${idx}`} value={t.target_username || ""}>
+                  {t.target_username || "-"}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Timestamp</th>
+                <th>Collector</th>
+                <th>Followers</th>
+                <th>Following</th>
+                <th>NF</th>
+                <th>Duration</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(runsQ.data ?? []).map((run, idx) => (
+                <tr key={`${run.id || "run"}-${idx}`}>
+                  <td>{run.id ?? "-"}</td>
+                  <td>{formatTime(run.timestamp || undefined)}</td>
+                  <td>{run.login_username || "-"}</td>
+                  <td>{run.followers_count ?? "-"}</td>
+                  <td>{run.followees_count ?? "-"}</td>
+                  <td>{run.non_followbacks_count ?? "-"}</td>
+                  <td>{typeof run.duration_seconds === "number" ? `${run.duration_seconds}s` : "-"}</td>
+                  <td className="row gap">
+                    <button className="btn-secondary" onClick={() => setSelectedRunId(run.id ?? null)} disabled={!run.id}>
+                      View
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => run.id && deleteRunMutation.mutate(run.id)}
+                      disabled={deleteRunMutation.isPending || !run.id}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => run.id && undoRunMutation.mutate(run.id)}
+                      disabled={undoRunMutation.isPending || !run.id}
+                    >
+                      Undo
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!(runsQ.data ?? []).length ? (
+                <tr>
+                  <td colSpan={8} className="hint">No runs found for selected target.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+        {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
+        {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}
+      </article>
+      <article className="card">
+        <h3>Run Detail {selectedRunId ? `#${selectedRunId}` : ""}</h3>
+        {!detail ? <p className="hint">Select a run to load details.</p> : null}
+        {detail ? (
+          <>
+            <p className="hint">
+              @{detail.target_username || "-"} via @{detail.login_username || "-"} · {formatTime(detail.timestamp || undefined)}
+            </p>
+            <p className="hint">
+              Followers {detail.followers_count ?? "-"} ({detail.followers_added ?? 0} added / {detail.followers_removed ?? 0} removed) · Following {detail.followees_count ?? "-"} ({detail.followees_added ?? 0} added / {detail.followees_removed ?? 0} removed)
+            </p>
+            <div className="split-grid">
+              <section className="target-section">
+                <h4>Followers Added</h4>
+                <div className="entity-list">
+                  {(detail.followers_added_list ?? []).slice(0, 40).map((u, idx) => (
+                    <div key={`fa-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
+                  ))}
+                  {!(detail.followers_added_list ?? []).length ? <p className="hint">None</p> : null}
+                </div>
+              </section>
+              <section className="target-section">
+                <h4>Followers Removed</h4>
+                <div className="entity-list">
+                  {(detail.followers_removed_list ?? []).slice(0, 40).map((u, idx) => (
+                    <div key={`fr-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
+                  ))}
+                  {!(detail.followers_removed_list ?? []).length ? <p className="hint">None</p> : null}
+                </div>
+              </section>
+            </div>
+            <div className="split-grid">
+              <section className="target-section">
+                <h4>Following Added</h4>
+                <div className="entity-list">
+                  {(detail.followees_added_list ?? []).slice(0, 40).map((u, idx) => (
+                    <div key={`ea-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
+                  ))}
+                  {!(detail.followees_added_list ?? []).length ? <p className="hint">None</p> : null}
+                </div>
+              </section>
+              <section className="target-section">
+                <h4>Following Removed</h4>
+                <div className="entity-list">
+                  {(detail.followees_removed_list ?? []).slice(0, 40).map((u, idx) => (
+                    <div key={`er-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
+                  ))}
+                  {!(detail.followees_removed_list ?? []).length ? <p className="hint">None</p> : null}
+                </div>
+              </section>
+            </div>
+          </>
+        ) : null}
+      </article>
+    </section>
+  );
+}
+
 function OperationsPage() {
   const qc = useQueryClient();
   const schedulesQ = useQuery({ queryKey: ["schedules"], queryFn: getSchedules, refetchInterval: 20000 });
@@ -316,6 +512,12 @@ function OperationsPage() {
     mutationFn: ({ login, code }: { login: string; code: string }) => submitChallengeCode(login, code),
     onSuccess: () => {
       setVerificationCode("");
+    },
+  });
+  const cancelRunMutation = useMutation({
+    mutationFn: cancelRun,
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["run-status"] });
     },
   });
 
@@ -403,10 +605,18 @@ function OperationsPage() {
           <button onClick={onRunNow} disabled={runNowMutation.isPending}>
             {runNowMutation.isPending ? "Queueing..." : "Start run"}
           </button>
+          <button
+            className="btn-secondary"
+            onClick={() => cancelRunMutation.mutate({ job_id: manualJobId })}
+            disabled={cancelRunMutation.isPending || !manualJobId}
+          >
+            {cancelRunMutation.isPending ? "Cancelling..." : "Cancel job"}
+          </button>
           <span className="hint">State: {runStatusQ.data?.state || "idle"}</span>
           {manualJobId ? <span className="hint">Job: {manualJobId}</span> : null}
         </div>
         {runNowMutation.error ? <p className="error">{(runNowMutation.error as Error).message}</p> : null}
+        {cancelRunMutation.error ? <p className="error">{(cancelRunMutation.error as Error).message}</p> : null}
         <p className="hint">
           Active {runStatusQ.data?.active_jobs?.length ?? 0} · Queued {runStatusQ.data?.queued_jobs?.length ?? 0}
         </p>
@@ -535,6 +745,157 @@ function OperationsPage() {
           </div>
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function UnfollowPage() {
+  const qc = useQueryClient();
+  const loginsQ = useQuery({ queryKey: ["logins"], queryFn: getLogins, refetchInterval: 20000 });
+  const [login, setLogin] = useState("");
+  const [dryRun, setDryRun] = useState(false);
+  const [maxActions, setMaxActions] = useState("0");
+  const [delayMin, setDelayMin] = useState("25");
+  const [delayMax, setDelayMax] = useState("45");
+
+  useEffect(() => {
+    if (!login && (loginsQ.data?.length || 0) > 0) {
+      setLogin(String(loginsQ.data?.[0]?.login_username || ""));
+    }
+  }, [login, loginsQ.data]);
+
+  const statusQ = useQuery({
+    queryKey: ["unfollow-status", login],
+    queryFn: () => getUnfollowStatus(login),
+    enabled: Boolean(login),
+    refetchInterval: 6000,
+  });
+  const previewQ = useQuery({
+    queryKey: ["unfollow-preview", login],
+    queryFn: () => getUnfollowPreview(login),
+    enabled: Boolean(login),
+  });
+
+  const previewMutation = useMutation({
+    mutationFn: () => getUnfollowPreview(login),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["unfollow-preview", login] });
+    },
+  });
+  const startMutation = useMutation({
+    mutationFn: startUnfollow,
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["unfollow-status", login] }),
+        qc.invalidateQueries({ queryKey: ["unfollow-preview", login] }),
+      ]);
+    },
+  });
+  const cancelMutation = useMutation({
+    mutationFn: cancelUnfollow,
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["unfollow-status", login] });
+    },
+  });
+
+  const onStart = () => {
+    if (!login.trim()) return;
+    const max = Number(maxActions);
+    const minDelay = Number(delayMin);
+    const maxDelay = Number(delayMax);
+    startMutation.mutate({
+      login_username: login.trim(),
+      dry_run: dryRun,
+      max_actions: Number.isFinite(max) && max > 0 ? max : undefined,
+      delay_min: Number.isFinite(minDelay) ? minDelay : undefined,
+      delay_max: Number.isFinite(maxDelay) ? maxDelay : undefined,
+    });
+  };
+
+  return (
+    <section>
+      <header className="page-header">
+        <h1>Unfollow</h1>
+        <p>Manage non-followback unfollow batches for collector accounts in the new UI.</p>
+      </header>
+      <article className="card">
+        <h3>Controls</h3>
+        <div className="form-grid">
+          <label>
+            Collector login
+            <select value={login} onChange={(e) => setLogin(e.target.value)}>
+              <option value="">Select login</option>
+              {(loginsQ.data ?? []).map((l, idx) => (
+                <option key={`u-${l.login_username || "login"}-${idx}`} value={l.login_username || ""}>
+                  {l.login_username || "-"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Max actions (0 = suggested)
+            <input value={maxActions} onChange={(e) => setMaxActions(e.target.value)} />
+          </label>
+          <label>
+            Delay min (seconds)
+            <input value={delayMin} onChange={(e) => setDelayMin(e.target.value)} />
+          </label>
+          <label>
+            Delay max (seconds)
+            <input value={delayMax} onChange={(e) => setDelayMax(e.target.value)} />
+          </label>
+          <label>
+            Dry run
+            <select value={dryRun ? "true" : "false"} onChange={(e) => setDryRun(e.target.value === "true")}>
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </label>
+        </div>
+        <div className="row gap">
+          <button onClick={() => previewMutation.mutate()} disabled={previewMutation.isPending || !login}>
+            {previewMutation.isPending ? "Refreshing..." : "Refresh preview"}
+          </button>
+          <button onClick={onStart} disabled={startMutation.isPending || !login}>
+            {startMutation.isPending ? "Starting..." : "Start unfollow"}
+          </button>
+          <button className="btn-secondary" onClick={() => cancelMutation.mutate()} disabled={cancelMutation.isPending}>
+            {cancelMutation.isPending ? "Cancelling..." : "Cancel unfollow job"}
+          </button>
+        </div>
+        {previewMutation.error ? <p className="error">{(previewMutation.error as Error).message}</p> : null}
+        {startMutation.error ? <p className="error">{(startMutation.error as Error).message}</p> : null}
+        {cancelMutation.error ? <p className="error">{(cancelMutation.error as Error).message}</p> : null}
+      </article>
+      <article className="card">
+        <h3>Status</h3>
+        <p className="hint">Auth ready: {statusQ.data?.auth_ready ? "yes" : "no"} · Login: @{statusQ.data?.login_username || login || "-"}</p>
+        <p className="hint">
+          Non-followbacks: {statusQ.data?.non_followbacks_count ?? 0} · Eligible: {statusQ.data?.eligible_count ?? 0} · Already unfollowed: {statusQ.data?.already_unfollowed_count ?? 0} · Suggested: {statusQ.data?.suggested_max ?? "-"}
+        </p>
+        <p className="hint">
+          Job: {String(statusQ.data?.job?.state || "idle")} {statusQ.data?.job?.message ? `· ${String(statusQ.data?.job?.message)}` : ""}
+        </p>
+        <div className="table-wrap">
+          <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+            {(statusQ.data?.log ?? []).join("\n") || "(no unfollow log yet)"}
+          </pre>
+        </div>
+      </article>
+      <article className="card">
+        <h3>Preview</h3>
+        <p className="hint">
+          Count: {previewQ.data?.count ?? 0} · Total non-followbacks: {previewQ.data?.total_non_followbacks ?? 0} · Already unfollowed: {previewQ.data?.already_unfollowed_count ?? 0}
+        </p>
+        <div className="entity-list">
+          {(previewQ.data?.sample ?? []).map((username, idx) => (
+            <div className="list-row" key={`ufs-${username}-${idx}`}>
+              <div className="list-title">{username}</div>
+            </div>
+          ))}
+          {!(previewQ.data?.sample ?? []).length ? <p className="hint">No preview sample yet.</p> : null}
+        </div>
+      </article>
     </section>
   );
 }
@@ -1220,7 +1581,9 @@ export default function App() {
       <Routes>
         <Route path="/" element={<CommandCenterPage />} />
         <Route path="/targets" element={<TargetsPage />} />
+        <Route path="/explorer" element={<ExplorerPage />} />
         <Route path="/operations" element={<OperationsPage />} />
+        <Route path="/unfollow" element={<UnfollowPage />} />
         <Route path="/accounts" element={<AccountsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Routes>
