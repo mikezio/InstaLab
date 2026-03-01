@@ -394,6 +394,14 @@ function ExplorerPage() {
 
   const detail = runDetailQ.data;
   const targetSlug = (selectedTarget || "target").replace(/[^a-zA-Z0-9._-]+/g, "_");
+  const detailGroups = detail
+    ? [
+        { key: "followers-added", title: "Followers Added", items: detail.followers_added_list ?? [] },
+        { key: "followers-removed", title: "Followers Removed", items: detail.followers_removed_list ?? [] },
+        { key: "following-added", title: "Following Added", items: detail.followees_added_list ?? [] },
+        { key: "following-removed", title: "Following Removed", items: detail.followees_removed_list ?? [] },
+      ]
+    : [];
 
   return (
     <section>
@@ -513,45 +521,23 @@ function ExplorerPage() {
                   Export non-followbacks CSV
                 </button>
               </div>
-              <div className="split-grid">
-                <section className="target-section">
-                  <h4>Followers Added</h4>
-                  <div className="entity-list">
-                    {(detail.followers_added_list ?? []).slice(0, 40).map((u, idx) => (
-                      <div key={`fa-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
-                    ))}
-                    {!(detail.followers_added_list ?? []).length ? <p className="hint">None</p> : null}
-                  </div>
-                </section>
-                <section className="target-section">
-                  <h4>Followers Removed</h4>
-                  <div className="entity-list">
-                    {(detail.followers_removed_list ?? []).slice(0, 40).map((u, idx) => (
-                      <div key={`fr-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
-                    ))}
-                    {!(detail.followers_removed_list ?? []).length ? <p className="hint">None</p> : null}
-                  </div>
-                </section>
-              </div>
-              <div className="split-grid">
-                <section className="target-section">
-                  <h4>Following Added</h4>
-                  <div className="entity-list">
-                    {(detail.followees_added_list ?? []).slice(0, 40).map((u, idx) => (
-                      <div key={`ea-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
-                    ))}
-                    {!(detail.followees_added_list ?? []).length ? <p className="hint">None</p> : null}
-                  </div>
-                </section>
-                <section className="target-section">
-                  <h4>Following Removed</h4>
-                  <div className="entity-list">
-                    {(detail.followees_removed_list ?? []).slice(0, 40).map((u, idx) => (
-                      <div key={`er-${u}-${idx}`} className="list-row"><div className="list-title">{u}</div></div>
-                    ))}
-                    {!(detail.followees_removed_list ?? []).length ? <p className="hint">None</p> : null}
-                  </div>
-                </section>
+              <div className="run-detail-grid">
+                {detailGroups.map((group) => (
+                  <section className="run-detail-card" key={group.key}>
+                    <div className="run-detail-head">
+                      <h4>{group.title}</h4>
+                      <span className="pill neutral">{group.items.length}</span>
+                    </div>
+                    <div className="run-detail-list">
+                      {group.items.slice(0, 100).map((u, idx) => (
+                        <div key={`${group.key}-${u}-${idx}`} className="run-detail-item">
+                          @{u}
+                        </div>
+                      ))}
+                      {!group.items.length ? <p className="hint">No changes in this group.</p> : null}
+                    </div>
+                  </section>
+                ))}
               </div>
             </>
           ) : null}
