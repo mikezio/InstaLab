@@ -1,19 +1,11 @@
 import {
   appStatusSchema,
   accountCreateStatusSchema,
-  reconHealthSchema,
-  reconHistorySchema,
-  reconJobResultSchema,
-  reconQueueSchema,
   runStatusSchema,
   runJobStatusSchema,
   runJobDetailSchema,
   type AppStatus,
   type AccountCreateStatus,
-  type ReconHealth,
-  type ReconHistoryItem,
-  type ReconJobResult,
-  type ReconQueue,
   type RunStatus,
   type RunJobStatus,
   type RunJobDetail,
@@ -73,50 +65,6 @@ export async function getAppStatus(): Promise<AppStatus> {
 export async function getRunStatus(): Promise<RunStatus> {
   const data = await fetchJson<unknown>("/status");
   return runStatusSchema.parse(data);
-}
-
-export async function getReconHealth(): Promise<ReconHealth> {
-  const data = await fetchJson<unknown>("/recon/health");
-  return reconHealthSchema.parse(data);
-}
-
-export async function getReconHistory(): Promise<ReconHistoryItem[]> {
-  const data = await fetchJson<unknown>("/recon/history?limit=30");
-  return reconHistorySchema.parse(data);
-}
-
-export async function getReconQueue(): Promise<ReconQueue> {
-  const data = await fetchJson<unknown>("/recon/queue");
-  return reconQueueSchema.parse(data);
-}
-
-export async function runRecon(payload: {
-  mode: "username" | "email" | "phone";
-  query_value: string;
-  options: { ai?: boolean; generate_pdf?: boolean; no_nsfw?: boolean };
-}): Promise<{ job_id: string; status: string }> {
-  return fetchJson<{ job_id: string; status: string }>("/recon/run", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function getReconJob(jobId: string): Promise<ReconJobResult> {
-  const data = await fetchJson<unknown>(`/recon/run/${encodeURIComponent(jobId)}`);
-  return reconJobResultSchema.parse(data);
-}
-
-export async function cancelRecon(jobId: string): Promise<void> {
-  await fetchJson(`/recon/run/${encodeURIComponent(jobId)}/cancel`, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-}
-
-export async function deleteRecon(jobId: string): Promise<void> {
-  await fetchJson(`/recon/run/${encodeURIComponent(jobId)}`, {
-    method: "DELETE",
-  });
 }
 
 export async function getTargetsSummary(): Promise<TargetSummaryItem[]> {

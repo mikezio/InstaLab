@@ -3505,6 +3505,12 @@ threading.Thread(target=_watchdog_loop, daemon=True).start()
 app = Flask(__name__)
 
 
+@app.before_request
+def _block_removed_recon_routes():
+    if request.path == "/api/recon" or request.path.startswith("/api/recon/"):
+        return jsonify({"error": "recon feature has been removed"}), 410
+
+
 @app.route("/api/logins", methods=["GET"])
 def api_logins():
     entries = [e for e in list_logins(include_secrets=False) if not e.get("disabled")]
@@ -5339,7 +5345,6 @@ def api_health_detail():
         "scraper": _health_check_scraper(),
         "runs": _health_check_runs(),
         "unfollow": _health_check_unfollow(),
-        "recon": _health_check_recon(),
     }
     status = _merge_health_status(checks)
     return jsonify({"status": status, "checks": checks})

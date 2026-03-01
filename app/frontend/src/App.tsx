@@ -4,19 +4,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   addLogin,
   cancelAccountCreate,
-  cancelRecon,
   getAccountCreateStatus,
   createSchedule,
   deleteLogin,
-  deleteRecon,
   deleteSchedule,
   getAppStatus,
   getConfig,
   getLogins,
-  getReconHealth,
-  getReconHistory,
-  getReconJob,
-  getReconQueue,
   getRelationshipEvents,
   getRelationshipHistory,
   getRunStatus,
@@ -27,7 +21,6 @@ import {
   getRunJobStatus,
   resetLogin,
   runAuthPreflight,
-  runRecon,
   requestPasswordReset,
   startRun,
   startAccountCreate,
@@ -36,9 +29,7 @@ import {
   testProxy,
   updateConfig,
 } from "./lib/api";
-import type { ConfigValues, ReconHistoryItem } from "./lib/schemas";
-
-type ReconMode = "username" | "email" | "phone";
+import type { ConfigValues } from "./lib/schemas";
 
 function tone(status: string | undefined): string {
   const s = String(status || "").toLowerCase();
@@ -68,7 +59,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
             Command Center
           </NavLink>
           <NavLink to="/targets">Targets</NavLink>
-          <NavLink to="/recon">Recon Lab</NavLink>
           <NavLink to="/operations">Operations</NavLink>
           <NavLink to="/accounts">Accounts</NavLink>
           <NavLink to="/settings">Settings</NavLink>
@@ -87,7 +77,6 @@ function AppShell({ children }: { children: React.ReactNode }) {
           Home
         </NavLink>
         <NavLink to="/targets">Targets</NavLink>
-        <NavLink to="/recon">Recon</NavLink>
         <NavLink to="/operations">Ops</NavLink>
         <NavLink to="/accounts">Acct</NavLink>
         <NavLink to="/settings">Prefs</NavLink>
@@ -98,15 +87,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
 function CommandCenterPage() {
   const statusQ = useQuery({ queryKey: ["status"], queryFn: getAppStatus, refetchInterval: 10000 });
-  const reconHealthQ = useQuery({ queryKey: ["recon-health"], queryFn: getReconHealth, refetchInterval: 10000 });
-  const reconQueueQ = useQuery({ queryKey: ["recon-queue"], queryFn: getReconQueue, refetchInterval: 6000 });
   const targetsQ = useQuery({ queryKey: ["targets-summary"], queryFn: getTargetsSummary, refetchInterval: 30000 });
   const schedulesQ = useQuery({ queryKey: ["schedules"], queryFn: getSchedules, refetchInterval: 20000 });
-  const reconHistoryQ = useQuery({ queryKey: ["recon-history"], queryFn: getReconHistory, refetchInterval: 10000 });
   const loginsQ = useQuery({ queryKey: ["logins"], queryFn: getLogins, refetchInterval: 20000 });
 
   const upcomingSchedules = (schedulesQ.data ?? []).filter((s) => Boolean(s.next_run)).length;
-  const failingReconJobs = (reconHistoryQ.data ?? []).filter((j) => ["error", "failed"].includes(String(j.status || "").toLowerCase())).length;
   const readyLogins = (loginsQ.data ?? []).filter((l) => l.private_session_exists).length;
 
   return (
@@ -122,26 +107,9 @@ function CommandCenterPage() {
           <p className={`pill ${tone(statusQ.data?.status)}`}>{statusQ.data?.status || "loading"}</p>
         </article>
         <article className="card">
-          <h3>Recon Module</h3>
-          <p className={`pill ${reconHealthQ.data?.enabled ? "good" : "bad"}`}>
-            {reconHealthQ.data?.enabled ? "enabled" : "disabled"}
-          </p>
-        </article>
-        <article className="card">
-          <h3>Queue Pressure</h3>
-          <p className="stat">{reconQueueQ.data?.running ?? 0} running / {reconQueueQ.data?.queued ?? 0} queued</p>
-          <p className="hint">limit {reconQueueQ.data?.queue_limit ?? "-"}</p>
-        </article>
-        <article className="card">
           <h3>Target Coverage</h3>
           <p className="stat">{targetsQ.data?.length ?? 0}</p>
           <p className="hint">{upcomingSchedules}/{schedulesQ.data?.length ?? 0} schedules with next run</p>
-        </article>
-        <article className="card">
-          <h3>Recon Reliability</h3>
-          <p className={`pill ${failingReconJobs > 0 ? "bad" : "good"}`}>
-            {failingReconJobs > 0 ? `${failingReconJobs} recent failures` : "stable"}
-          </p>
         </article>
         <article className="card">
           <h3>Account Readiness</h3>
@@ -296,245 +264,6 @@ function TargetsPage() {
         </div>
         <p className="hint">Active: {followingActive.length} • Removed: {followingRemoved.length}</p>
       </section>
-    </section>
-  );
-}
-
-function ReconPage() {
-  const qc = useQueryClient();
-  const [mode, setMode] = useState<ReconMode>("username");
-  const [queryValue, setQueryValue] = useState("");
-  const [selectedJobId, setSelectedJobId] = useState("");
-  const [aiEnabled, setAiEnabled] = useState(false);
-  const [pdfEnabled, setPdfEnabled] = useState(true);
-
-  const reconHealthQ = useQuery({ queryKey: ["recon-health"], queryFn: getReconHealth, refetchInterval: 10000 });
-  const reconHistoryQ = useQuery({ queryKey: ["recon-history"], queryFn: getReconHistory, refetchInterval: 6000 });
-  const reconQueueQ = useQuery({ queryKey: ["recon-queue"], queryFn: getReconQueue, refetchInterval: 4000 });
-
-  const selectedJobQ = useQuery({
-    queryKey: ["recon-job", selectedJobId],
-    queryFn: () => getReconJob(selectedJobId),
-    enabled: Boolean(selectedJobId),
-    refetchInterval: selectedJobId ? 2000 : false,
-  });
-
-  const runMutation = useMutation({
-    mutationFn: runRecon,
-    onSuccess: async (res) => {
-      setSelectedJobId(res.job_id);
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ["recon-history"] }),
-        qc.invalidateQueries({ queryKey: ["recon-queue"] }),
-      ]);
-    },
-  });
-
-  const cancelMutation = useMutation({
-    mutationFn: cancelRecon,
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ["recon-history"] }),
-        qc.invalidateQueries({ queryKey: ["recon-queue"] }),
-        qc.invalidateQueries({ queryKey: ["recon-job", selectedJobId] }),
-      ]);
-    },
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: deleteRecon,
-    onSuccess: async () => {
-      setSelectedJobId("");
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ["recon-history"] }),
-        qc.invalidateQueries({ queryKey: ["recon-queue"] }),
-      ]);
-    },
-  });
-
-  const jobs = reconHistoryQ.data ?? [];
-  const selected = selectedJobQ.data;
-  const selectedMode = String(selected?.job?.mode || "").toLowerCase();
-
-  const phoneProfile = useMemo(() => {
-    const findings = selected?.findings ?? [];
-    const telephony = findings.find((f: unknown) => {
-      if (typeof f !== "object" || !f) return false;
-      const category = (f as { category?: unknown }).category;
-      return String(category || "").toLowerCase() === "telephony";
-    });
-    const evidence = (telephony as { evidence_json?: Record<string, unknown> } | undefined)?.evidence_json || {};
-    return {
-      callerId: String(evidence.caller_id || evidence.caller_name || "Not found"),
-      carrier: String(evidence.carrier || "Unknown"),
-      country: String(evidence.country || "Unknown"),
-      code: evidence.countryCode ? `+${String(evidence.countryCode)}` : "-",
-      e164: String(evidence.e164 || "Unknown"),
-      valid: typeof evidence.valid === "boolean" ? (evidence.valid ? "yes" : "no") : "unknown",
-    };
-  }, [selected]);
-
-  const onRun = () => {
-    if (!queryValue.trim()) return;
-    const blackbirdMode = mode === "username" || mode === "email";
-    runMutation.mutate({
-      mode,
-      query_value: queryValue.trim(),
-      options: {
-        no_nsfw: true,
-        ai: blackbirdMode ? aiEnabled : false,
-        generate_pdf: blackbirdMode ? pdfEnabled : false,
-      },
-    });
-  };
-
-  return (
-    <section>
-      <header className="page-header">
-        <h1>Recon Lab</h1>
-        <p>Separate investigation workspace for identifiers. Recon results stay isolated from target-account relationship tracking history.</p>
-      </header>
-
-      <div className="split-grid">
-        <article className="card">
-          <h3>New Scan</h3>
-          <label>
-            Mode
-            <select value={mode} onChange={(e) => setMode(e.target.value as ReconMode)}>
-              <option value="username">Username (Blackbird)</option>
-              <option value="email">Email (Blackbird)</option>
-              <option value="phone">Phone (PhoneInfoga)</option>
-            </select>
-          </label>
-          <label>
-            Query
-            <input
-              placeholder="@username / user@example.com / +15551234567"
-              value={queryValue}
-              onChange={(e) => setQueryValue(e.target.value)}
-            />
-          </label>
-          <div className="row gap">
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={aiEnabled}
-                disabled={mode === "phone" || !reconHealthQ.data?.ai?.key_configured}
-                onChange={(e) => setAiEnabled(e.target.checked)}
-              />
-              AI analysis
-            </label>
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={pdfEnabled}
-                disabled={mode === "phone"}
-                onChange={(e) => setPdfEnabled(e.target.checked)}
-              />
-              PDF report
-            </label>
-          </div>
-          <button onClick={onRun} disabled={runMutation.isPending}>{runMutation.isPending ? "Queueing..." : "Run scan"}</button>
-          <p className="hint">AI key: {reconHealthQ.data?.ai?.key_configured ? "configured" : "missing"}</p>
-          {runMutation.error ? <p className="error">{(runMutation.error as Error).message}</p> : null}
-        </article>
-
-        <article className="card">
-          <h3>Queue</h3>
-          <p className="hint">Running {reconQueueQ.data?.running ?? 0}/{reconQueueQ.data?.max_concurrency ?? 0} • Queued {reconQueueQ.data?.queued ?? 0}</p>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>State</th>
-                  <th>Query</th>
-                  <th>Elapsed</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(reconQueueQ.data?.queue ?? []).map((item, idx) => (
-                  <tr key={`${item.job_id || "item"}-${idx}`}>
-                    <td><span className={`pill ${tone(item.state)}`}>{item.state || "-"}</span></td>
-                    <td>{item.query_value || "-"}</td>
-                    <td>{item.elapsed_seconds ?? 0}s</td>
-                  </tr>
-                ))}
-                {!(reconQueueQ.data?.queue ?? []).length ? (
-                  <tr><td colSpan={3} className="hint">No active jobs.</td></tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </article>
-      </div>
-
-      <div className="split-grid">
-        <article className="card">
-          <h3>History</h3>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>When</th>
-                  <th>Mode</th>
-                  <th>Query</th>
-                  <th>Status</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {jobs.map((job: ReconHistoryItem) => {
-                  const state = String(job.status || "").toLowerCase();
-                  return (
-                    <tr key={job.id}>
-                      <td>{formatTime(job.created_at)}</td>
-                      <td>{job.mode || "-"}</td>
-                      <td>{job.query_value || "-"}</td>
-                      <td><span className={`pill ${tone(state)}`}>{state || "-"}</span></td>
-                      <td className="row gap">
-                        <button className="btn-secondary" onClick={() => setSelectedJobId(job.id)}>Open</button>
-                        {state === "running" || state === "queued" ? (
-                          <button className="btn-secondary" onClick={() => cancelMutation.mutate(job.id)} disabled={cancelMutation.isPending}>Cancel</button>
-                        ) : (
-                          <button className="btn-secondary" onClick={() => deleteMutation.mutate(job.id)} disabled={deleteMutation.isPending}>Delete</button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {!jobs.length ? (
-                  <tr><td colSpan={5} className="hint">No recon jobs yet.</td></tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </article>
-
-        <article className="card">
-          <h3>Job Detail</h3>
-          {selected?.job ? (
-            <>
-              <p className="hint">
-                {selected.job.mode} • {selected.job.query_value} • <span className={`pill ${tone(selected.job.status)}`}>{selected.job.status}</span>
-              </p>
-              {selected.job.error_message ? <p className="error">{selected.job.error_message}</p> : null}
-              {selectedMode === "phone" ? (
-                <div className="profile">
-                  <h4>Caller Profile</h4>
-                  <p>Caller ID: {phoneProfile.callerId}</p>
-                  <p>Carrier: {phoneProfile.carrier}</p>
-                  <p>Country: {phoneProfile.country} ({phoneProfile.code})</p>
-                  <p>E.164: {phoneProfile.e164}</p>
-                  <p>Valid: {phoneProfile.valid}</p>
-                </div>
-              ) : null}
-              <p className="hint">Findings: {selected.findings?.length ?? 0}</p>
-            </>
-          ) : (
-            <p className="hint">Select a job from history.</p>
-          )}
-        </article>
-      </div>
     </section>
   );
 }
@@ -1289,6 +1018,7 @@ function SettingsPage() {
     if (!c) return;
     const nextDraft: Record<string, string | number | boolean> = {};
     for (const [key, value] of Object.entries(c)) {
+      if (key.startsWith("recon_")) continue;
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
         nextDraft[key] = value;
       }
@@ -1315,7 +1045,6 @@ function SettingsPage() {
     if (key.startsWith("schedule_") || key.startsWith("ui_timezone")) return "Schedule";
     if (key.startsWith("monitor_")) return "Monitor";
     if (key.startsWith("unfollow_")) return "Unfollow";
-    if (key.startsWith("recon_")) return "Recon";
     return "Other";
   };
 
@@ -1329,6 +1058,7 @@ function SettingsPage() {
   const onSaveConfig = () => {
     const payload: Partial<ConfigValues> & { proxy_password?: string; _apply_backend_profile?: boolean } = {};
     for (const [key, value] of Object.entries(draft)) {
+      if (key.startsWith("recon_")) continue;
       if (key.endsWith("_set")) continue;
       (payload as Record<string, string | number | boolean>)[key] = value;
     }
@@ -1347,7 +1077,7 @@ function SettingsPage() {
       if (!grouped.has(section)) grouped.set(section, []);
       grouped.get(section)?.push(key);
     }
-    const order = ["Run", "Proxy", "Schedule", "Monitor", "Unfollow", "Recon", "Other"];
+    const order = ["Run", "Proxy", "Schedule", "Monitor", "Unfollow", "Other"];
     return order
       .map((section) => ({ section, keys: (grouped.get(section) || []).sort() }))
       .filter((x) => x.keys.length > 0);
@@ -1357,7 +1087,7 @@ function SettingsPage() {
     <section>
       <header className="page-header">
         <h1>Settings</h1>
-        <p>Runtime settings that affect target-account tracking cadence and recon behavior.</p>
+        <p>Runtime settings that affect target-account tracking cadence and operations behavior.</p>
       </header>
       {!cfgQ.data?.config ? (
         <article className="card"><p className="hint">Loading settings…</p></article>
@@ -1490,7 +1220,6 @@ export default function App() {
       <Routes>
         <Route path="/" element={<CommandCenterPage />} />
         <Route path="/targets" element={<TargetsPage />} />
-        <Route path="/recon" element={<ReconPage />} />
         <Route path="/operations" element={<OperationsPage />} />
         <Route path="/accounts" element={<AccountsPage />} />
         <Route path="/settings" element={<SettingsPage />} />

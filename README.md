@@ -8,7 +8,6 @@ InstaLab is an operations console for Instagram snapshot runs (followers/followi
 - Accounts manager with password + TOTP + challenge handling.
 - Health endpoints and metrics-friendly status surfaces.
 - Built‑in per-run trace logging for API request/response visibility.
-- Dedicated **Recon Lab** module for username/email/phone reconnaissance, stored separately from snapshot run data.
 
 ## Repo layout
 - `docker-compose.yml` / `docker-compose.preview.yml`
@@ -71,10 +70,6 @@ If you already have Postgres running, set the `INSTALAB_DB_*` values in `.env` a
 - This repo contains code + compose; environment‑specific ops runbooks live outside the repo.
 - In production behind nginx, ensure `/static/` serves Django’s `STATIC_ROOT` (default: `app/django_app/staticfiles` after `collectstatic`).
 - Proxy routing (Decodo): configure under Settings → Proxy routing (stored in the config table). Native proxying requires host/port/username/password.
-- Recon providers:
-  - Blackbird for username/email scans
-  - PhoneInfoga for phone scans
-  - Recon findings are isolated from target tracking tables and views.
 
 ## Branching
 - `dev`: active development
