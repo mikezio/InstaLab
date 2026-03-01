@@ -220,7 +220,7 @@ input {
 .explorer-main-grid {
   display: grid;
   gap: 0.9rem;
-  grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.45fr);
+  grid-template-columns: minmax(280px, 0.72fr) minmax(0, 1.6fr);
   margin-top: 0.9rem;
 }
 
@@ -465,6 +465,18 @@ td {
   margin: 0.15rem 0;
   padding: 0.65rem 0.4rem 0.75rem;
   box-shadow: 0 8px 18px rgba(37, 99, 235, 0.12);
+}
+
+.run-selector-input {
+  font-size: 0.9rem;
+}
+
+.run-selector-summary {
+  margin-top: 0.6rem;
+  border: 1px solid #dbe3ef;
+  border-radius: 10px;
+  background: #f8fbff;
+  padding: 0.58rem 0.62rem;
 }
 
 .run-detail-grid {

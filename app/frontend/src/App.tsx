@@ -400,6 +400,8 @@ function ExplorerPage() {
 
   const detail = runDetailQ.data;
   const targetSlug = (selectedTarget || "target").replace(/[^a-zA-Z0-9._-]+/g, "_");
+  const runs = runsQ.data ?? [];
+  const selectedRun = runs.find((r) => r.id === selectedRunId) ?? null;
   const detailGroups = detail
     ? [
         { key: "followers-added", title: "Followers Added", items: detail.followers_added_list ?? [], tone: "good" },
@@ -431,7 +433,7 @@ function ExplorerPage() {
       </div>
       <div className="explorer-main-grid">
         <article className="card">
-          <h3>Run History</h3>
+          <h3>Run Selector</h3>
           <div className="form-grid">
             <label>
               Target
@@ -444,57 +446,63 @@ function ExplorerPage() {
               </select>
             </label>
           </div>
-          <p className="hint">Select a run to load details on the right.</p>
-          <div className="entity-list explorer-run-list">
-            {(runsQ.data ?? []).map((run, idx) => {
-              const isActive = run.id === selectedRunId;
-              const followerDelta = (run.followers_added ?? 0) - (run.followers_removed ?? 0);
-              const followingDelta = (run.followees_added ?? 0) - (run.followees_removed ?? 0);
-              return (
-                <div className={`list-row explorer-run-row ${isActive ? "active" : ""}`} key={`${run.id || "run"}-${idx}`}>
-                  <div className="row" style={{ justifyContent: "space-between", width: "100%" }}>
-                    <div>
-                      <div className="list-title">
-                        Run #{run.id ?? "-"} · {formatTime(run.timestamp || undefined)}
-                      </div>
-                      <div className="list-meta">via @{run.login_username || "-"} · duration {typeof run.duration_seconds === "number" ? `${run.duration_seconds}s` : "-"}</div>
-                      <div className="list-meta">
-                        followers {run.followers_count ?? "-"} · change {followerDelta >= 0 ? "+" : ""}{followerDelta} ({run.followers_added ?? 0} new / {run.followers_removed ?? 0} lost)
-                      </div>
-                      <div className="list-meta">
-                        following {run.followees_count ?? "-"} · change {followingDelta >= 0 ? "+" : ""}{followingDelta} ({run.followees_added ?? 0} new / {run.followees_removed ?? 0} lost) · NF {run.non_followbacks_count ?? "-"}
-                      </div>
-                    </div>
+          <p className="hint">Pick a run. Details render on the right.</p>
+          {runs.length ? (
+            <>
+              <label>
+                Run
+                <select
+                  value={selectedRunId ?? ""}
+                  onChange={(e) => setSelectedRunId(e.target.value ? Number(e.target.value) : null)}
+                  className="run-selector-input"
+                >
+                  {runs.map((run, idx) => {
+                    const followerDelta = (run.followers_added ?? 0) - (run.followers_removed ?? 0);
+                    return (
+                      <option key={`${run.id || "run"}-${idx}`} value={run.id ?? ""}>
+                        #{run.id ?? "-"} · {formatTime(run.timestamp || undefined)} · {followerDelta >= 0 ? "+" : ""}{followerDelta}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+              {selectedRun ? (
+                <div className="run-selector-summary">
+                  <div className="list-title">Run #{selectedRun.id ?? "-"} · {formatTime(selectedRun.timestamp || undefined)}</div>
+                  <div className="list-meta">via @{selectedRun.login_username || "-"} · duration {typeof selectedRun.duration_seconds === "number" ? `${selectedRun.duration_seconds}s` : "-"}</div>
+                  <div className="list-meta">
+                    followers {selectedRun.followers_count ?? "-"} · change {((selectedRun.followers_added ?? 0) - (selectedRun.followers_removed ?? 0)) >= 0 ? "+" : ""}
+                    {(selectedRun.followers_added ?? 0) - (selectedRun.followers_removed ?? 0)} ({selectedRun.followers_added ?? 0} new / {selectedRun.followers_removed ?? 0} lost)
                   </div>
-                  <div className="row gap">
-                    <button className="btn-secondary" onClick={() => setSelectedRunId(run.id ?? null)} disabled={!run.id}>
-                      Open
-                    </button>
+                  <div className="list-meta">
+                    following {selectedRun.followees_count ?? "-"} · change {((selectedRun.followees_added ?? 0) - (selectedRun.followees_removed ?? 0)) >= 0 ? "+" : ""}
+                    {(selectedRun.followees_added ?? 0) - (selectedRun.followees_removed ?? 0)} ({selectedRun.followees_added ?? 0} new / {selectedRun.followees_removed ?? 0} lost) · NF {selectedRun.non_followbacks_count ?? "-"}
+                  </div>
+                  <div className="row gap" style={{ marginTop: "0.55rem" }}>
                     <button
                       className="btn-secondary"
-                      onClick={() => run.id && deleteRunMutation.mutate(run.id)}
-                      disabled={deleteRunMutation.isPending || !run.id}
+                      onClick={() => selectedRun.id && deleteRunMutation.mutate(selectedRun.id)}
+                      disabled={deleteRunMutation.isPending || !selectedRun.id}
                     >
                       Delete
                     </button>
                     <button
                       className="btn-secondary"
-                      onClick={() => run.id && undoRunMutation.mutate(run.id)}
-                      disabled={undoRunMutation.isPending || !run.id}
+                      onClick={() => selectedRun.id && undoRunMutation.mutate(selectedRun.id)}
+                      disabled={undoRunMutation.isPending || !selectedRun.id}
                     >
                       Undo
                     </button>
                   </div>
                 </div>
-              );
-            })}
-            {!(runsQ.data ?? []).length ? (
-              <div className="explorer-empty">
-                <h4>No runs yet</h4>
-                <p>Create your first run from Operations, then return to Explorer for diff insights.</p>
-              </div>
-            ) : null}
-          </div>
+              ) : null}
+            </>
+          ) : (
+            <div className="explorer-empty">
+              <h4>No runs yet</h4>
+              <p>Create your first run from Operations, then return to Explorer for diff insights.</p>
+            </div>
+          )}
           {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
           {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}
         </article>
@@ -503,7 +511,7 @@ function ExplorerPage() {
           {!detail ? (
             <div className="explorer-empty detail-empty">
               <h4>Select a run</h4>
-              <p>Pick a run from the history rail to inspect follower/following deltas and exportable lists.</p>
+              <p>Pick a run from the selector to inspect follower/following deltas and exportable lists.</p>
             </div>
           ) : null}
           {detail ? (
