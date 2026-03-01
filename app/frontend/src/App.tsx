@@ -63,6 +63,12 @@ function formatTime(value?: string): string {
   }).format(d);
 }
 
+function instagramProfileUrl(username?: string): string {
+  const clean = String(username || "").trim().replace(/^@+/, "");
+  if (!clean) return "https://www.instagram.com/";
+  return `https://www.instagram.com/${encodeURIComponent(clean)}/`;
+}
+
 function toApiTimestamp(dt: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}_${pad(dt.getHours())}-${pad(
@@ -562,9 +568,16 @@ function ExplorerPage() {
                       {group.items.length ? (
                         <div className="run-detail-chip-list">
                           {group.items.slice(0, 100).map((u, idx) => (
-                            <span key={`${group.key}-${u}-${idx}`} className="run-detail-chip">
+                            <a
+                              key={`${group.key}-${u}-${idx}`}
+                              className="run-detail-chip"
+                              href={instagramProfileUrl(u)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={`Open @${u} on Instagram`}
+                            >
                               @{u}
-                            </span>
+                            </a>
                           ))}
                         </div>
                       ) : (
@@ -656,7 +669,15 @@ function ExplorerPage() {
               {(eventsQ.data ?? []).map((ev, idx) => (
                 <tr key={`ev-${ev.id || idx}`}>
                   <td>{formatTime(ev.observed_at)}</td>
-                  <td>{ev.username || "-"}</td>
+                  <td>
+                    {ev.username ? (
+                      <a href={instagramProfileUrl(ev.username)} target="_blank" rel="noopener noreferrer" className="inline-link">
+                        @{ev.username}
+                      </a>
+                    ) : (
+                      "-"
+                    )}
+                  </td>
                   <td>{ev.relation_type || "-"}</td>
                   <td><span className={`pill ${ev.event_type === "added" ? "good" : "bad"}`}>{ev.event_type || "-"}</span></td>
                   <td>{ev.run_id ?? "-"}</td>
@@ -681,7 +702,15 @@ function ExplorerPage() {
             {(eventsQ.data ?? []).slice(0, 60).map((ev, idx) => (
               <div key={`evm-${ev.id || idx}`} className="run-detail-card">
                 <div className="run-detail-head">
-                  <h4>@{ev.username || "-"}</h4>
+                  <h4>
+                    {ev.username ? (
+                      <a href={instagramProfileUrl(ev.username)} target="_blank" rel="noopener noreferrer" className="inline-link">
+                        @{ev.username}
+                      </a>
+                    ) : (
+                      "-"
+                    )}
+                  </h4>
                   <span className={`pill ${ev.event_type === "added" ? "good" : "bad"}`}>{ev.event_type || "-"}</span>
                 </div>
                 <p className="hint">{ev.relation_type || "-"} · {formatTime(ev.observed_at)} · run {ev.run_id ?? "-"}</p>
