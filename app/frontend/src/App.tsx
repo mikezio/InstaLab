@@ -140,7 +140,7 @@ function CommandCenterPage() {
       </header>
 
       <div className="card-grid">
-        <article className="card">
+        <article className="card explorer-panel">
           <h3>API</h3>
           <p className={`pill ${tone(statusQ.data?.status)}`}>{statusQ.data?.status || "loading"}</p>
         </article>
@@ -396,19 +396,33 @@ function ExplorerPage() {
   const targetSlug = (selectedTarget || "target").replace(/[^a-zA-Z0-9._-]+/g, "_");
   const detailGroups = detail
     ? [
-        { key: "followers-added", title: "Followers Added", items: detail.followers_added_list ?? [] },
-        { key: "followers-removed", title: "Followers Removed", items: detail.followers_removed_list ?? [] },
-        { key: "following-added", title: "Following Added", items: detail.followees_added_list ?? [] },
-        { key: "following-removed", title: "Following Removed", items: detail.followees_removed_list ?? [] },
+        { key: "followers-added", title: "Followers Added", items: detail.followers_added_list ?? [], tone: "good" },
+        { key: "followers-removed", title: "Followers Removed", items: detail.followers_removed_list ?? [], tone: "bad" },
+        { key: "following-added", title: "Following Added", items: detail.followees_added_list ?? [], tone: "info" },
+        { key: "following-removed", title: "Following Removed", items: detail.followees_removed_list ?? [], tone: "neutral" },
       ]
     : [];
 
   return (
-    <section>
+    <section className="explorer-shell">
       <header className="page-header">
         <h1>Explorer</h1>
         <p>Run history and run-level relationship deltas for each tracked target account.</p>
       </header>
+      <div className="explorer-kpis">
+        <article className="explorer-kpi">
+          <span>Selected Target</span>
+          <strong>@{selectedTarget || "-"}</strong>
+        </article>
+        <article className="explorer-kpi">
+          <span>Total Runs Loaded</span>
+          <strong>{runsQ.data?.length ?? 0}</strong>
+        </article>
+        <article className="explorer-kpi">
+          <span>Events In View</span>
+          <strong>{eventsQ.data?.length ?? 0}</strong>
+        </article>
+      </div>
       <div className="explorer-main-grid">
         <article className="card">
           <h3>Run History</h3>
@@ -437,11 +451,17 @@ function ExplorerPage() {
                       <div className="list-title">
                         Run #{run.id ?? "-"} · {formatTime(run.timestamp || undefined)}
                       </div>
-                      <div className="list-meta">
-                        via @{run.login_username || "-"} · followers {run.followers_count ?? "-"} · following {run.followees_count ?? "-"} · NF {run.non_followbacks_count ?? "-"}
-                      </div>
-                      <div className="list-meta">
-                        delta followers {followerDelta >= 0 ? "+" : ""}{followerDelta} · delta following {followingDelta >= 0 ? "+" : ""}{followingDelta} · duration {typeof run.duration_seconds === "number" ? `${run.duration_seconds}s` : "-"}
+                      <div className="list-meta">via @{run.login_username || "-"} · duration {typeof run.duration_seconds === "number" ? `${run.duration_seconds}s` : "-"}</div>
+                      <div className="run-row-metrics">
+                        <span className="run-row-metric">followers {run.followers_count ?? "-"}</span>
+                        <span className="run-row-metric">following {run.followees_count ?? "-"}</span>
+                        <span className="run-row-metric">NF {run.non_followbacks_count ?? "-"}</span>
+                        <span className={`run-row-metric ${followerDelta >= 0 ? "good" : "bad"}`}>
+                          dF {followerDelta >= 0 ? "+" : ""}{followerDelta}
+                        </span>
+                        <span className={`run-row-metric ${followingDelta >= 0 ? "good" : "bad"}`}>
+                          dFg {followingDelta >= 0 ? "+" : ""}{followingDelta}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -467,14 +487,24 @@ function ExplorerPage() {
                 </div>
               );
             })}
-            {!(runsQ.data ?? []).length ? <p className="hint">No runs found for selected target.</p> : null}
+            {!(runsQ.data ?? []).length ? (
+              <div className="explorer-empty">
+                <h4>No runs yet</h4>
+                <p>Create your first run from Operations, then return to Explorer for diff insights.</p>
+              </div>
+            ) : null}
           </div>
           {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
           {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}
         </article>
-        <article className="card">
+        <article className="card explorer-panel">
           <h3>Run Detail {selectedRunId ? `#${selectedRunId}` : ""}</h3>
-          {!detail ? <p className="hint">Select a run to load details.</p> : null}
+          {!detail ? (
+            <div className="explorer-empty detail-empty">
+              <h4>Select a run</h4>
+              <p>Pick a run from the history rail to inspect follower/following deltas and exportable lists.</p>
+            </div>
+          ) : null}
           {detail ? (
             <>
               <p className="hint">
@@ -523,18 +553,24 @@ function ExplorerPage() {
               </div>
               <div className="run-detail-grid">
                 {detailGroups.map((group) => (
-                  <section className="run-detail-card" key={group.key}>
+                  <section className={`run-detail-card run-detail-card--${group.key}`} key={group.key}>
                     <div className="run-detail-head">
                       <h4>{group.title}</h4>
-                      <span className="pill neutral">{group.items.length}</span>
+                      <span className={`pill ${group.tone}`}>{group.items.length}</span>
                     </div>
                     <div className="run-detail-list">
-                      {group.items.slice(0, 100).map((u, idx) => (
-                        <div key={`${group.key}-${u}-${idx}`} className="run-detail-item">
-                          @{u}
+                      {group.items.length ? (
+                        <div className="run-detail-chip-list">
+                          {group.items.slice(0, 100).map((u, idx) => (
+                            <span key={`${group.key}-${u}-${idx}`} className="run-detail-chip">
+                              @{u}
+                            </span>
+                          ))}
                         </div>
-                      ))}
-                      {!group.items.length ? <p className="hint">No changes in this group.</p> : null}
+                      ) : (
+                        <p className="hint">No changes in this group.</p>
+                      )}
+                      {group.items.length > 100 ? <p className="hint run-detail-truncation">Showing first 100 of {group.items.length} usernames.</p> : null}
                     </div>
                   </section>
                 ))}
@@ -543,7 +579,7 @@ function ExplorerPage() {
           ) : null}
         </article>
       </div>
-      <article className="card">
+      <article className="card explorer-panel">
         <h3>Relationship Events</h3>
         <div className="form-grid">
           <label>
@@ -603,7 +639,7 @@ function ExplorerPage() {
             Export events CSV
           </button>
         </div>
-        <div className="table-wrap">
+        <div className="table-wrap desktop-only">
           <table>
             <thead>
               <tr>
@@ -639,6 +675,25 @@ function ExplorerPage() {
               ) : null}
             </tbody>
           </table>
+        </div>
+        <div className="mobile-only">
+          <div className="entity-list">
+            {(eventsQ.data ?? []).slice(0, 60).map((ev, idx) => (
+              <div key={`evm-${ev.id || idx}`} className="run-detail-card">
+                <div className="run-detail-head">
+                  <h4>@{ev.username || "-"}</h4>
+                  <span className={`pill ${ev.event_type === "added" ? "good" : "bad"}`}>{ev.event_type || "-"}</span>
+                </div>
+                <p className="hint">{ev.relation_type || "-"} · {formatTime(ev.observed_at)} · run {ev.run_id ?? "-"}</p>
+                <div className="row gap" style={{ marginTop: "0.45rem" }}>
+                  <button className="btn-secondary" onClick={() => setSelectedRunId(ev.run_id ?? null)} disabled={!ev.run_id}>
+                    Open run
+                  </button>
+                </div>
+              </div>
+            ))}
+            {!(eventsQ.data ?? []).length ? <p className="hint">No events matched the current filters.</p> : null}
+          </div>
         </div>
       </article>
     </section>

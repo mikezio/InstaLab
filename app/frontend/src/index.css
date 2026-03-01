@@ -139,6 +139,84 @@ input {
   margin-top: 0.9rem;
 }
 
+.explorer-shell {
+  position: relative;
+}
+
+.explorer-shell::before {
+  content: "";
+  position: absolute;
+  inset: -8px -8px auto -8px;
+  height: 200px;
+  pointer-events: none;
+  background: radial-gradient(circle at 12% 20%, rgba(37, 99, 235, 0.18), transparent 48%),
+              radial-gradient(circle at 85% 18%, rgba(15, 118, 110, 0.14), transparent 44%);
+  z-index: 0;
+}
+
+.explorer-shell > * {
+  position: relative;
+  z-index: 1;
+}
+
+.explorer-kpis {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 0.7rem;
+}
+
+.explorer-kpi {
+  border: 1px solid #cfd9ea;
+  background: linear-gradient(140deg, #ffffff 0%, #f7fbff 100%);
+  border-radius: 14px;
+  padding: 0.65rem 0.75rem;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.06);
+}
+
+.explorer-kpi span {
+  display: block;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #64748b;
+}
+
+.explorer-kpi strong {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 1.05rem;
+  color: #0f172a;
+}
+
+.explorer-panel {
+  border-color: #cfdaec;
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.07);
+  animation: explorer-enter 240ms ease-out both;
+}
+
+.explorer-empty {
+  border: 1px dashed #c6d3ea;
+  border-radius: 12px;
+  padding: 0.8rem;
+  background: linear-gradient(140deg, #f8fbff 0%, #ffffff 100%);
+}
+
+.explorer-empty h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.explorer-empty p {
+  margin: 0.35rem 0 0;
+  font-size: 0.86rem;
+  color: #64748b;
+}
+
+.detail-empty {
+  margin-top: 0.4rem;
+}
+
 .explorer-main-grid {
   display: grid;
   gap: 0.9rem;
@@ -386,6 +464,7 @@ td {
   border-radius: 10px;
   margin: 0.15rem 0;
   padding: 0.65rem 0.4rem 0.75rem;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.12);
 }
 
 .run-detail-grid {
@@ -398,9 +477,25 @@ td {
 .run-detail-card {
   border: 1px solid #dbe3ef;
   border-radius: 12px;
-  background: #f8fbff;
+  background: linear-gradient(145deg, #f9fbff 0%, #f3f8ff 100%);
   padding: 0.6rem 0.7rem;
   min-width: 0;
+}
+
+.run-detail-card--followers-added {
+  border-color: #cde8d5;
+}
+
+.run-detail-card--followers-removed {
+  border-color: #f1d0d0;
+}
+
+.run-detail-card--following-added {
+  border-color: #c8dff8;
+}
+
+.run-detail-card--following-removed {
+  border-color: #d8deea;
 }
 
 .run-detail-head {
@@ -417,22 +512,46 @@ td {
 }
 
 .run-detail-list {
-  max-height: 220px;
+  max-height: 250px;
   overflow: auto;
-  border-top: 1px solid #dbe3ef;
-  padding-top: 0.4rem;
+  border-top: 1px solid #d7e2f2;
+  padding-top: 0.48rem;
 }
 
-.run-detail-item {
-  padding: 0.34rem 0.25rem;
-  border-bottom: 1px dashed #dbe3ef;
-  font-size: 0.88rem;
+.run-detail-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.38rem;
+}
+
+.run-detail-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 0.26rem 0.56rem;
+  border-radius: 999px;
+  border: 1px solid #cad8ed;
+  background: #fff;
   color: #0f172a;
+  font-size: 0.78rem;
+  line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
-.run-detail-item:last-child {
-  border-bottom: 0;
+.run-detail-truncation {
+  margin: 0.55rem 0 0;
+  font-size: 0.8rem;
+}
+
+@keyframes explorer-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .list-title {
@@ -444,6 +563,37 @@ td {
   color: #64748b;
   font-size: 0.84rem;
   margin-top: 0.12rem;
+}
+
+.run-row-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.32rem;
+  margin-top: 0.42rem;
+}
+
+.run-row-metric {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #d4deec;
+  border-radius: 999px;
+  background: #fff;
+  color: #334155;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.run-row-metric.good {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.run-row-metric.bad {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
 }
 
 .metric-inline {
@@ -536,6 +686,9 @@ td {
   .explorer-main-grid {
     grid-template-columns: 1fr;
   }
+  .explorer-kpis {
+    grid-template-columns: 1fr;
+  }
   .run-detail-grid {
     grid-template-columns: 1fr;
   }
@@ -605,7 +758,7 @@ td {
     background: #0f172a;
     border-top: 1px solid rgba(203, 213, 225, 0.2);
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     height: 58px;
     overflow: hidden;
     z-index: 30;
@@ -616,7 +769,7 @@ td {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.74rem;
+    font-size: 0.68rem;
     padding: 0 0.35rem;
     white-space: nowrap;
     text-align: center;
