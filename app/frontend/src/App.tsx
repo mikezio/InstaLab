@@ -459,7 +459,10 @@ function ExplorerPage() {
                       </div>
                       <div className="list-meta">via @{run.login_username || "-"} · duration {typeof run.duration_seconds === "number" ? `${run.duration_seconds}s` : "-"}</div>
                       <div className="list-meta">
-                        followers {run.followers_count ?? "-"} · following {run.followees_count ?? "-"} · NF {run.non_followbacks_count ?? "-"} · dF {followerDelta >= 0 ? "+" : ""}{followerDelta} · dFg {followingDelta >= 0 ? "+" : ""}{followingDelta}
+                        followers {run.followers_count ?? "-"} · change {followerDelta >= 0 ? "+" : ""}{followerDelta} ({run.followers_added ?? 0} new / {run.followers_removed ?? 0} lost)
+                      </div>
+                      <div className="list-meta">
+                        following {run.followees_count ?? "-"} · change {followingDelta >= 0 ? "+" : ""}{followingDelta} ({run.followees_added ?? 0} new / {run.followees_removed ?? 0} lost) · NF {run.non_followbacks_count ?? "-"}
                       </div>
                     </div>
                   </div>
@@ -509,7 +512,12 @@ function ExplorerPage() {
                 @{detail.target_username || "-"} via @{detail.login_username || "-"} · {formatTime(detail.timestamp || undefined)}
               </p>
               <p className="hint">
-                Followers {detail.followers_count ?? "-"} ({detail.followers_added ?? 0} added / {detail.followers_removed ?? 0} removed) · Following {detail.followees_count ?? "-"} ({detail.followees_added ?? 0} added / {detail.followees_removed ?? 0} removed)
+                Followers {detail.followers_count ?? "-"} · change {(detail.followers_added ?? 0) - (detail.followers_removed ?? 0) >= 0 ? "+" : ""}
+                {(detail.followers_added ?? 0) - (detail.followers_removed ?? 0)} ({detail.followers_added ?? 0} new / {detail.followers_removed ?? 0} lost)
+              </p>
+              <p className="hint">
+                Following {detail.followees_count ?? "-"} · change {(detail.followees_added ?? 0) - (detail.followees_removed ?? 0) >= 0 ? "+" : ""}
+                {(detail.followees_added ?? 0) - (detail.followees_removed ?? 0)} ({detail.followees_added ?? 0} new / {detail.followees_removed ?? 0} lost)
               </p>
               <div className="row gap">
                 <button
