@@ -58,6 +58,31 @@ function formatTime(value?: string): string {
   }).format(d);
 }
 
+function toApiTimestamp(dt: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}_${pad(dt.getHours())}-${pad(
+    dt.getMinutes()
+  )}-${pad(dt.getSeconds())}`;
+}
+
+function csvEscape(value: string | number | boolean | null | undefined): string {
+  const text = String(value ?? "");
+  if (/[",\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function downloadCsvRows(filename: string, headers: string[], rows: Array<Array<string | number | boolean | null | undefined>>) {
+  if (!rows.length) return;
+  const csv = [headers.map(csvEscape).join(","), ...rows.map((row) => row.map(csvEscape).join(","))].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-shell">
@@ -281,6 +306,11 @@ function ExplorerPage() {
   const targetsQ = useQuery({ queryKey: ["targets-summary"], queryFn: getTargetsSummary, refetchInterval: 30000 });
   const [selectedTarget, setSelectedTarget] = useState("");
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [eventsScope, setEventsScope] = useState<"target" | "run">("target");
+  const [eventsRelation, setEventsRelation] = useState<"" | "followers" | "following">("");
+  const [eventsType, setEventsType] = useState<"" | "added" | "removed">("");
+  const [eventsUsername, setEventsUsername] = useState("");
+  const [eventsWindowDays, setEventsWindowDays] = useState("7");
 
   useEffect(() => {
     if (!selectedTarget && (targetsQ.data?.length || 0) > 0) {
@@ -309,6 +339,35 @@ function ExplorerPage() {
     refetchInterval: 12000,
   });
 
+  const eventsQ = useQuery({
+    queryKey: [
+      "relationship-events",
+      selectedTarget,
+      eventsScope,
+      eventsRelation,
+      eventsType,
+      eventsUsername,
+      eventsWindowDays,
+      selectedRunId,
+    ],
+    queryFn: () => {
+      const days = Number(eventsWindowDays || "7");
+      const observed_from =
+        Number.isFinite(days) && days > 0 ? toApiTimestamp(new Date(Date.now() - days * 24 * 60 * 60 * 1000)) : undefined;
+      const run_id = eventsScope === "run" && typeof selectedRunId === "number" ? selectedRunId : undefined;
+      return getRelationshipEvents(selectedTarget, {
+        relation_type: eventsRelation,
+        event_type: eventsType,
+        username: eventsUsername.trim() || undefined,
+        observed_from,
+        run_id,
+        limit: Number.isFinite(days) && days === 0 ? 1000 : 400,
+      });
+    },
+    enabled: Boolean(selectedTarget),
+    refetchInterval: 12000,
+  });
+
   const deleteRunMutation = useMutation({
     mutationFn: deleteRun,
     onSuccess: async () => {
@@ -329,6 +388,7 @@ function ExplorerPage() {
   });
 
   const detail = runDetailQ.data;
+  const targetSlug = (selectedTarget || "target").replace(/[^a-zA-Z0-9._-]+/g, "_");
 
   return (
     <section>
@@ -417,6 +477,44 @@ function ExplorerPage() {
             <p className="hint">
               Followers {detail.followers_count ?? "-"} ({detail.followers_added ?? 0} added / {detail.followers_removed ?? 0} removed) · Following {detail.followees_count ?? "-"} ({detail.followees_added ?? 0} added / {detail.followees_removed ?? 0} removed)
             </p>
+            <div className="row gap">
+              <button
+                className="btn-secondary"
+                onClick={() =>
+                  downloadCsvRows(
+                    `${targetSlug}-followers.csv`,
+                    ["username"],
+                    (detail.followers ?? []).map((u) => [u])
+                  )
+                }
+              >
+                Export followers CSV
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={() =>
+                  downloadCsvRows(
+                    `${targetSlug}-following.csv`,
+                    ["username"],
+                    (detail.followees ?? []).map((u) => [u])
+                  )
+                }
+              >
+                Export following CSV
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={() =>
+                  downloadCsvRows(
+                    `${targetSlug}-no-follow-back.csv`,
+                    ["username"],
+                    (detail.non_followbacks ?? []).map((u) => [u])
+                  )
+                }
+              >
+                Export non-followbacks CSV
+              </button>
+            </div>
             <div className="split-grid">
               <section className="target-section">
                 <h4>Followers Added</h4>
@@ -459,6 +557,104 @@ function ExplorerPage() {
             </div>
           </>
         ) : null}
+      </article>
+      <article className="card">
+        <h3>Relationship Events</h3>
+        <div className="form-grid">
+          <label>
+            Scope
+            <select value={eventsScope} onChange={(e) => setEventsScope(e.target.value as "target" | "run")}>
+              <option value="target">target</option>
+              <option value="run">selected run only</option>
+            </select>
+          </label>
+          <label>
+            Relation
+            <select value={eventsRelation} onChange={(e) => setEventsRelation(e.target.value as "" | "followers" | "following")}>
+              <option value="">all</option>
+              <option value="followers">followers</option>
+              <option value="following">following</option>
+            </select>
+          </label>
+          <label>
+            Event type
+            <select value={eventsType} onChange={(e) => setEventsType(e.target.value as "" | "added" | "removed")}>
+              <option value="">all</option>
+              <option value="added">added</option>
+              <option value="removed">removed</option>
+            </select>
+          </label>
+          <label>
+            Window days (0=all)
+            <input value={eventsWindowDays} onChange={(e) => setEventsWindowDays(e.target.value)} />
+          </label>
+          <label>
+            Username contains
+            <input value={eventsUsername} onChange={(e) => setEventsUsername(e.target.value)} placeholder="@username" />
+          </label>
+        </div>
+        <div className="row gap">
+          <span className="hint">
+            {(eventsQ.data ?? []).length} events · {(eventsQ.data ?? []).filter((e) => e.event_type === "added").length} added · {(eventsQ.data ?? []).filter((e) => e.event_type === "removed").length} removed
+          </span>
+          <button
+            className="btn-secondary"
+            onClick={() =>
+              downloadCsvRows(
+                `${targetSlug}-relationship-events.csv`,
+                ["id", "observed_at", "username", "relation_type", "event_type", "run_id", "login_username"],
+                (eventsQ.data ?? []).map((e) => [
+                  e.id ?? "",
+                  e.observed_at ?? "",
+                  e.username ?? "",
+                  e.relation_type ?? "",
+                  e.event_type ?? "",
+                  e.run_id ?? "",
+                  e.login_username ?? "",
+                ])
+              )
+            }
+          >
+            Export events CSV
+          </button>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Username</th>
+                <th>Relation</th>
+                <th>Type</th>
+                <th>Run</th>
+                <th>Collector</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(eventsQ.data ?? []).map((ev, idx) => (
+                <tr key={`ev-${ev.id || idx}`}>
+                  <td>{formatTime(ev.observed_at)}</td>
+                  <td>{ev.username || "-"}</td>
+                  <td>{ev.relation_type || "-"}</td>
+                  <td><span className={`pill ${ev.event_type === "added" ? "good" : "bad"}`}>{ev.event_type || "-"}</span></td>
+                  <td>{ev.run_id ?? "-"}</td>
+                  <td>{ev.login_username || "-"}</td>
+                  <td>
+                    <button className="btn-secondary" onClick={() => setSelectedRunId(ev.run_id ?? null)} disabled={!ev.run_id}>
+                      Open run
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!(eventsQ.data ?? []).length ? (
+                <tr>
+                  <td colSpan={7} className="hint">No events matched the current filters.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
       </article>
     </section>
   );

@@ -252,8 +252,28 @@ export async function deleteSchedule(scheduleId: number): Promise<{ deleted: num
   });
 }
 
-export async function getRelationshipEvents(target: string): Promise<RelationshipEvent[]> {
-  const data = await fetchJson<unknown>(`/relationship_events?target=${encodeURIComponent(target)}&limit=200`);
+export async function getRelationshipEvents(
+  target: string,
+  options?: {
+    relation_type?: "followers" | "following" | "";
+    event_type?: "added" | "removed" | "";
+    username?: string;
+    run_id?: number;
+    observed_from?: string;
+    observed_to?: string;
+    limit?: number;
+  }
+): Promise<RelationshipEvent[]> {
+  const params = new URLSearchParams();
+  params.set("target", target);
+  params.set("limit", String(options?.limit ?? 200));
+  if (options?.relation_type) params.set("relation_type", options.relation_type);
+  if (options?.event_type) params.set("event_type", options.event_type);
+  if (options?.username) params.set("username", options.username.trim());
+  if (typeof options?.run_id === "number") params.set("run_id", String(options.run_id));
+  if (options?.observed_from) params.set("observed_from", options.observed_from);
+  if (options?.observed_to) params.set("observed_to", options.observed_to);
+  const data = await fetchJson<unknown>(`/relationship_events?${params.toString()}`);
   return relationshipEventSchema.parse(data);
 }
 
