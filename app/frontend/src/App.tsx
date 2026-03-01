@@ -458,16 +458,8 @@ function ExplorerPage() {
                         Run #{run.id ?? "-"} · {formatTime(run.timestamp || undefined)}
                       </div>
                       <div className="list-meta">via @{run.login_username || "-"} · duration {typeof run.duration_seconds === "number" ? `${run.duration_seconds}s` : "-"}</div>
-                      <div className="run-row-metrics">
-                        <span className="run-row-metric">followers {run.followers_count ?? "-"}</span>
-                        <span className="run-row-metric">following {run.followees_count ?? "-"}</span>
-                        <span className="run-row-metric">NF {run.non_followbacks_count ?? "-"}</span>
-                        <span className={`run-row-metric ${followerDelta >= 0 ? "good" : "bad"}`}>
-                          dF {followerDelta >= 0 ? "+" : ""}{followerDelta}
-                        </span>
-                        <span className={`run-row-metric ${followingDelta >= 0 ? "good" : "bad"}`}>
-                          dFg {followingDelta >= 0 ? "+" : ""}{followingDelta}
-                        </span>
+                      <div className="list-meta">
+                        followers {run.followers_count ?? "-"} · following {run.followees_count ?? "-"} · NF {run.non_followbacks_count ?? "-"} · dF {followerDelta >= 0 ? "+" : ""}{followerDelta} · dFg {followingDelta >= 0 ? "+" : ""}{followingDelta}
                       </div>
                     </div>
                   </div>
@@ -566,11 +558,11 @@ function ExplorerPage() {
                     </div>
                     <div className="run-detail-list">
                       {group.items.length ? (
-                        <div className="run-detail-chip-list">
+                        <div className="run-detail-plain-list">
                           {group.items.slice(0, 100).map((u, idx) => (
                             <a
                               key={`${group.key}-${u}-${idx}`}
-                              className="run-detail-chip"
+                              className="run-detail-plain-item"
                               href={instagramProfileUrl(u)}
                               target="_blank"
                               rel="noopener noreferrer"
