@@ -49,6 +49,7 @@ If you already have Postgres running, set the `INSTALAB_DB_*` values in `.env` a
 - For private backend, a first successful login caches session settings; subsequent runs reuse the session.
 - 2FA is supported via TOTP or SMS/email challenge codes.
 - Device profile settings are persisted to avoid “new device” loops.
+- Collector setup and collector->target execution runbook: [docs/COLLECTOR_TARGET_SETUP_FLOW.md](docs/COLLECTOR_TARGET_SETUP_FLOW.md).
 
 ## UI build
 - Legacy template styles:
@@ -90,6 +91,7 @@ If you already have Postgres running, set the `INSTALAB_DB_*` values in `.env` a
 ## Documentation
 - [API.md](API.md) – API endpoint documentation
 - [ARCHITECTURE.md](ARCHITECTURE.md) – System architecture and run lifecycle
+- [docs/COLLECTOR_TARGET_SETUP_FLOW.md](docs/COLLECTOR_TARGET_SETUP_FLOW.md) – collector login setup and target execution flow
 - [SECURITY.md](SECURITY.md) – Security considerations and deployment best practices
 - [CONTRIBUTING.md](CONTRIBUTING.md) – Guidelines for contributing to the project
 
