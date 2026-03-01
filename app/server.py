@@ -4795,6 +4795,12 @@ def api_run_detail(run_id):
         run["followers_removed_list"] = sorted(prev_followers - cur_f)
         run["followees_added_list"] = sorted(cur_fe - prev_followees)
         run["followees_removed_list"] = sorted(prev_followees - cur_fe)
+        # Keep headline delta counters aligned with the same computed baseline
+        # used by the detailed username lists (important when prior runs were deleted).
+        run["followers_added"] = len(run["followers_added_list"])
+        run["followers_removed"] = len(run["followers_removed_list"])
+        run["followees_added"] = len(run["followees_added_list"])
+        run["followees_removed"] = len(run["followees_removed_list"])
         follower_change_names = sorted(set(run["followers_added_list"]) | set(run["followers_removed_list"]))
         followee_change_names = sorted(set(run["followees_added_list"]) | set(run["followees_removed_list"]))
         follower_hist = _load_relationship_history_rows(
