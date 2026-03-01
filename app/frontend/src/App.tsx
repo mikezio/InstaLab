@@ -401,7 +401,7 @@ function ExplorerPage() {
         <h1>Explorer</h1>
         <p>Run history and run-level relationship deltas for each tracked target account.</p>
       </header>
-      <div className="split-grid">
+      <div className="explorer-main-grid">
         <article className="card">
           <h3>Run History</h3>
           <div className="form-grid">
@@ -417,58 +417,49 @@ function ExplorerPage() {
             </label>
           </div>
           <p className="hint">Select a run to load details on the right.</p>
-          <div className="table-wrap" style={{ maxHeight: "60vh", overflowY: "auto" }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>Run</th>
-                  <th>Timestamp</th>
-                  <th>Collector</th>
-                  <th>Followers</th>
-                  <th>Following</th>
-                  <th>NF</th>
-                  <th>Duration</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(runsQ.data ?? []).map((run, idx) => (
-                  <tr key={`${run.id || "run"}-${idx}`}>
-                    <td>{run.id ?? "-"}</td>
-                    <td>{formatTime(run.timestamp || undefined)}</td>
-                    <td>{run.login_username || "-"}</td>
-                    <td>{run.followers_count ?? "-"}</td>
-                    <td>{run.followees_count ?? "-"}</td>
-                    <td>{run.non_followbacks_count ?? "-"}</td>
-                    <td>{typeof run.duration_seconds === "number" ? `${run.duration_seconds}s` : "-"}</td>
-                    <td className="row gap">
-                      <button className="btn-secondary" onClick={() => setSelectedRunId(run.id ?? null)} disabled={!run.id}>
-                        View
-                      </button>
-                      <button
-                        className="btn-secondary"
-                        onClick={() => run.id && deleteRunMutation.mutate(run.id)}
-                        disabled={deleteRunMutation.isPending || !run.id}
-                      >
-                        Delete
-                      </button>
-                      <button
-                        className="btn-secondary"
-                        onClick={() => run.id && undoRunMutation.mutate(run.id)}
-                        disabled={undoRunMutation.isPending || !run.id}
-                      >
-                        Undo
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-                {!(runsQ.data ?? []).length ? (
-                  <tr>
-                    <td colSpan={8} className="hint">No runs found for selected target.</td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
+          <div className="entity-list explorer-run-list">
+            {(runsQ.data ?? []).map((run, idx) => {
+              const isActive = run.id === selectedRunId;
+              const followerDelta = (run.followers_added ?? 0) - (run.followers_removed ?? 0);
+              const followingDelta = (run.followees_added ?? 0) - (run.followees_removed ?? 0);
+              return (
+                <div className={`list-row explorer-run-row ${isActive ? "active" : ""}`} key={`${run.id || "run"}-${idx}`}>
+                  <div className="row" style={{ justifyContent: "space-between", width: "100%" }}>
+                    <div>
+                      <div className="list-title">
+                        Run #{run.id ?? "-"} · {formatTime(run.timestamp || undefined)}
+                      </div>
+                      <div className="list-meta">
+                        via @{run.login_username || "-"} · followers {run.followers_count ?? "-"} · following {run.followees_count ?? "-"} · NF {run.non_followbacks_count ?? "-"}
+                      </div>
+                      <div className="list-meta">
+                        delta followers {followerDelta >= 0 ? "+" : ""}{followerDelta} · delta following {followingDelta >= 0 ? "+" : ""}{followingDelta} · duration {typeof run.duration_seconds === "number" ? `${run.duration_seconds}s` : "-"}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="row gap">
+                    <button className="btn-secondary" onClick={() => setSelectedRunId(run.id ?? null)} disabled={!run.id}>
+                      Open
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => run.id && deleteRunMutation.mutate(run.id)}
+                      disabled={deleteRunMutation.isPending || !run.id}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => run.id && undoRunMutation.mutate(run.id)}
+                      disabled={undoRunMutation.isPending || !run.id}
+                    >
+                      Undo
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {!(runsQ.data ?? []).length ? <p className="hint">No runs found for selected target.</p> : null}
           </div>
           {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
           {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}

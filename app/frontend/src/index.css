@@ -139,6 +139,13 @@ input {
   margin-top: 0.9rem;
 }
 
+.explorer-main-grid {
+  display: grid;
+  gap: 0.9rem;
+  grid-template-columns: minmax(320px, 0.95fr) minmax(0, 1.45fr);
+  margin-top: 0.9rem;
+}
+
 .card {
   background: #fff;
   border: 1px solid #dbe3ef;
@@ -356,6 +363,31 @@ td {
   background: transparent;
 }
 
+.explorer-run-list {
+  max-height: 62vh;
+  overflow: auto;
+  border: 1px solid #dbe3ef;
+  border-radius: 12px;
+  padding: 0.2rem 0.55rem;
+  background: #f8fbff;
+}
+
+.explorer-run-row {
+  border-bottom: 1px solid #dbe3ef;
+  padding: 0.6rem 0.15rem 0.7rem;
+}
+
+.explorer-run-row:last-child {
+  border-bottom: 0;
+}
+
+.explorer-run-row.active {
+  background: linear-gradient(120deg, rgba(37, 99, 235, 0.1), rgba(15, 118, 110, 0.08));
+  border-radius: 10px;
+  margin: 0.15rem 0;
+  padding: 0.65rem 0.4rem 0.75rem;
+}
+
 .list-title {
   font-weight: 700;
   font-size: 0.94rem;
@@ -452,6 +484,9 @@ td {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .split-grid {
+    grid-template-columns: 1fr;
+  }
+  .explorer-main-grid {
     grid-template-columns: 1fr;
   }
   .form-grid {
@@ -559,7 +594,7 @@ td {
   }
 
   .table-wrap {
-    overflow-x: hidden;
+    overflow-x: auto;
   }
 
   td .row.gap,
