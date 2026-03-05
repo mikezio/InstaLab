@@ -702,6 +702,8 @@ def _raise_login_error(exc: Exception, last_json: dict | None = None) -> None:
         raise PrivateAPIError("feedback_required", "instagram feedback required (rate limit / risk)")
     if isinstance(exc, RateLimitError):
         raise PrivateAPIError("rate_limited", "instagram rate limit exceeded")
+    if isinstance(exc, ClientThrottledError):
+        raise PrivateAPIError("rate_limited", "instagram client throttled; wait and retry")
     raise PrivateAPIError("private_api_error", f"private API error: {exc}")
 
 
@@ -890,6 +892,7 @@ def _build_client(
     trace_enabled: bool | None = None,
     trace_path: str | None = None,
 ):
+    mode = _normalize_login_mode(login_mode)
     settings = _load_settings(login_username)
     entry = get_login(login_username, include_secrets=True) or {}
     if not login_password:
@@ -902,7 +905,7 @@ def _build_client(
     _auth_trace(
         login_username,
         "build_client_start",
-        login_mode=_normalize_login_mode(login_mode),
+        login_mode=mode,
         has_settings=bool(settings),
     )
 
@@ -970,6 +973,10 @@ def _build_client(
             # Repeated resolver attempts can amplify risk signals.
             raise exc
         if isinstance(exc, LoginRequired):
+            if mode == "session_only":
+                raise exc
+            if not login_password:
+                raise exc
             if getattr(client, "_instalab_bad_password", False):
                 raise exc
             if loginrequired_reauth_count["value"] >= 1:
@@ -1075,6 +1082,8 @@ def _build_client(
         cl.authorization_data = cl.parse_authorization(cl.last_response.headers.get("ig-set-authorization"))
 
     def _login_with_password():
+        if not login_password:
+            raise LoginRequired("password login unavailable for this account")
         # Reset auth state to ensure we trigger a real login (keeps device IDs stable).
         try:
             cl.authorization_data = {}
@@ -1159,9 +1168,6 @@ def _build_client(
         cl.private_request("accounts/current_user/?edit=true")
 
     try:
-        mode = _normalize_login_mode(login_mode)
-        if mode == "session_only":
-            mode = "session"
         if settings:
             cl.set_settings(settings)
             if mode == "password":
@@ -1187,7 +1193,7 @@ def _build_client(
                             session_marked_stale=True,
                             session_fail_streak=streak,
                         )
-                    if mode == "session":
+                    if mode == "session_only":
                         raise
                     _login_with_password()
                 except TwoFactorRequired:
@@ -1206,30 +1212,18 @@ def _build_client(
                             session_marked_stale=True,
                             session_fail_streak=streak,
                         )
-                    if mode == "session":
+                    if mode == "session_only":
                         raise
                     _login_with_password()
                 except Exception:
-                    streak = record_session_validation_failure(login_username)
                     _auth_trace(
                         login_username,
                         "session_validation_failed",
                         error_code="session_probe_error",
-                        session_fail_streak=streak,
                     )
-                    if streak >= SESSION_STALE_THRESHOLD:
-                        _clear_cached_session(login_username)
-                        _auth_trace(
-                            login_username,
-                            "session_marked_stale",
-                            session_marked_stale=True,
-                            session_fail_streak=streak,
-                        )
-                    if mode == "session":
-                        raise
-                    _login_with_password()
+                    raise
         else:
-            if mode == "session":
+            if mode == "session_only":
                 raise LoginRequired("session-only requested but no session cached")
             _login_with_password()
     except Exception as exc:
@@ -1745,6 +1739,8 @@ def snapshot_profile(
             "timestamp": timestamp,
             "followers_count": followers_total,
             "followees_count": following_total,
+            "followers_collected_count": followers_total,
+            "followees_collected_count": following_total,
             "non_followbacks_count": 0,
             "changes": changes,
             "run_id": run_id,
@@ -1882,15 +1878,20 @@ def snapshot_profile(
                 followees_fetch_seconds=followees_fetch_seconds,
                 followers_rate=followers_rate,
                 followees_rate=followees_rate,
+                followers_total_hint=followers_total,
+                followees_total_hint=following_total,
             )
 
         return {
             "timestamp": timestamp,
             "followers_count": followers_total,
             "followees_count": following_total,
+            "followers_collected_count": len(followers),
+            "followees_collected_count": len(followees),
             "followers": followers,
             "followees": followees,
             "non_followbacks": non_followbacks,
+            "partial_collection": (len(followers) < followers_total) or (len(followees) < following_total),
             "non_followbacks_count": len(non_followbacks),
             "changes": changes,
             "run_id": run_id,

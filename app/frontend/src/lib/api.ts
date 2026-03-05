@@ -75,6 +75,19 @@ export async function getRunStatus(): Promise<RunStatus> {
   return runStatusSchema.parse(data);
 }
 
+export async function getManualActions(): Promise<{
+  actions: Array<Record<string, unknown>>;
+}> {
+  return fetchJson("/manual/actions");
+}
+
+export async function resolveManualAction(actionId: string, note?: string): Promise<{ ok: boolean }> {
+  return fetchJson(`/manual/actions/${encodeURIComponent(actionId)}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
 export async function getTargetsSummary(): Promise<TargetSummaryItem[]> {
   const data = await fetchJson<unknown>("/targets_summary");
   return targetsSummarySchema.parse(data);

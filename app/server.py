@@ -334,6 +334,16 @@ def _is_anonymous_run_login_mode(value: str | None) -> bool:
     return _normalize_run_login_mode(value) == "anonymous"
 
 
+def _session_stale_threshold() -> int:
+    try:
+        from private_api_tracker import SESSION_STALE_THRESHOLD
+
+        value = int(SESSION_STALE_THRESHOLD)
+    except Exception:
+        value = 3
+    return max(1, value)
+
+
 def _normalize_scraper_backend(value: str | None) -> str:
     backend = str(value or "browser").strip().lower()
     backend = SCRAPER_BACKEND_ALIASES.get(backend, backend)
@@ -3133,6 +3143,124 @@ ACCOUNT_CREATE_JOB = {
 }
 ACCOUNT_CREATE_LOG = []
 RUN_WATCHDOG_STOP = threading.Event()
+MANUAL_ACTIONS_LOCK = threading.Lock()
+MANUAL_ACTIONS: dict[str, dict] = {}
+RUN_STATE_ALLOWED = {
+    "queued",
+    "running",
+    "done",
+    "error",
+    "cancelled",
+    "cooling_down",
+    "challenge_required",
+    "manual_required",
+    "blocked",
+}
+RUN_STATE_TERMINAL = {"done", "error", "cancelled", "cooling_down", "challenge_required", "manual_required", "blocked"}
+
+
+def _run_state_set(job_id: str, state: str, *, reason: str | None = None, **extra) -> None:
+    target_state = str(state or "").strip().lower()
+    if target_state not in RUN_STATE_ALLOWED:
+        target_state = "error"
+    meta = RUN_META.setdefault(job_id, {})
+    history = meta.setdefault("state_history", [])
+    if not isinstance(history, list):
+        history = []
+        meta["state_history"] = history
+    now_iso = datetime.now(LOCAL_TZ).isoformat()
+    if meta.get("state") != target_state:
+        history.append({"state": target_state, "at": now_iso, "reason": reason})
+    meta["state"] = target_state
+    if reason:
+        meta["state_reason"] = str(reason)
+    for key, value in extra.items():
+        if value is None:
+            continue
+        meta[key] = value
+
+
+def _manual_action_key(login_username: str, target_username: str, action_type: str) -> str:
+    return f"{str(login_username or '').strip().lower()}::{str(target_username or '').strip().lower()}::{str(action_type or '').strip().lower()}"
+
+
+def _enqueue_manual_action(
+    *,
+    login_username: str,
+    target_username: str,
+    job_id: str,
+    action_type: str,
+    reason: str,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> dict:
+    key = _manual_action_key(login_username, target_username, action_type)
+    with MANUAL_ACTIONS_LOCK:
+        existing = MANUAL_ACTIONS.get(key) or {}
+        action_id = existing.get("action_id") or uuid4().hex
+        now_iso = datetime.now(LOCAL_TZ).isoformat()
+        payload = {
+            "action_id": action_id,
+            "key": key,
+            "state": "open",
+            "created_at": existing.get("created_at") or now_iso,
+            "updated_at": now_iso,
+            "login_username": login_username,
+            "target_username": target_username,
+            "job_id": job_id,
+            "action_type": action_type,
+            "reason": reason,
+            "error_code": error_code,
+            "error_message": error_message,
+            "recommended_step": (
+                "Submit challenge/2FA code and retry run"
+                if action_type in {"challenge_required", "two_factor_required"}
+                else "Review account state in Instagram app and retry when stable"
+            ),
+        }
+        MANUAL_ACTIONS[key] = payload
+    return payload
+
+
+def _resolve_manual_actions_for(login_username: str, target_username: str, *, note: str | None = None) -> None:
+    login_key = str(login_username or "").strip().lower()
+    target_key = str(target_username or "").strip().lower()
+    now_iso = datetime.now(LOCAL_TZ).isoformat()
+    with MANUAL_ACTIONS_LOCK:
+        for key, action in MANUAL_ACTIONS.items():
+            if action.get("state") != "open":
+                continue
+            if str(action.get("login_username") or "").strip().lower() != login_key:
+                continue
+            if str(action.get("target_username") or "").strip().lower() != target_key:
+                continue
+            action["state"] = "resolved"
+            action["resolved_at"] = now_iso
+            if note:
+                action["resolution_note"] = note
+
+
+def _open_manual_actions() -> list[dict]:
+    with MANUAL_ACTIONS_LOCK:
+        rows = [dict(v) for v in MANUAL_ACTIONS.values() if str(v.get("state")) == "open"]
+    rows.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    return rows
+
+
+def _classify_terminal_run_state(error_code: str | None, error_message: str | None, cooldown_seconds: int) -> str:
+    code = str(error_code or "").strip().lower()
+    message = str(error_message or "").strip().lower()
+    if cooldown_seconds > 0 or code in {"rate_limited", "feedback_required"}:
+        return "cooling_down"
+    if code == "challenge_required":
+        return "challenge_required"
+    if code == "two_factor_required":
+        return "manual_required"
+    if code in {"unsupported_version", "login_required", "bad_password", "invalid_username"}:
+        return "blocked"
+    if "challenge" in message or "two-factor" in message or "2fa" in message:
+        return "manual_required"
+    return "error"
 
 
 def _collector_storage_path(login_username: str) -> str:
@@ -3550,7 +3678,7 @@ def api_logins():
                 "last_error": entry.get("last_error"),
                 "session_fail_streak": fail_streak,
                 "session_last_fail_at": entry.get("session_last_fail_at"),
-                "session_marked_stale": fail_streak >= 3,
+                "session_marked_stale": fail_streak >= _session_stale_threshold(),
                 "two_factor_method": auth_state.get("two_factor_method"),
                 "auth_last_event": auth_state.get("last_event"),
                 "auth_last_event_at": auth_state.get("last_event_at"),
@@ -3614,7 +3742,7 @@ def api_logins_auth_preflight():
     abs_skew = int(clock_skew.get("abs_skew_seconds") or 0) if clock_skew.get("ok") else None
     if abs_skew is not None and abs_skew > 15:
         warnings.append(f"clock skew is high ({abs_skew}s); TOTP can fail when skew exceeds ~15s")
-    if fail_streak >= 3:
+    if fail_streak >= _session_stale_threshold():
         warnings.append("session marked stale after repeated session validation failures; re-init login is recommended")
     if auth_state.get("two_factor_method") == "unknown":
         warnings.append("two-factor method not confirmed yet; run one login to detect TOTP/SMS/email path")
@@ -3629,7 +3757,7 @@ def api_logins_auth_preflight():
             "has_password": bool(entry.get("has_password")),
             "has_totp_seed": bool(entry.get("has_totp_seed")),
             "session_fail_streak": fail_streak,
-            "session_marked_stale": fail_streak >= 3,
+            "session_marked_stale": fail_streak >= _session_stale_threshold(),
             "session_last_fail_at": entry.get("session_last_fail_at"),
             "two_factor_method": auth_state.get("two_factor_method"),
             "clock_skew": clock_skew,
@@ -4063,7 +4191,8 @@ def api_runs():
             """
             SELECT id, timestamp, followers_count, followees_count,
                    followers_added, followers_removed, followees_added, followees_removed,
-                   non_followbacks_count, login_username, duration_seconds, confidence_score, confidence_flag
+                   non_followbacks_count, login_username, duration_seconds, confidence_score, confidence_flag,
+                   followers_collected_count, followees_collected_count, snapshot_complete, snapshot_note
             FROM runs
             WHERE target_username = ?
             ORDER BY timestamp DESC, id DESC
@@ -4766,7 +4895,8 @@ def api_run_detail(run_id):
                    followers_count, followees_count, non_followbacks_count,
                    followers_added, followers_removed, followees_added, followees_removed,
                    duration_seconds, followers_fetch_seconds, followees_fetch_seconds,
-                   followers_rate, followees_rate, confidence_score, confidence_flag
+                   followers_rate, followees_rate, confidence_score, confidence_flag,
+                   followers_collected_count, followees_collected_count, snapshot_complete, snapshot_note
             FROM runs WHERE id = ?
             """,
             (run_id,),
@@ -5056,7 +5186,7 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
             },
         )
         meta["started_at"] = started
-        meta["state"] = "running"
+        _run_state_set(job_id, "running")
         try:
             res = guarded_run(
                 login_username,
@@ -5083,7 +5213,8 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
                 job["followers_total"] = res.get("followers_count")
                 job["following_total"] = res.get("followees_count")
                 job["phase"] = "done"
-            RUN_META[job_id]["state"] = "done"
+            _run_state_set(job_id, "done", finished_at=finished)
+            _resolve_manual_actions_for(login_username, target_username, note=f"run succeeded ({job_id})")
             _clear_run_cooldown(login_username)
             _whatsapp_notify_run_event(
                 "run_done",
@@ -5094,11 +5225,31 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
             return {"status": "success", "started_at": started, "finished_at": finished, "result": res}
         except Exception as exc:  # noqa: BLE001
             finished = datetime.now(LOCAL_TZ).isoformat()
-            RUN_META[job_id]["state"] = "error"
             code = getattr(exc, "code", None)
             cooldown_seconds = 0
             if str(code or "").strip().lower() in {"rate_limited", "feedback_required"}:
                 cooldown_seconds = _set_run_cooldown(login_username, code, str(exc))
+            terminal_state = _classify_terminal_run_state(code, str(exc), cooldown_seconds)
+            _run_state_set(
+                job_id,
+                terminal_state,
+                reason=str(code or exc.__class__.__name__),
+                finished_at=finished,
+                cooldown_seconds=cooldown_seconds if cooldown_seconds > 0 else None,
+            )
+            if terminal_state in {"challenge_required", "manual_required", "blocked"}:
+                action_type = str(code or terminal_state).strip().lower()
+                if action_type not in {"challenge_required", "two_factor_required"}:
+                    action_type = terminal_state
+                _enqueue_manual_action(
+                    login_username=login_username,
+                    target_username=target_username,
+                    job_id=job_id,
+                    action_type=action_type,
+                    reason=terminal_state,
+                    error_code=str(code or ""),
+                    error_message=str(exc),
+                )
             _whatsapp_notify_run_event(
                 "run_error",
                 login_username,
@@ -5122,6 +5273,7 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
         "state": "queued",
         "source": source,
     }
+    _run_state_set(job_id, "queued")
     RUN_FUTURES[job_id] = executor.submit(_runner)
     return job_id
 
@@ -5315,10 +5467,35 @@ def api_status():
         )
         active_logins.add(meta.get("login_username"))
 
+    manual_actions = _open_manual_actions()
+    cooldown_entries = []
+    now_ts = time.time()
+    with RUN_COOLDOWN_GUARD:
+        stale_logins = []
+        for login, payload in RUN_COOLDOWN_UNTIL.items():
+            until_ts = float(payload.get("until_ts") or 0)
+            remaining = int(round(until_ts - now_ts))
+            if remaining <= 0:
+                stale_logins.append(login)
+                continue
+            cooldown_entries.append(
+                {
+                    "login_username": login,
+                    "cooldown_seconds": remaining,
+                    "error_code": payload.get("error_code"),
+                    "error_message": payload.get("error_message"),
+                }
+            )
+        for login in stale_logins:
+            RUN_COOLDOWN_UNTIL.pop(login, None)
     if active_jobs:
         state = "running"
     elif queued:
         state = "queued"
+    elif manual_actions:
+        state = "manual_required"
+    elif cooldown_entries:
+        state = "cooling_down"
     else:
         state = "idle"
 
@@ -5328,6 +5505,9 @@ def api_status():
         "active_logins": list(active_logins),
         "queued_jobs": queued,
         "queued_logins": [q["meta"].get("login_username") for q in queued],
+        "manual_actions": manual_actions,
+        "manual_actions_open": len(manual_actions),
+        "cooldowns": cooldown_entries,
         "unfollow": _unfollow_snapshot(),
     }
     # Backward-compatible keys for UI that expects single job/queued list
@@ -5338,6 +5518,34 @@ def api_status():
         payload["jobs"] = queued
     conn.close()
     return jsonify(payload)
+
+
+@app.route("/api/manual/actions", methods=["GET"])
+def api_manual_actions():
+    return jsonify({"actions": _open_manual_actions()})
+
+
+@app.route("/api/manual/actions/<action_id>/resolve", methods=["POST"])
+def api_manual_action_resolve(action_id):
+    data = request.get_json(silent=True) or {}
+    note = str(data.get("note") or "").strip() or None
+    updated = None
+    now_iso = datetime.now(LOCAL_TZ).isoformat()
+    with MANUAL_ACTIONS_LOCK:
+        for key, action in MANUAL_ACTIONS.items():
+            if str(action.get("action_id") or "") != str(action_id):
+                continue
+            action["state"] = "resolved"
+            action["resolved_at"] = now_iso
+            action["updated_at"] = now_iso
+            if note:
+                action["resolution_note"] = note
+            MANUAL_ACTIONS[key] = action
+            updated = dict(action)
+            break
+    if not updated:
+        return jsonify({"error": "manual action not found"}), 404
+    return jsonify({"ok": True, "action": updated})
 
 
 @app.route("/api/health", methods=["GET"])
@@ -5806,11 +6014,15 @@ def api_run_cancel():
     if job and job.get("target_username") == target_username:
         job["cancelled"] = True
         worker_pid = job.get("worker_pid") or worker_pid
+        if not job_id:
+            job_id = job.get("job_id")
     if worker_pid:
         try:
             os.kill(int(worker_pid), signal.SIGTERM)
         except Exception:
             pass
+    if job_id and (job_id in RUN_META):
+        _run_state_set(job_id, "cancelled", reason="cancel_requested")
     return jsonify({"cancelled": True})
 
 
