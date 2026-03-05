@@ -1,19 +1,11 @@
 import {
   appStatusSchema,
   accountCreateStatusSchema,
-  reconHealthSchema,
-  reconHistorySchema,
-  reconJobResultSchema,
-  reconQueueSchema,
   runStatusSchema,
   runJobStatusSchema,
   runJobDetailSchema,
   type AppStatus,
   type AccountCreateStatus,
-  type ReconHealth,
-  type ReconHistoryItem,
-  type ReconJobResult,
-  type ReconQueue,
   type RunStatus,
   type RunJobStatus,
   type RunJobDetail,
@@ -26,6 +18,10 @@ import {
   type RelationshipHistoryRow,
   type AuthTracePayload,
   type AuthPreflightPayload,
+  type RunHistoryItem,
+  type RunDetail,
+  type UnfollowStatus,
+  type UnfollowPreview,
   targetsSummarySchema,
   scheduleSchema,
   loginSchema,
@@ -34,6 +30,10 @@ import {
   relationshipHistorySchema,
   authTraceSchema,
   authPreflightSchema,
+  runHistorySchema,
+  runDetailSchema,
+  unfollowStatusSchema,
+  unfollowPreviewSchema,
 } from "./schemas";
 
 const API_BASE = "/api";
@@ -75,50 +75,6 @@ export async function getRunStatus(): Promise<RunStatus> {
   return runStatusSchema.parse(data);
 }
 
-export async function getReconHealth(): Promise<ReconHealth> {
-  const data = await fetchJson<unknown>("/recon/health");
-  return reconHealthSchema.parse(data);
-}
-
-export async function getReconHistory(): Promise<ReconHistoryItem[]> {
-  const data = await fetchJson<unknown>("/recon/history?limit=30");
-  return reconHistorySchema.parse(data);
-}
-
-export async function getReconQueue(): Promise<ReconQueue> {
-  const data = await fetchJson<unknown>("/recon/queue");
-  return reconQueueSchema.parse(data);
-}
-
-export async function runRecon(payload: {
-  mode: "username" | "email" | "phone";
-  query_value: string;
-  options: { ai?: boolean; generate_pdf?: boolean; no_nsfw?: boolean };
-}): Promise<{ job_id: string; status: string }> {
-  return fetchJson<{ job_id: string; status: string }>("/recon/run", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export async function getReconJob(jobId: string): Promise<ReconJobResult> {
-  const data = await fetchJson<unknown>(`/recon/run/${encodeURIComponent(jobId)}`);
-  return reconJobResultSchema.parse(data);
-}
-
-export async function cancelRecon(jobId: string): Promise<void> {
-  await fetchJson(`/recon/run/${encodeURIComponent(jobId)}/cancel`, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-}
-
-export async function deleteRecon(jobId: string): Promise<void> {
-  await fetchJson(`/recon/run/${encodeURIComponent(jobId)}`, {
-    method: "DELETE",
-  });
-}
-
 export async function getTargetsSummary(): Promise<TargetSummaryItem[]> {
   const data = await fetchJson<unknown>("/targets_summary");
   return targetsSummarySchema.parse(data);
@@ -139,7 +95,9 @@ export async function getConfig(): Promise<ConfigPayload> {
   return configSchema.parse(data);
 }
 
-export async function updateConfig(payload: Partial<ConfigValues> & { proxy_password?: string }): Promise<ConfigPayload> {
+export async function updateConfig(
+  payload: Partial<ConfigValues> & { proxy_password?: string; _apply_backend_profile?: boolean }
+): Promise<ConfigPayload> {
   const data = await fetchJson<unknown>("/config", {
     method: "PUT",
     body: JSON.stringify(payload),
@@ -294,8 +252,28 @@ export async function deleteSchedule(scheduleId: number): Promise<{ deleted: num
   });
 }
 
-export async function getRelationshipEvents(target: string): Promise<RelationshipEvent[]> {
-  const data = await fetchJson<unknown>(`/relationship_events?target=${encodeURIComponent(target)}&limit=200`);
+export async function getRelationshipEvents(
+  target: string,
+  options?: {
+    relation_type?: "followers" | "following" | "";
+    event_type?: "added" | "removed" | "";
+    username?: string;
+    run_id?: number;
+    observed_from?: string;
+    observed_to?: string;
+    limit?: number;
+  }
+): Promise<RelationshipEvent[]> {
+  const params = new URLSearchParams();
+  params.set("target", target);
+  params.set("limit", String(options?.limit ?? 200));
+  if (options?.relation_type) params.set("relation_type", options.relation_type);
+  if (options?.event_type) params.set("event_type", options.event_type);
+  if (options?.username) params.set("username", options.username.trim());
+  if (typeof options?.run_id === "number") params.set("run_id", String(options.run_id));
+  if (options?.observed_from) params.set("observed_from", options.observed_from);
+  if (options?.observed_to) params.set("observed_to", options.observed_to);
+  const data = await fetchJson<unknown>(`/relationship_events?${params.toString()}`);
   return relationshipEventSchema.parse(data);
 }
 
@@ -307,4 +285,72 @@ export async function getRelationshipHistory(
     `/relationship_history?target=${encodeURIComponent(target)}&relation_type=${encodeURIComponent(relationType)}&limit=100`
   );
   return relationshipHistorySchema.parse(data);
+}
+
+export async function getRuns(target: string, limit = 40): Promise<RunHistoryItem[]> {
+  const data = await fetchJson<unknown>(
+    `/runs?target=${encodeURIComponent(target)}&limit=${encodeURIComponent(String(limit))}`
+  );
+  return runHistorySchema.parse(data);
+}
+
+export async function getRunDetail(runId: number): Promise<RunDetail> {
+  const data = await fetchJson<unknown>(`/run/${encodeURIComponent(String(runId))}`);
+  return runDetailSchema.parse(data);
+}
+
+export async function deleteRun(runId: number): Promise<{ deleted: number; target?: string; undo?: boolean }> {
+  return fetchJson(`/run/${encodeURIComponent(String(runId))}`, {
+    method: "DELETE",
+  });
+}
+
+export async function undoRun(runId: number): Promise<{ restored: number }> {
+  return fetchJson(`/run/undo/${encodeURIComponent(String(runId))}`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function cancelRun(payload: {
+  login_username?: string;
+  target_username?: string;
+  job_id?: string;
+}): Promise<{ cancelled: boolean }> {
+  return fetchJson("/run/cancel", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getUnfollowStatus(login_username?: string): Promise<UnfollowStatus> {
+  const suffix = login_username ? `?login_username=${encodeURIComponent(login_username)}` : "";
+  const data = await fetchJson<unknown>(`/unfollow/status${suffix}`);
+  return unfollowStatusSchema.parse(data);
+}
+
+export async function getUnfollowPreview(login_username?: string): Promise<UnfollowPreview> {
+  const suffix = login_username ? `?login_username=${encodeURIComponent(login_username)}` : "";
+  const data = await fetchJson<unknown>(`/unfollow/preview${suffix}`);
+  return unfollowPreviewSchema.parse(data);
+}
+
+export async function startUnfollow(payload: {
+  login_username: string;
+  dry_run?: boolean;
+  max_actions?: number;
+  delay_min?: number;
+  delay_max?: number;
+}): Promise<{ started: boolean; count: number }> {
+  return fetchJson("/unfollow/start", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function cancelUnfollow(): Promise<{ cancelled: boolean }> {
+  return fetchJson("/unfollow/cancel", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
 }

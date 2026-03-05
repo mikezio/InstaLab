@@ -356,8 +356,10 @@ def init_login(
     proxy_server: Optional[str] = None,
     proxy_username: Optional[str] = None,
     proxy_password: Optional[str] = None,
+    max_wait_seconds: int = 300,
 ):
     os.makedirs(os.path.dirname(storage_path), exist_ok=True)
+    max_wait_seconds = max(30, min(int(max_wait_seconds or 300), 900))
     with sync_playwright() as p:
         launch_args = {"headless": False}
         if proxy_server:
@@ -369,9 +371,21 @@ def init_login(
         browser = p.chromium.launch(**launch_args)
         context = browser.new_context()
         page = context.new_page()
-        page.goto("https://www.instagram.com/accounts/login/")
-        # user completes login manually
-        page.wait_for_timeout(60000)  # 60s placeholder; user can close when done
+        page.goto("https://www.instagram.com/accounts/login/", wait_until="domcontentloaded")
+        # Keep the window open for manual login/challenge and persist as soon as session is valid.
+        deadline = time.time() + max_wait_seconds
+        while time.time() < deadline:
+            try:
+                cookies = context.cookies("https://www.instagram.com/")
+            except Exception:
+                cookies = []
+            has_session = any((c.get("name") == "sessionid") and (".instagram.com" in str(c.get("domain") or "") or "instagram.com" in str(c.get("domain") or "")) for c in cookies)
+            context.storage_state(path=storage_path)
+            if has_session:
+                page.wait_for_timeout(1200)
+                context.storage_state(path=storage_path)
+                break
+            page.wait_for_timeout(1000)
         context.storage_state(path=storage_path)
         browser.close()
 

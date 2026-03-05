@@ -4,41 +4,41 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   addLogin,
   cancelAccountCreate,
-  cancelRecon,
   getAccountCreateStatus,
   createSchedule,
   deleteLogin,
-  deleteRecon,
+  deleteRun,
   deleteSchedule,
   getAppStatus,
+  getRuns,
+  getRunDetail,
   getConfig,
   getLogins,
-  getReconHealth,
-  getReconHistory,
-  getReconJob,
-  getReconQueue,
   getRelationshipEvents,
   getRelationshipHistory,
   getRunStatus,
   getSchedules,
   getTargetsSummary,
+  getUnfollowStatus,
+  getUnfollowPreview,
   getAuthTrace,
   getRunJobDetail,
   getRunJobStatus,
   resetLogin,
   runAuthPreflight,
-  runRecon,
+  cancelRun,
+  cancelUnfollow,
   requestPasswordReset,
   startRun,
   startAccountCreate,
+  startUnfollow,
   setLoginNewPassword,
   submitChallengeCode,
   testProxy,
+  undoRun,
   updateConfig,
 } from "./lib/api";
-import type { ConfigValues, ReconHistoryItem } from "./lib/schemas";
-
-type ReconMode = "username" | "email" | "phone";
+import type { ConfigValues } from "./lib/schemas";
 
 function tone(status: string | undefined): string {
   const s = String(status || "").toLowerCase();
@@ -50,12 +50,48 @@ function tone(status: string | undefined): string {
 
 function formatTime(value?: string): string {
   if (!value) return "-";
-  const d = new Date(value);
+  let normalized = value;
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/);
+  if (m) {
+    normalized = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`;
+  }
+  const d = new Date(normalized);
   if (Number.isNaN(d.getTime())) return value;
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(d);
+}
+
+function instagramProfileUrl(username?: string): string {
+  const clean = String(username || "").trim().replace(/^@+/, "");
+  if (!clean) return "https://www.instagram.com/";
+  return `https://www.instagram.com/${encodeURIComponent(clean)}/`;
+}
+
+function toApiTimestamp(dt: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}_${pad(dt.getHours())}-${pad(
+    dt.getMinutes()
+  )}-${pad(dt.getSeconds())}`;
+}
+
+function csvEscape(value: string | number | boolean | null | undefined): string {
+  const text = String(value ?? "");
+  if (/[",\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
+}
+
+function downloadCsvRows(filename: string, headers: string[], rows: Array<Array<string | number | boolean | null | undefined>>) {
+  if (!rows.length) return;
+  const csv = [headers.map(csvEscape).join(","), ...rows.map((row) => row.map(csvEscape).join(","))].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 function AppShell({ children }: { children: React.ReactNode }) {
@@ -68,16 +104,12 @@ function AppShell({ children }: { children: React.ReactNode }) {
             Command Center
           </NavLink>
           <NavLink to="/targets">Targets</NavLink>
-          <NavLink to="/recon">Recon Lab</NavLink>
+          <NavLink to="/explorer">Explorer</NavLink>
           <NavLink to="/operations">Operations</NavLink>
+          <NavLink to="/unfollow">Unfollow</NavLink>
           <NavLink to="/accounts">Accounts</NavLink>
           <NavLink to="/settings">Settings</NavLink>
         </nav>
-        <div className="sidebar-footer">
-          <a href="/legacy/" className="legacy-link">
-            Open Legacy UI
-          </a>
-        </div>
       </aside>
 
       <main className="content">{children}</main>
@@ -87,8 +119,9 @@ function AppShell({ children }: { children: React.ReactNode }) {
           Home
         </NavLink>
         <NavLink to="/targets">Targets</NavLink>
-        <NavLink to="/recon">Recon</NavLink>
+        <NavLink to="/explorer">Explore</NavLink>
         <NavLink to="/operations">Ops</NavLink>
+        <NavLink to="/unfollow">Unfollow</NavLink>
         <NavLink to="/accounts">Acct</NavLink>
         <NavLink to="/settings">Prefs</NavLink>
       </nav>
@@ -98,15 +131,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
 
 function CommandCenterPage() {
   const statusQ = useQuery({ queryKey: ["status"], queryFn: getAppStatus, refetchInterval: 10000 });
-  const reconHealthQ = useQuery({ queryKey: ["recon-health"], queryFn: getReconHealth, refetchInterval: 10000 });
-  const reconQueueQ = useQuery({ queryKey: ["recon-queue"], queryFn: getReconQueue, refetchInterval: 6000 });
   const targetsQ = useQuery({ queryKey: ["targets-summary"], queryFn: getTargetsSummary, refetchInterval: 30000 });
   const schedulesQ = useQuery({ queryKey: ["schedules"], queryFn: getSchedules, refetchInterval: 20000 });
-  const reconHistoryQ = useQuery({ queryKey: ["recon-history"], queryFn: getReconHistory, refetchInterval: 10000 });
   const loginsQ = useQuery({ queryKey: ["logins"], queryFn: getLogins, refetchInterval: 20000 });
 
   const upcomingSchedules = (schedulesQ.data ?? []).filter((s) => Boolean(s.next_run)).length;
-  const failingReconJobs = (reconHistoryQ.data ?? []).filter((j) => ["error", "failed"].includes(String(j.status || "").toLowerCase())).length;
   const readyLogins = (loginsQ.data ?? []).filter((l) => l.private_session_exists).length;
 
   return (
@@ -117,31 +146,14 @@ function CommandCenterPage() {
       </header>
 
       <div className="card-grid">
-        <article className="card">
+        <article className="card explorer-panel">
           <h3>API</h3>
           <p className={`pill ${tone(statusQ.data?.status)}`}>{statusQ.data?.status || "loading"}</p>
-        </article>
-        <article className="card">
-          <h3>Recon Module</h3>
-          <p className={`pill ${reconHealthQ.data?.enabled ? "good" : "bad"}`}>
-            {reconHealthQ.data?.enabled ? "enabled" : "disabled"}
-          </p>
-        </article>
-        <article className="card">
-          <h3>Queue Pressure</h3>
-          <p className="stat">{reconQueueQ.data?.running ?? 0} running / {reconQueueQ.data?.queued ?? 0} queued</p>
-          <p className="hint">limit {reconQueueQ.data?.queue_limit ?? "-"}</p>
         </article>
         <article className="card">
           <h3>Target Coverage</h3>
           <p className="stat">{targetsQ.data?.length ?? 0}</p>
           <p className="hint">{upcomingSchedules}/{schedulesQ.data?.length ?? 0} schedules with next run</p>
-        </article>
-        <article className="card">
-          <h3>Recon Reliability</h3>
-          <p className={`pill ${failingReconJobs > 0 ? "bad" : "good"}`}>
-            {failingReconJobs > 0 ? `${failingReconJobs} recent failures` : "stable"}
-          </p>
         </article>
         <article className="card">
           <h3>Account Readiness</h3>
@@ -300,241 +312,427 @@ function TargetsPage() {
   );
 }
 
-function ReconPage() {
+function ExplorerPage() {
   const qc = useQueryClient();
-  const [mode, setMode] = useState<ReconMode>("username");
-  const [queryValue, setQueryValue] = useState("");
-  const [selectedJobId, setSelectedJobId] = useState("");
-  const [aiEnabled, setAiEnabled] = useState(false);
-  const [pdfEnabled, setPdfEnabled] = useState(true);
+  const targetsQ = useQuery({ queryKey: ["targets-summary"], queryFn: getTargetsSummary, refetchInterval: 30000 });
+  const [selectedTarget, setSelectedTarget] = useState("");
+  const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [eventsScope, setEventsScope] = useState<"target" | "run">("target");
+  const [eventsRelation, setEventsRelation] = useState<"" | "followers" | "following">("");
+  const [eventsType, setEventsType] = useState<"" | "added" | "removed">("");
+  const [eventsUsername, setEventsUsername] = useState("");
+  const [eventsWindowDays, setEventsWindowDays] = useState("7");
 
-  const reconHealthQ = useQuery({ queryKey: ["recon-health"], queryFn: getReconHealth, refetchInterval: 10000 });
-  const reconHistoryQ = useQuery({ queryKey: ["recon-history"], queryFn: getReconHistory, refetchInterval: 6000 });
-  const reconQueueQ = useQuery({ queryKey: ["recon-queue"], queryFn: getReconQueue, refetchInterval: 4000 });
+  useEffect(() => {
+    if (!selectedTarget && (targetsQ.data?.length || 0) > 0) {
+      setSelectedTarget(String(targetsQ.data?.[0]?.target_username || ""));
+    }
+  }, [selectedTarget, targetsQ.data]);
 
-  const selectedJobQ = useQuery({
-    queryKey: ["recon-job", selectedJobId],
-    queryFn: () => getReconJob(selectedJobId),
-    enabled: Boolean(selectedJobId),
-    refetchInterval: selectedJobId ? 2000 : false,
+  const runsQ = useQuery({
+    queryKey: ["runs", selectedTarget],
+    queryFn: () => getRuns(selectedTarget, 60),
+    enabled: Boolean(selectedTarget),
+    refetchInterval: 15000,
   });
 
-  const runMutation = useMutation({
-    mutationFn: runRecon,
-    onSuccess: async (res) => {
-      setSelectedJobId(res.job_id);
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ["recon-history"] }),
-        qc.invalidateQueries({ queryKey: ["recon-queue"] }),
-      ]);
+  useEffect(() => {
+    const firstId = runsQ.data?.[0]?.id;
+    if (typeof firstId === "number" && !selectedRunId) {
+      setSelectedRunId(firstId);
+    }
+  }, [runsQ.data, selectedRunId]);
+
+  const runDetailQ = useQuery({
+    queryKey: ["run-detail", selectedRunId],
+    queryFn: () => getRunDetail(selectedRunId as number),
+    enabled: typeof selectedRunId === "number",
+    refetchInterval: 12000,
+  });
+
+  const eventsQ = useQuery({
+    queryKey: [
+      "relationship-events",
+      selectedTarget,
+      eventsScope,
+      eventsRelation,
+      eventsType,
+      eventsUsername,
+      eventsWindowDays,
+      selectedRunId,
+    ],
+    queryFn: () => {
+      const days = Number(eventsWindowDays || "7");
+      const observed_from =
+        Number.isFinite(days) && days > 0 ? toApiTimestamp(new Date(Date.now() - days * 24 * 60 * 60 * 1000)) : undefined;
+      const run_id = eventsScope === "run" && typeof selectedRunId === "number" ? selectedRunId : undefined;
+      return getRelationshipEvents(selectedTarget, {
+        relation_type: eventsRelation,
+        event_type: eventsType,
+        username: eventsUsername.trim() || undefined,
+        observed_from,
+        run_id,
+        limit: Number.isFinite(days) && days === 0 ? 1000 : 400,
+      });
     },
+    enabled: Boolean(selectedTarget),
+    refetchInterval: 12000,
   });
 
-  const cancelMutation = useMutation({
-    mutationFn: cancelRecon,
+  const deleteRunMutation = useMutation({
+    mutationFn: deleteRun,
     onSuccess: async () => {
       await Promise.all([
-        qc.invalidateQueries({ queryKey: ["recon-history"] }),
-        qc.invalidateQueries({ queryKey: ["recon-queue"] }),
-        qc.invalidateQueries({ queryKey: ["recon-job", selectedJobId] }),
+        qc.invalidateQueries({ queryKey: ["runs", selectedTarget] }),
+        qc.invalidateQueries({ queryKey: ["targets-summary"] }),
       ]);
     },
   });
-
-  const deleteMutation = useMutation({
-    mutationFn: deleteRecon,
+  const undoRunMutation = useMutation({
+    mutationFn: undoRun,
     onSuccess: async () => {
-      setSelectedJobId("");
       await Promise.all([
-        qc.invalidateQueries({ queryKey: ["recon-history"] }),
-        qc.invalidateQueries({ queryKey: ["recon-queue"] }),
+        qc.invalidateQueries({ queryKey: ["runs", selectedTarget] }),
+        qc.invalidateQueries({ queryKey: ["targets-summary"] }),
       ]);
     },
   });
 
-  const jobs = reconHistoryQ.data ?? [];
-  const selected = selectedJobQ.data;
-  const selectedMode = String(selected?.job?.mode || "").toLowerCase();
-
-  const phoneProfile = useMemo(() => {
-    const findings = selected?.findings ?? [];
-    const telephony = findings.find((f: unknown) => {
-      if (typeof f !== "object" || !f) return false;
-      const category = (f as { category?: unknown }).category;
-      return String(category || "").toLowerCase() === "telephony";
-    });
-    const evidence = (telephony as { evidence_json?: Record<string, unknown> } | undefined)?.evidence_json || {};
-    return {
-      callerId: String(evidence.caller_id || evidence.caller_name || "Not found"),
-      carrier: String(evidence.carrier || "Unknown"),
-      country: String(evidence.country || "Unknown"),
-      code: evidence.countryCode ? `+${String(evidence.countryCode)}` : "-",
-      e164: String(evidence.e164 || "Unknown"),
-      valid: typeof evidence.valid === "boolean" ? (evidence.valid ? "yes" : "no") : "unknown",
-    };
-  }, [selected]);
-
-  const onRun = () => {
-    if (!queryValue.trim()) return;
-    const blackbirdMode = mode === "username" || mode === "email";
-    runMutation.mutate({
-      mode,
-      query_value: queryValue.trim(),
-      options: {
-        no_nsfw: true,
-        ai: blackbirdMode ? aiEnabled : false,
-        generate_pdf: blackbirdMode ? pdfEnabled : false,
-      },
-    });
-  };
+  const detail = runDetailQ.data;
+  const targetSlug = (selectedTarget || "target").replace(/[^a-zA-Z0-9._-]+/g, "_");
+  const runs = runsQ.data ?? [];
+  const selectedRun = runs.find((r) => r.id === selectedRunId) ?? null;
+  const detailGroups = detail
+    ? [
+        { key: "followers-added", title: "Followers Added", items: detail.followers_added_list ?? [], tone: "good" },
+        { key: "followers-removed", title: "Followers Removed", items: detail.followers_removed_list ?? [], tone: "bad" },
+        { key: "following-added", title: "Following Added", items: detail.followees_added_list ?? [], tone: "info" },
+        { key: "following-removed", title: "Following Removed", items: detail.followees_removed_list ?? [], tone: "neutral" },
+      ]
+    : [];
 
   return (
-    <section>
+    <section className="explorer-shell">
       <header className="page-header">
-        <h1>Recon Lab</h1>
-        <p>Separate investigation workspace for identifiers. Recon results stay isolated from target-account relationship tracking history.</p>
+        <h1>Explorer</h1>
+        <p>Run history and run-level relationship deltas for each tracked target account.</p>
       </header>
-
-      <div className="split-grid">
+      <div className="explorer-kpis">
+        <article className="explorer-kpi">
+          <span>Selected Target</span>
+          <strong>@{selectedTarget || "-"}</strong>
+        </article>
+        <article className="explorer-kpi">
+          <span>Total Runs Loaded</span>
+          <strong>{runsQ.data?.length ?? 0}</strong>
+        </article>
+        <article className="explorer-kpi">
+          <span>Events In View</span>
+          <strong>{eventsQ.data?.length ?? 0}</strong>
+        </article>
+      </div>
+      <div className="explorer-main-grid">
         <article className="card">
-          <h3>New Scan</h3>
+          <h3>Run Selector</h3>
+          <div className="form-grid">
+            <label>
+              Target
+              <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)}>
+                {(targetsQ.data ?? []).map((t, idx) => (
+                  <option key={`${t.target_username || "target"}-${idx}`} value={t.target_username || ""}>
+                    {t.target_username || "-"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <p className="hint">Pick a run. Details render on the right.</p>
+          {runs.length ? (
+            <>
+              <label>
+                Run
+                <select
+                  value={selectedRunId ?? ""}
+                  onChange={(e) => setSelectedRunId(e.target.value ? Number(e.target.value) : null)}
+                  className="run-selector-input"
+                >
+                  {runs.map((run, idx) => {
+                    const followerDelta = (run.followers_added ?? 0) - (run.followers_removed ?? 0);
+                    return (
+                      <option key={`${run.id || "run"}-${idx}`} value={run.id ?? ""}>
+                        #{run.id ?? "-"} · {formatTime(run.timestamp || undefined)} · {followerDelta >= 0 ? "+" : ""}{followerDelta}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+              {selectedRun ? (
+                <div className="run-selector-summary">
+                  <div className="list-title">Run #{selectedRun.id ?? "-"} · {formatTime(selectedRun.timestamp || undefined)}</div>
+                  <div className="list-meta">via @{selectedRun.login_username || "-"} · duration {typeof selectedRun.duration_seconds === "number" ? `${selectedRun.duration_seconds}s` : "-"}</div>
+                  <div className="list-meta">
+                    followers {selectedRun.followers_count ?? "-"} · change {((selectedRun.followers_added ?? 0) - (selectedRun.followers_removed ?? 0)) >= 0 ? "+" : ""}
+                    {(selectedRun.followers_added ?? 0) - (selectedRun.followers_removed ?? 0)} ({selectedRun.followers_added ?? 0} new / {selectedRun.followers_removed ?? 0} lost)
+                  </div>
+                  <div className="list-meta">
+                    following {selectedRun.followees_count ?? "-"} · change {((selectedRun.followees_added ?? 0) - (selectedRun.followees_removed ?? 0)) >= 0 ? "+" : ""}
+                    {(selectedRun.followees_added ?? 0) - (selectedRun.followees_removed ?? 0)} ({selectedRun.followees_added ?? 0} new / {selectedRun.followees_removed ?? 0} lost) · NF {selectedRun.non_followbacks_count ?? "-"}
+                  </div>
+                  <div className="row gap" style={{ marginTop: "0.55rem" }}>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => selectedRun.id && deleteRunMutation.mutate(selectedRun.id)}
+                      disabled={deleteRunMutation.isPending || !selectedRun.id}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => selectedRun.id && undoRunMutation.mutate(selectedRun.id)}
+                      disabled={undoRunMutation.isPending || !selectedRun.id}
+                    >
+                      Undo
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <div className="explorer-empty">
+              <h4>No runs yet</h4>
+              <p>Create your first run from Operations, then return to Explorer for diff insights.</p>
+            </div>
+          )}
+          {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
+          {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}
+        </article>
+        <article className="card explorer-panel">
+          <h3>Run Detail {selectedRunId ? `#${selectedRunId}` : ""}</h3>
+          {!detail ? (
+            <div className="explorer-empty detail-empty">
+              <h4>Select a run</h4>
+              <p>Pick a run from the selector to inspect follower/following deltas and exportable lists.</p>
+            </div>
+          ) : null}
+          {detail ? (
+            <>
+              <p className="hint">
+                @{detail.target_username || "-"} via @{detail.login_username || "-"} · {formatTime(detail.timestamp || undefined)}
+              </p>
+              <p className="hint">
+                Followers {detail.followers_count ?? "-"} · change {(detail.followers_added ?? 0) - (detail.followers_removed ?? 0) >= 0 ? "+" : ""}
+                {(detail.followers_added ?? 0) - (detail.followers_removed ?? 0)} ({detail.followers_added ?? 0} new / {detail.followers_removed ?? 0} lost)
+              </p>
+              <p className="hint">
+                Following {detail.followees_count ?? "-"} · change {(detail.followees_added ?? 0) - (detail.followees_removed ?? 0) >= 0 ? "+" : ""}
+                {(detail.followees_added ?? 0) - (detail.followees_removed ?? 0)} ({detail.followees_added ?? 0} new / {detail.followees_removed ?? 0} lost)
+              </p>
+              <div className="row gap">
+                <button
+                  className="btn-secondary"
+                  onClick={() =>
+                    downloadCsvRows(
+                      `${targetSlug}-followers.csv`,
+                      ["username"],
+                      (detail.followers ?? []).map((u) => [u])
+                    )
+                  }
+                >
+                  Export followers CSV
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={() =>
+                    downloadCsvRows(
+                      `${targetSlug}-following.csv`,
+                      ["username"],
+                      (detail.followees ?? []).map((u) => [u])
+                    )
+                  }
+                >
+                  Export following CSV
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={() =>
+                    downloadCsvRows(
+                      `${targetSlug}-no-follow-back.csv`,
+                      ["username"],
+                      (detail.non_followbacks ?? []).map((u) => [u])
+                    )
+                  }
+                >
+                  Export non-followbacks CSV
+                </button>
+              </div>
+              <div className="run-detail-grid">
+                {detailGroups.map((group) => (
+                  <section className={`run-detail-card run-detail-card--${group.key}`} key={group.key}>
+                    <div className="run-detail-head">
+                      <h4>{group.title}</h4>
+                      <span className={`pill ${group.tone}`}>{group.items.length}</span>
+                    </div>
+                    <div className="run-detail-list">
+                      {group.items.length ? (
+                        <div className="run-detail-plain-list">
+                          {group.items.slice(0, 100).map((u, idx) => (
+                            <a
+                              key={`${group.key}-${u}-${idx}`}
+                              className="run-detail-plain-item"
+                              href={instagramProfileUrl(u)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title={`Open @${u} on Instagram`}
+                            >
+                              @{u}
+                            </a>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="hint">No changes in this group.</p>
+                      )}
+                      {group.items.length > 100 ? <p className="hint run-detail-truncation">Showing first 100 of {group.items.length} usernames.</p> : null}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </article>
+      </div>
+      <article className="card explorer-panel">
+        <h3>Relationship Events</h3>
+        <div className="form-grid">
           <label>
-            Mode
-            <select value={mode} onChange={(e) => setMode(e.target.value as ReconMode)}>
-              <option value="username">Username (Blackbird)</option>
-              <option value="email">Email (Blackbird)</option>
-              <option value="phone">Phone (PhoneInfoga)</option>
+            Scope
+            <select value={eventsScope} onChange={(e) => setEventsScope(e.target.value as "target" | "run")}>
+              <option value="target">target</option>
+              <option value="run">selected run only</option>
             </select>
           </label>
           <label>
-            Query
-            <input
-              placeholder="@username / user@example.com / +15551234567"
-              value={queryValue}
-              onChange={(e) => setQueryValue(e.target.value)}
-            />
+            Relation
+            <select value={eventsRelation} onChange={(e) => setEventsRelation(e.target.value as "" | "followers" | "following")}>
+              <option value="">all</option>
+              <option value="followers">followers</option>
+              <option value="following">following</option>
+            </select>
           </label>
-          <div className="row gap">
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={aiEnabled}
-                disabled={mode === "phone" || !reconHealthQ.data?.ai?.key_configured}
-                onChange={(e) => setAiEnabled(e.target.checked)}
-              />
-              AI analysis
-            </label>
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={pdfEnabled}
-                disabled={mode === "phone"}
-                onChange={(e) => setPdfEnabled(e.target.checked)}
-              />
-              PDF report
-            </label>
-          </div>
-          <button onClick={onRun} disabled={runMutation.isPending}>{runMutation.isPending ? "Queueing..." : "Run scan"}</button>
-          <p className="hint">AI key: {reconHealthQ.data?.ai?.key_configured ? "configured" : "missing"}</p>
-          {runMutation.error ? <p className="error">{(runMutation.error as Error).message}</p> : null}
-        </article>
-
-        <article className="card">
-          <h3>Queue</h3>
-          <p className="hint">Running {reconQueueQ.data?.running ?? 0}/{reconQueueQ.data?.max_concurrency ?? 0} • Queued {reconQueueQ.data?.queued ?? 0}</p>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>State</th>
-                  <th>Query</th>
-                  <th>Elapsed</th>
+          <label>
+            Event type
+            <select value={eventsType} onChange={(e) => setEventsType(e.target.value as "" | "added" | "removed")}>
+              <option value="">all</option>
+              <option value="added">added</option>
+              <option value="removed">removed</option>
+            </select>
+          </label>
+          <label>
+            Window days (0=all)
+            <input value={eventsWindowDays} onChange={(e) => setEventsWindowDays(e.target.value)} />
+          </label>
+          <label>
+            Username contains
+            <input value={eventsUsername} onChange={(e) => setEventsUsername(e.target.value)} placeholder="@username" />
+          </label>
+        </div>
+        <div className="row gap">
+          <span className="hint">
+            {(eventsQ.data ?? []).length} events · {(eventsQ.data ?? []).filter((e) => e.event_type === "added").length} added · {(eventsQ.data ?? []).filter((e) => e.event_type === "removed").length} removed
+          </span>
+          <button
+            className="btn-secondary"
+            onClick={() =>
+              downloadCsvRows(
+                `${targetSlug}-relationship-events.csv`,
+                ["id", "observed_at", "username", "relation_type", "event_type", "run_id", "login_username"],
+                (eventsQ.data ?? []).map((e) => [
+                  e.id ?? "",
+                  e.observed_at ?? "",
+                  e.username ?? "",
+                  e.relation_type ?? "",
+                  e.event_type ?? "",
+                  e.run_id ?? "",
+                  e.login_username ?? "",
+                ])
+              )
+            }
+          >
+            Export events CSV
+          </button>
+        </div>
+        <div className="table-wrap desktop-only">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Username</th>
+                <th>Relation</th>
+                <th>Type</th>
+                <th>Run</th>
+                <th>Collector</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(eventsQ.data ?? []).map((ev, idx) => (
+                <tr key={`ev-${ev.id || idx}`}>
+                  <td>{formatTime(ev.observed_at)}</td>
+                  <td>
+                    {ev.username ? (
+                      <a href={instagramProfileUrl(ev.username)} target="_blank" rel="noopener noreferrer" className="inline-link">
+                        @{ev.username}
+                      </a>
+                    ) : (
+                      "-"
+                    )}
+                  </td>
+                  <td>{ev.relation_type || "-"}</td>
+                  <td><span className={`pill ${ev.event_type === "added" ? "good" : "bad"}`}>{ev.event_type || "-"}</span></td>
+                  <td>{ev.run_id ?? "-"}</td>
+                  <td>{ev.login_username || "-"}</td>
+                  <td>
+                    <button className="btn-secondary" onClick={() => setSelectedRunId(ev.run_id ?? null)} disabled={!ev.run_id}>
+                      Open run
+                    </button>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {(reconQueueQ.data?.queue ?? []).map((item, idx) => (
-                  <tr key={`${item.job_id || "item"}-${idx}`}>
-                    <td><span className={`pill ${tone(item.state)}`}>{item.state || "-"}</span></td>
-                    <td>{item.query_value || "-"}</td>
-                    <td>{item.elapsed_seconds ?? 0}s</td>
-                  </tr>
-                ))}
-                {!(reconQueueQ.data?.queue ?? []).length ? (
-                  <tr><td colSpan={3} className="hint">No active jobs.</td></tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </article>
-      </div>
-
-      <div className="split-grid">
-        <article className="card">
-          <h3>History</h3>
-          <div className="table-wrap">
-            <table>
-              <thead>
+              ))}
+              {!(eventsQ.data ?? []).length ? (
                 <tr>
-                  <th>When</th>
-                  <th>Mode</th>
-                  <th>Query</th>
-                  <th>Status</th>
-                  <th>Actions</th>
+                  <td colSpan={7} className="hint">No events matched the current filters.</td>
                 </tr>
-              </thead>
-              <tbody>
-                {jobs.map((job: ReconHistoryItem) => {
-                  const state = String(job.status || "").toLowerCase();
-                  return (
-                    <tr key={job.id}>
-                      <td>{formatTime(job.created_at)}</td>
-                      <td>{job.mode || "-"}</td>
-                      <td>{job.query_value || "-"}</td>
-                      <td><span className={`pill ${tone(state)}`}>{state || "-"}</span></td>
-                      <td className="row gap">
-                        <button className="btn-secondary" onClick={() => setSelectedJobId(job.id)}>Open</button>
-                        {state === "running" || state === "queued" ? (
-                          <button className="btn-secondary" onClick={() => cancelMutation.mutate(job.id)} disabled={cancelMutation.isPending}>Cancel</button>
-                        ) : (
-                          <button className="btn-secondary" onClick={() => deleteMutation.mutate(job.id)} disabled={deleteMutation.isPending}>Delete</button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {!jobs.length ? (
-                  <tr><td colSpan={5} className="hint">No recon jobs yet.</td></tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </article>
-
-        <article className="card">
-          <h3>Job Detail</h3>
-          {selected?.job ? (
-            <>
-              <p className="hint">
-                {selected.job.mode} • {selected.job.query_value} • <span className={`pill ${tone(selected.job.status)}`}>{selected.job.status}</span>
-              </p>
-              {selected.job.error_message ? <p className="error">{selected.job.error_message}</p> : null}
-              {selectedMode === "phone" ? (
-                <div className="profile">
-                  <h4>Caller Profile</h4>
-                  <p>Caller ID: {phoneProfile.callerId}</p>
-                  <p>Carrier: {phoneProfile.carrier}</p>
-                  <p>Country: {phoneProfile.country} ({phoneProfile.code})</p>
-                  <p>E.164: {phoneProfile.e164}</p>
-                  <p>Valid: {phoneProfile.valid}</p>
-                </div>
               ) : null}
-              <p className="hint">Findings: {selected.findings?.length ?? 0}</p>
-            </>
-          ) : (
-            <p className="hint">Select a job from history.</p>
-          )}
-        </article>
-      </div>
+            </tbody>
+          </table>
+        </div>
+        <div className="mobile-only">
+          <div className="entity-list">
+            {(eventsQ.data ?? []).slice(0, 60).map((ev, idx) => (
+              <div key={`evm-${ev.id || idx}`} className="run-detail-card">
+                <div className="run-detail-head">
+                  <h4>
+                    {ev.username ? (
+                      <a href={instagramProfileUrl(ev.username)} target="_blank" rel="noopener noreferrer" className="inline-link">
+                        @{ev.username}
+                      </a>
+                    ) : (
+                      "-"
+                    )}
+                  </h4>
+                  <span className={`pill ${ev.event_type === "added" ? "good" : "bad"}`}>{ev.event_type || "-"}</span>
+                </div>
+                <p className="hint">{ev.relation_type || "-"} · {formatTime(ev.observed_at)} · run {ev.run_id ?? "-"}</p>
+                <div className="row gap" style={{ marginTop: "0.45rem" }}>
+                  <button className="btn-secondary" onClick={() => setSelectedRunId(ev.run_id ?? null)} disabled={!ev.run_id}>
+                    Open run
+                  </button>
+                </div>
+              </div>
+            ))}
+            {!(eventsQ.data ?? []).length ? <p className="hint">No events matched the current filters.</p> : null}
+          </div>
+        </div>
+      </article>
     </section>
   );
 }
@@ -589,6 +787,12 @@ function OperationsPage() {
       setVerificationCode("");
     },
   });
+  const cancelRunMutation = useMutation({
+    mutationFn: cancelRun,
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["run-status"] });
+    },
+  });
 
   const createScheduleMutation = useMutation({
     mutationFn: createSchedule,
@@ -628,14 +832,17 @@ function OperationsPage() {
   const runPayload = runJobQ.data?.payload;
   const runMeta = runJobQ.data?.meta;
   const runDone = Boolean(runJobQ.data?.done);
+  const runErrorCode = String(runPayload?.error_code || "").toLowerCase();
   const promptHint = (runJobDetailQ.data?.worker_out_tail || "").toLowerCase().includes("waiting for code");
+  const interactiveChallenge =
+    runErrorCode === "two_factor_required" ||
+    runErrorCode === "challenge_required" ||
+    (String(runMeta?.state || "").toLowerCase() === "running" && promptHint);
   const runNeedsCode =
-    !runDone &&
-    (promptHint ||
-      String(runPayload?.error_code || "").toLowerCase() === "two_factor_required" ||
-      String(runPayload?.error_code || "").toLowerCase() === "challenge_required");
+    !runDone && interactiveChallenge;
   useEffect(() => {
-    if (runNeedsCode) setShowCodeModal(true);
+    setShowCodeModal(runNeedsCode);
+    if (!runNeedsCode) setVerificationCode("");
   }, [runNeedsCode]);
 
   return (
@@ -671,10 +878,18 @@ function OperationsPage() {
           <button onClick={onRunNow} disabled={runNowMutation.isPending}>
             {runNowMutation.isPending ? "Queueing..." : "Start run"}
           </button>
+          <button
+            className="btn-secondary"
+            onClick={() => cancelRunMutation.mutate({ job_id: manualJobId })}
+            disabled={cancelRunMutation.isPending || !manualJobId}
+          >
+            {cancelRunMutation.isPending ? "Cancelling..." : "Cancel job"}
+          </button>
           <span className="hint">State: {runStatusQ.data?.state || "idle"}</span>
           {manualJobId ? <span className="hint">Job: {manualJobId}</span> : null}
         </div>
         {runNowMutation.error ? <p className="error">{(runNowMutation.error as Error).message}</p> : null}
+        {cancelRunMutation.error ? <p className="error">{(cancelRunMutation.error as Error).message}</p> : null}
         <p className="hint">
           Active {runStatusQ.data?.active_jobs?.length ?? 0} · Queued {runStatusQ.data?.queued_jobs?.length ?? 0}
         </p>
@@ -803,6 +1018,157 @@ function OperationsPage() {
           </div>
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function UnfollowPage() {
+  const qc = useQueryClient();
+  const loginsQ = useQuery({ queryKey: ["logins"], queryFn: getLogins, refetchInterval: 20000 });
+  const [login, setLogin] = useState("");
+  const [dryRun, setDryRun] = useState(false);
+  const [maxActions, setMaxActions] = useState("0");
+  const [delayMin, setDelayMin] = useState("25");
+  const [delayMax, setDelayMax] = useState("45");
+
+  useEffect(() => {
+    if (!login && (loginsQ.data?.length || 0) > 0) {
+      setLogin(String(loginsQ.data?.[0]?.login_username || ""));
+    }
+  }, [login, loginsQ.data]);
+
+  const statusQ = useQuery({
+    queryKey: ["unfollow-status", login],
+    queryFn: () => getUnfollowStatus(login),
+    enabled: Boolean(login),
+    refetchInterval: 6000,
+  });
+  const previewQ = useQuery({
+    queryKey: ["unfollow-preview", login],
+    queryFn: () => getUnfollowPreview(login),
+    enabled: Boolean(login),
+  });
+
+  const previewMutation = useMutation({
+    mutationFn: () => getUnfollowPreview(login),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["unfollow-preview", login] });
+    },
+  });
+  const startMutation = useMutation({
+    mutationFn: startUnfollow,
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["unfollow-status", login] }),
+        qc.invalidateQueries({ queryKey: ["unfollow-preview", login] }),
+      ]);
+    },
+  });
+  const cancelMutation = useMutation({
+    mutationFn: cancelUnfollow,
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["unfollow-status", login] });
+    },
+  });
+
+  const onStart = () => {
+    if (!login.trim()) return;
+    const max = Number(maxActions);
+    const minDelay = Number(delayMin);
+    const maxDelay = Number(delayMax);
+    startMutation.mutate({
+      login_username: login.trim(),
+      dry_run: dryRun,
+      max_actions: Number.isFinite(max) && max > 0 ? max : undefined,
+      delay_min: Number.isFinite(minDelay) ? minDelay : undefined,
+      delay_max: Number.isFinite(maxDelay) ? maxDelay : undefined,
+    });
+  };
+
+  return (
+    <section>
+      <header className="page-header">
+        <h1>Unfollow</h1>
+        <p>Manage non-followback unfollow batches for collector accounts in the new UI.</p>
+      </header>
+      <article className="card">
+        <h3>Controls</h3>
+        <div className="form-grid">
+          <label>
+            Collector login
+            <select value={login} onChange={(e) => setLogin(e.target.value)}>
+              <option value="">Select login</option>
+              {(loginsQ.data ?? []).map((l, idx) => (
+                <option key={`u-${l.login_username || "login"}-${idx}`} value={l.login_username || ""}>
+                  {l.login_username || "-"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Max actions (0 = suggested)
+            <input value={maxActions} onChange={(e) => setMaxActions(e.target.value)} />
+          </label>
+          <label>
+            Delay min (seconds)
+            <input value={delayMin} onChange={(e) => setDelayMin(e.target.value)} />
+          </label>
+          <label>
+            Delay max (seconds)
+            <input value={delayMax} onChange={(e) => setDelayMax(e.target.value)} />
+          </label>
+          <label>
+            Dry run
+            <select value={dryRun ? "true" : "false"} onChange={(e) => setDryRun(e.target.value === "true")}>
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </label>
+        </div>
+        <div className="row gap">
+          <button onClick={() => previewMutation.mutate()} disabled={previewMutation.isPending || !login}>
+            {previewMutation.isPending ? "Refreshing..." : "Refresh preview"}
+          </button>
+          <button onClick={onStart} disabled={startMutation.isPending || !login}>
+            {startMutation.isPending ? "Starting..." : "Start unfollow"}
+          </button>
+          <button className="btn-secondary" onClick={() => cancelMutation.mutate()} disabled={cancelMutation.isPending}>
+            {cancelMutation.isPending ? "Cancelling..." : "Cancel unfollow job"}
+          </button>
+        </div>
+        {previewMutation.error ? <p className="error">{(previewMutation.error as Error).message}</p> : null}
+        {startMutation.error ? <p className="error">{(startMutation.error as Error).message}</p> : null}
+        {cancelMutation.error ? <p className="error">{(cancelMutation.error as Error).message}</p> : null}
+      </article>
+      <article className="card">
+        <h3>Status</h3>
+        <p className="hint">Auth ready: {statusQ.data?.auth_ready ? "yes" : "no"} · Login: @{statusQ.data?.login_username || login || "-"}</p>
+        <p className="hint">
+          Non-followbacks: {statusQ.data?.non_followbacks_count ?? 0} · Eligible: {statusQ.data?.eligible_count ?? 0} · Already unfollowed: {statusQ.data?.already_unfollowed_count ?? 0} · Suggested: {statusQ.data?.suggested_max ?? "-"}
+        </p>
+        <p className="hint">
+          Job: {String(statusQ.data?.job?.state || "idle")} {statusQ.data?.job?.message ? `· ${String(statusQ.data?.job?.message)}` : ""}
+        </p>
+        <div className="table-wrap">
+          <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+            {(statusQ.data?.log ?? []).join("\n") || "(no unfollow log yet)"}
+          </pre>
+        </div>
+      </article>
+      <article className="card">
+        <h3>Preview</h3>
+        <p className="hint">
+          Count: {previewQ.data?.count ?? 0} · Total non-followbacks: {previewQ.data?.total_non_followbacks ?? 0} · Already unfollowed: {previewQ.data?.already_unfollowed_count ?? 0}
+        </p>
+        <div className="entity-list">
+          {(previewQ.data?.sample ?? []).map((username, idx) => (
+            <div className="list-row" key={`ufs-${username}-${idx}`}>
+              <div className="list-title">{username}</div>
+            </div>
+          ))}
+          {!(previewQ.data?.sample ?? []).length ? <p className="hint">No preview sample yet.</p> : null}
+        </div>
+      </article>
     </section>
   );
 }
@@ -1250,17 +1616,49 @@ function SettingsPage() {
   const cfgQ = useQuery({ queryKey: ["config"], queryFn: getConfig, refetchInterval: 30000 });
   const [draft, setDraft] = useState<Record<string, string | number | boolean>>({});
   const [proxyPassword, setProxyPassword] = useState("");
+  const [loadedBackend, setLoadedBackend] = useState<string>("");
+
+  const backendProfiles: Record<string, Record<string, string | number | boolean>> = {
+    private: {
+      run_http_timeout_seconds: 60,
+      run_request_timeout: 60,
+      run_private_request_sleep_seconds: 0.8,
+      run_item_delay_min: 0.6,
+      run_item_delay_max: 1.4,
+      run_initial_fetch_delay_seconds: 6,
+      run_pause_every_min: 120,
+      run_pause_every_max: 180,
+      run_pause_seconds_min: 20,
+      run_pause_seconds_max: 45,
+      run_rate_limit_cooldown_seconds: 3600,
+    },
+    browser: {
+      run_http_timeout_seconds: 60,
+      run_request_timeout: 60,
+      run_private_request_sleep_seconds: 0,
+      run_item_delay_min: 0.25,
+      run_item_delay_max: 0.75,
+      run_initial_fetch_delay_seconds: 1,
+      run_pause_every_min: 0,
+      run_pause_every_max: 0,
+      run_pause_seconds_min: 0,
+      run_pause_seconds_max: 0,
+      run_rate_limit_cooldown_seconds: 1800,
+    },
+  };
 
   useEffect(() => {
     const c = cfgQ.data?.config;
     if (!c) return;
     const nextDraft: Record<string, string | number | boolean> = {};
     for (const [key, value] of Object.entries(c)) {
+      if (key.startsWith("recon_")) continue;
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
         nextDraft[key] = value;
       }
     }
     setDraft(nextDraft);
+    setLoadedBackend(String(c.run_scraper_backend || ""));
   }, [cfgQ.data]);
 
   const updateCfgMutation = useMutation({
@@ -1281,7 +1679,6 @@ function SettingsPage() {
     if (key.startsWith("schedule_") || key.startsWith("ui_timezone")) return "Schedule";
     if (key.startsWith("monitor_")) return "Monitor";
     if (key.startsWith("unfollow_")) return "Unfollow";
-    if (key.startsWith("recon_")) return "Recon";
     return "Other";
   };
 
@@ -1293,10 +1690,15 @@ function SettingsPage() {
       .join(" ");
 
   const onSaveConfig = () => {
-    const payload: Partial<ConfigValues> & { proxy_password?: string } = {};
+    const payload: Partial<ConfigValues> & { proxy_password?: string; _apply_backend_profile?: boolean } = {};
     for (const [key, value] of Object.entries(draft)) {
+      if (key.startsWith("recon_")) continue;
       if (key.endsWith("_set")) continue;
       (payload as Record<string, string | number | boolean>)[key] = value;
+    }
+    const selectedBackend = String(draft.run_scraper_backend || "");
+    if (selectedBackend && loadedBackend && selectedBackend !== loadedBackend) {
+      payload._apply_backend_profile = true;
     }
     if (proxyPassword.trim()) payload.proxy_password = proxyPassword.trim();
     updateCfgMutation.mutate(payload);
@@ -1309,7 +1711,7 @@ function SettingsPage() {
       if (!grouped.has(section)) grouped.set(section, []);
       grouped.get(section)?.push(key);
     }
-    const order = ["Run", "Proxy", "Schedule", "Monitor", "Unfollow", "Recon", "Other"];
+    const order = ["Run", "Proxy", "Schedule", "Monitor", "Unfollow", "Other"];
     return order
       .map((section) => ({ section, keys: (grouped.get(section) || []).sort() }))
       .filter((x) => x.keys.length > 0);
@@ -1319,7 +1721,7 @@ function SettingsPage() {
     <section>
       <header className="page-header">
         <h1>Settings</h1>
-        <p>Runtime settings that affect target-account tracking cadence and recon behavior.</p>
+        <p>Runtime settings that affect target-account tracking cadence and operations behavior.</p>
       </header>
       {!cfgQ.data?.config ? (
         <article className="card"><p className="hint">Loading settings…</p></article>
@@ -1348,10 +1750,20 @@ function SettingsPage() {
                 return (
                   <label key={key}>
                     {labelForKey(key)}
-                    <select value={String(value)} onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}>
-                      <option value="browser">browser</option>
-                      <option value="private">private</option>
+                    <select
+                      value={String(value)}
+                      onChange={(e) =>
+                        setDraft((prev) => {
+                          const nextBackend = e.target.value === "private" ? "private" : "browser";
+                          const profile = backendProfiles[nextBackend] || {};
+                          return { ...prev, run_scraper_backend: nextBackend, ...profile };
+                        })
+                      }
+                    >
+                      <option value="browser">browser (web session)</option>
+                      <option value="private">instagrapi (private API)</option>
                     </select>
+                    <span className="hint">Switching backend auto-loads the tuned delay/rate profile.</span>
                   </label>
                 );
               }
@@ -1442,8 +1854,9 @@ export default function App() {
       <Routes>
         <Route path="/" element={<CommandCenterPage />} />
         <Route path="/targets" element={<TargetsPage />} />
-        <Route path="/recon" element={<ReconPage />} />
+        <Route path="/explorer" element={<ExplorerPage />} />
         <Route path="/operations" element={<OperationsPage />} />
+        <Route path="/unfollow" element={<UnfollowPage />} />
         <Route path="/accounts" element={<AccountsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Routes>

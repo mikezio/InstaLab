@@ -7,7 +7,7 @@ import random
 import re
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -62,6 +62,10 @@ def _storage_path_for_login(login_username: str) -> Path:
     if base_dir:
         return Path(base_dir) / f"{_safe_username(login_username)}.json"
     return Path(__file__).resolve().parent / ".playwright" / "instagram_storage.json"
+
+
+def browser_storage_path_for_login(login_username: str) -> Path:
+    return _storage_path_for_login(login_username)
 
 
 def has_session(login_username: str) -> bool:
@@ -119,8 +123,11 @@ def _login_required(page) -> bool:
         return False
 
 
-def _open_profile_page(page, target_username: str) -> None:
-    page.goto(f"https://www.instagram.com/{target_username}/", wait_until="domcontentloaded")
+def _open_profile_page(page, target_username: str, *, timeout_ms: int | None = None) -> None:
+    kwargs = {"wait_until": "domcontentloaded"}
+    if timeout_ms and timeout_ms > 0:
+        kwargs["timeout"] = int(timeout_ms)
+    page.goto(f"https://www.instagram.com/{target_username}/", **kwargs)
     _maybe_accept_cookies(page)
     try:
         page.wait_for_load_state("networkidle", timeout=12000)
@@ -152,8 +159,157 @@ def _extract_counts(page) -> tuple[int, int]:
     followers = _parse_compact_number((payload or {}).get("followers"))
     following = _parse_compact_number((payload or {}).get("following"))
     if followers is None or following is None:
-        raise BrowserTrackerError("parse_error", "could not parse followers/following counts from profile page")
+        fallback = page.evaluate(
+            """
+() => {
+  const og = document.querySelector('meta[property="og:description"]')?.getAttribute("content") || "";
+  const desc = document.querySelector('meta[name="description"]')?.getAttribute("content") || "";
+  const txt = document.body ? (document.body.innerText || "") : "";
+  return { og, desc, txt };
+}
+"""
+        )
+
+        def _from_text(text: str | None):
+            s = (text or "").replace(",", "")
+            m_followers = re.search(r"(\d+(?:\.\d+)?)\s+Followers?", s, flags=re.IGNORECASE)
+            m_following = re.search(r"(\d+(?:\.\d+)?)\s+Following", s, flags=re.IGNORECASE)
+            if not (m_followers and m_following):
+                return None, None
+            return int(float(m_followers.group(1))), int(float(m_following.group(1)))
+
+        for candidate in ((fallback or {}).get("og"), (fallback or {}).get("desc"), (fallback or {}).get("txt")):
+            f1, f2 = _from_text(candidate)
+            if f1 is not None and f2 is not None:
+                followers, following = f1, f2
+                break
+
+    if followers is None or following is None:
+        current_url = ""
+        try:
+            current_url = str(page.url or "")
+        except Exception:
+            current_url = ""
+        raise BrowserTrackerError(
+            "parse_error",
+            f"could not parse followers/following counts from profile page (url={current_url})",
+        )
     return int(followers), int(following)
+
+
+def _extract_target_user_id(page) -> str | None:
+    try:
+        html = page.content()
+    except Exception:
+        return None
+    m = re.search(r"profilePage_(\d+)", html)
+    if m:
+        return m.group(1)
+    m = re.search(r'"user_id":"(\d+)"', html)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _api_headers(page, target_username: str, kind: str) -> dict:
+    cookies = page.context.cookies("https://www.instagram.com/")
+    csrf = ""
+    for cookie in cookies:
+        if cookie.get("name") == "csrftoken":
+            csrf = str(cookie.get("value") or "")
+            break
+    headers = {
+        "x-csrftoken": csrf,
+        "x-ig-app-id": "936619743392459",
+        "x-requested-with": "XMLHttpRequest",
+        "referer": f"https://www.instagram.com/{target_username}/{kind}/",
+    }
+    try:
+        claim = page.evaluate("() => localStorage.getItem('www-claim-v2') || ''")
+    except Exception:
+        claim = ""
+    if claim:
+        headers["x-ig-www-claim"] = str(claim)
+    return headers
+
+
+def _collect_usernames_via_api(
+    page,
+    *,
+    target_username: str,
+    target_user_id: str,
+    kind: str,
+    expected_total: int,
+    progress_phase: str,
+    progress=None,
+    delay_min: float = 0.2,
+    delay_max: float = 0.6,
+) -> list[str]:
+    usernames: set[str] = set()
+    next_max_id: str | None = None
+    empty_pages = 0
+    max_pages = max(60, min(3000, (expected_total // 10) + 80)) if expected_total > 0 else 200
+
+    for _ in range(max_pages):
+        query = [("count", "50"), ("search_surface", "follow_list_page")]
+        if next_max_id:
+            query.append(("max_id", str(next_max_id)))
+        url = (
+            f"https://www.instagram.com/api/v1/friendships/{target_user_id}/{kind}/?"
+            + urlencode(query)
+        )
+        resp = page.request.get(url, headers=_api_headers(page, target_username, kind), timeout=60000)
+        if resp.status in {401, 403}:
+            raise BrowserTrackerError("auth_required", "browser session expired; interactive login required")
+        if resp.status == 429:
+            raise BrowserTrackerError("rate_limited", f"instagram rate limit while fetching {kind}")
+        if resp.status >= 400:
+            raise BrowserTrackerError("api_error", f"instagram API error {resp.status} while fetching {kind}")
+
+        try:
+            payload = resp.json()
+        except Exception:
+            body = ""
+            try:
+                body = (resp.text() or "")[:200]
+            except Exception:
+                body = ""
+            lowered = body.lower()
+            if "<!doctype html" in lowered or "<html" in lowered:
+                if "login" in lowered:
+                    raise BrowserTrackerError("auth_required", "browser session expired; interactive login required")
+                raise BrowserTrackerError("rate_limited", f"instagram returned HTML instead of JSON while fetching {kind}")
+            raise BrowserTrackerError("api_error", f"unexpected non-JSON response while fetching {kind}")
+        users = payload.get("users") or []
+        before = len(usernames)
+        for user in users:
+            username = str((user or {}).get("username") or "").strip()
+            if USERNAME_RE.match(username):
+                usernames.add(username)
+        if progress and len(usernames) != before:
+            try:
+                progress(progress_phase, len(usernames))
+            except Exception:
+                pass
+
+        if expected_total > 0 and len(usernames) >= expected_total:
+            break
+
+        next_max_id = payload.get("next_max_id")
+        if not users:
+            empty_pages += 1
+        else:
+            empty_pages = 0
+
+        if empty_pages >= 3:
+            break
+        if not next_max_id:
+            break
+
+        wait_seconds = random.uniform(max(0.0, delay_min), max(delay_min, delay_max))
+        page.wait_for_timeout(int(wait_seconds * 1000))
+
+    return sorted(usernames)
 
 
 def _open_relation_dialog(page, kind: str) -> None:
@@ -165,10 +321,34 @@ def _open_relation_dialog(page, kind: str) -> None:
     for selector in selector_variants:
         try:
             loc = page.locator(selector)
-            if loc.count() > 0 and loc.first.is_visible():
-                loc.first.click(timeout=7000)
-                clicked = True
-                break
+            if loc.count() > 0:
+                try:
+                    loc.first.scroll_into_view_if_needed(timeout=2000)
+                except Exception:
+                    pass
+                try:
+                    loc.first.click(timeout=7000)
+                    clicked = True
+                    break
+                except Exception:
+                    try:
+                        clicked = bool(
+                            page.evaluate(
+                                """
+(sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return false;
+  el.click();
+  return true;
+}
+""",
+                                selector,
+                            )
+                        )
+                    except Exception:
+                        clicked = False
+                    if clicked:
+                        break
         except Exception:
             continue
     if not clicked:
@@ -263,7 +443,7 @@ def _collect_usernames_from_open_dialog(
     return sorted(usernames)
 
 
-def _with_browser_context(login_username: str, login_mode: str, fn):
+def _with_browser_context(login_username: str, login_mode: str, fn, *, timeout_ms: int | None = None):
     storage_path = _storage_path_for_login(login_username)
     anonymous_mode = _is_anonymous_login_mode(login_mode)
     storage_exists = storage_path.exists()
@@ -316,7 +496,9 @@ def _with_browser_context(login_username: str, login_mode: str, fn):
             "Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4]});"
         )
         page = context.new_page()
-        page.set_default_timeout(20000)
+        effective_timeout = int(timeout_ms) if timeout_ms and timeout_ms > 0 else 60000
+        page.set_default_timeout(effective_timeout)
+        page.set_default_navigation_timeout(effective_timeout)
         try:
             return fn(page)
         finally:
@@ -341,12 +523,18 @@ def fetch_counts(
     device_settings_json=None,
     user_agent=None,
 ):
-    del login_password, cookie_file, http_timeout_seconds, request_sleep_seconds
+    del login_password, cookie_file, request_sleep_seconds
     del two_factor_code, challenge_code, totp_seed, device_settings_json, user_agent
     del delay_min, delay_max
+    timeout_ms = max(15000, int(float(http_timeout_seconds or 120.0) * 1000))
+    if progress:
+        progress("bootstrap", 0)
 
     def _runner(page):
-        _open_profile_page(page, target_username)
+        if progress:
+            progress("starting", 0)
+            progress("profile_page", 0)
+        _open_profile_page(page, target_username, timeout_ms=timeout_ms)
         if _login_required(page) and not _is_anonymous_login_mode(login_mode):
             raise BrowserTrackerError("auth_required", "browser session expired; interactive login required")
         followers_count, followees_count = _extract_counts(page)
@@ -357,7 +545,7 @@ def fetch_counts(
         }
 
     try:
-        return _with_browser_context(login_username, login_mode, _runner)
+        return _with_browser_context(login_username, login_mode, _runner, timeout_ms=timeout_ms)
     except BrowserTrackerError:
         raise
     except PlaywrightTimeoutError as exc:
@@ -394,14 +582,17 @@ def snapshot_profile(
     user_agent=None,
     progress=None,
 ):
-    del login_password, cookie_file, http_timeout_seconds, request_sleep_seconds
+    del login_password, cookie_file, request_sleep_seconds
     del pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max
     del trace_enabled, trace_path, two_factor_code, challenge_code, totp_seed, device_settings_json, user_agent
+    timeout_ms = max(15000, int(float(http_timeout_seconds or 600.0) * 1000))
+    if progress:
+        progress("bootstrap", 0)
 
     timestamp = _now_snapshot_ts()
 
     def _runner(page):
-        _open_profile_page(page, target_username)
+        _open_profile_page(page, target_username, timeout_ms=timeout_ms)
         if _login_required(page) and not _is_anonymous_login_mode(login_mode):
             raise BrowserTrackerError("auth_required", "browser session expired; interactive login required")
         followers_total, following_total = _extract_counts(page)
@@ -438,13 +629,21 @@ def snapshot_profile(
         if initial_fetch_delay_seconds > 0:
             page.wait_for_timeout(int(initial_fetch_delay_seconds * 1000))
 
+        target_user_id = _extract_target_user_id(page)
+        if not target_user_id:
+            raise BrowserTrackerError("parse_error", "could not resolve target user id from profile page")
+
         def _collect(kind: str, total_hint: int) -> tuple[list[str], float]:
             phase_name = "followers" if kind == "followers" else "following"
             started = datetime.now().timestamp()
-            _open_relation_dialog(page, kind)
-            names = _collect_usernames_from_open_dialog(
+            if progress:
+                progress(phase_name, 0)
+            names = _collect_usernames_via_api(
                 page,
-                expected_total=total_hint,
+                target_username=target_username,
+                target_user_id=target_user_id,
+                kind=kind,
+                expected_total=max(0, int(total_hint or 0)),
                 progress_phase=phase_name,
                 progress=progress,
                 delay_min=item_delay_min,
@@ -468,13 +667,14 @@ def snapshot_profile(
         followers_rate = round(len(followers) / followers_fetch_seconds, 3) if followers_fetch_seconds else None
         followees_rate = round(len(followees) / followees_fetch_seconds, 3) if followees_fetch_seconds else None
 
-        run_id, changes = write_run_metadata(
+        changes, run_id = write_run_metadata(
             db_path=db_path,
             target_username=target_username,
             login_username=login_username,
             timestamp=timestamp,
             followers=followers,
             followees=followees,
+            non_followbacks_count=len(non_followbacks),
             followers_fetch_seconds=followers_fetch_seconds,
             followees_fetch_seconds=followees_fetch_seconds,
             followers_rate=followers_rate,
@@ -486,11 +686,16 @@ def snapshot_profile(
             "followees_count": following_total,
             "followers": followers,
             "followees": followees,
+            "followers_collected_count": len(followers),
+            "followees_collected_count": len(followees),
+            "followers_missing_count": max(0, int(followers_total) - len(followers)),
+            "followees_missing_count": max(0, int(following_total) - len(followees)),
+            "partial_collection": (len(followers) < int(followers_total)) or (len(followees) < int(following_total)),
             "non_followbacks_count": len(non_followbacks),
-            "followers_added": changes["followers_added"],
-            "followers_removed": changes["followers_removed"],
-            "followees_added": changes["followees_added"],
-            "followees_removed": changes["followees_removed"],
+            "followers_added": len((changes.get("followers") or {}).get("added") or []),
+            "followers_removed": len((changes.get("followers") or {}).get("removed") or []),
+            "followees_added": len((changes.get("followees") or {}).get("added") or []),
+            "followees_removed": len((changes.get("followees") or {}).get("removed") or []),
             "run_id": run_id,
             "followers_fetch_seconds": followers_fetch_seconds,
             "followees_fetch_seconds": followees_fetch_seconds,
@@ -499,7 +704,7 @@ def snapshot_profile(
         }
 
     try:
-        return _with_browser_context(login_username, login_mode, _runner)
+        return _with_browser_context(login_username, login_mode, _runner, timeout_ms=timeout_ms)
     except BrowserTrackerError:
         raise
     except PlaywrightTimeoutError as exc:

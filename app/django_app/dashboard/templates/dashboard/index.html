@@ -235,7 +235,6 @@
         <div class="mt-3 flex flex-col gap-2">
           <button class="view-tab active" data-view="overview">Overview</button>
           <button class="view-tab" data-view="explorer">Explorer</button>
-          <button class="view-tab" data-view="recon">Recon Lab</button>
         </div>
       </div>
 
@@ -272,7 +271,6 @@
           <div class="mt-4 flex flex-wrap gap-2">
             <button class="view-tab active" data-view="overview">Overview</button>
             <button class="view-tab" data-view="explorer">Explorer</button>
-            <button class="view-tab" data-view="recon">Recon Lab</button>
           </div>
         </div>
       </header>
@@ -693,137 +691,6 @@
             </div>
           </section>
         </section>
-        <section class="app-view" id="view-recon">
-          <section class="section">
-            <div class="section-header">
-              <div>
-                <h2>Recon Lab</h2>
-                <p class="sub">Separate reconnaissance workspace. Results here do not change tracked capture history.</p>
-              </div>
-            </div>
-            <div class="panel" style="padding:16px;">
-              <div class="grid gap-6 lg:grid-cols-3">
-                <div class="config-card">
-                  <h4>New scan</h4>
-                  <label for="recon-mode">Mode</label>
-                  <select id="recon-mode">
-                    <option value="username">Username (Blackbird)</option>
-                    <option value="email">Email (Blackbird)</option>
-                    <option value="phone">Phone (PhoneInfoga)</option>
-                  </select>
-                  <label for="recon-query" style="margin-top:8px;">Query</label>
-                  <input id="recon-query" type="text" placeholder="@username / user@example.com / +15551234567">
-                  <div class="config-help" id="recon-mode-help">Username and email use Blackbird. Phone uses PhoneInfoga.</div>
-                  <div class="row" style="margin-top: 10px; gap: 10px; flex-wrap: wrap;">
-                    <label style="display:flex; align-items:center; gap:6px; margin:0;">
-                      <input id="recon-opt-ai" type="checkbox">
-                      AI analysis
-                    </label>
-                    <label style="display:flex; align-items:center; gap:6px; margin:0;">
-                      <input id="recon-opt-pdf" type="checkbox" checked>
-                      Generate PDF report
-                    </label>
-                  </div>
-                  <div class="row" style="margin-top: 12px; gap: 8px;">
-                    <button id="recon-run-btn">Run scan</button>
-                    <button class="secondary" id="recon-refresh-btn">Refresh</button>
-                  </div>
-                  <div class="config-help">Phone scans should use E.164 format (example: +15551234567).</div>
-                  <div class="row" style="margin-top:6px; gap:8px; align-items:center;">
-                    <div class="config-help" id="recon-ai-status" style="margin:0;">AI key status: checking...</div>
-                    <button class="secondary" id="recon-ai-setup-btn" type="button">Setup AI key</button>
-                  </div>
-                </div>
-                <div class="config-card lg:col-span-2">
-                  <h4>Latest result</h4>
-                  <div id="recon-result-meta" class="muted">No scan selected.</div>
-                  <div id="recon-result-insights" class="muted" style="margin-top:4px;"></div>
-                  <div class="chip-row" id="recon-result-chips"></div>
-                  <div class="row" style="margin-top: 10px; gap: 8px;">
-                    <button class="secondary" id="recon-export-json" disabled>Export JSON</button>
-                    <button class="secondary" id="recon-export-csv" disabled>Export CSV</button>
-                    <button class="secondary" id="recon-download-report" disabled>Download Report PDF</button>
-                  </div>
-                  <div id="recon-phone-profile" class="config-help" style="margin-top:10px; display:none;"></div>
-                  <div class="list-wrap" style="margin-top: 12px;">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Platform</th>
-                          <th>Confidence</th>
-                          <th>Status</th>
-                          <th>URL</th>
-                          <th>Details</th>
-                        </tr>
-                      </thead>
-                      <tbody id="recon-findings-body">
-                        <tr><td colspan="5" class="muted">No findings yet.</td></tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-              <div class="config-card" style="margin-top: 14px;">
-                <h4>Queue Monitor</h4>
-                <div id="recon-queue-meta" class="muted">Queue idle.</div>
-                <div class="list-wrap" style="margin-top: 8px;">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>State</th>
-                        <th>Query</th>
-                        <th>Elapsed</th>
-                        <th>Queue Pos</th>
-                        <th>Timeout Left</th>
-                      </tr>
-                    </thead>
-                    <tbody id="recon-queue-body">
-                      <tr><td colspan="5" class="muted">No active recon jobs.</td></tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-              <div class="config-card" style="margin-top: 14px;">
-                <h4>History</h4>
-                <div class="row" style="gap:8px; margin-bottom:8px;">
-                  <input id="recon-filter-q" type="text" placeholder="Search query value">
-                  <select id="recon-filter-mode">
-                    <option value="">All modes</option>
-                    <option value="username">Username</option>
-                    <option value="email">Email</option>
-                    <option value="phone">Phone</option>
-                  </select>
-                  <select id="recon-filter-status">
-                    <option value="">All statuses</option>
-                    <option value="queued">Queued</option>
-                    <option value="running">Running</option>
-                    <option value="success">Success</option>
-                    <option value="error">Error</option>
-                    <option value="cancelled">Cancelled</option>
-                  </select>
-                  <button class="secondary" id="recon-history-load">Load</button>
-                </div>
-                <div class="list-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>When</th>
-                        <th>Mode</th>
-                        <th>Query</th>
-                        <th>Status</th>
-                        <th>Findings</th>
-                        <th>Action</th>
-                      </tr>
-                    </thead>
-                    <tbody id="recon-history-body">
-                      <tr><td colspan="6" class="muted">No recon jobs yet.</td></tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          </section>
-        </section>
         </div>
       </main>
     </div>
@@ -1163,63 +1030,6 @@
             </div>
           </div>
           <div class="config-card">
-            <h4>Recon Lab</h4>
-            <div class="config-grid">
-              <div>
-                <label for="cfg-recon-enabled">Recon module</label>
-                <select id="cfg-recon-enabled">
-                  <option value="true">Enabled</option>
-                  <option value="false">Disabled</option>
-                </select>
-                <div class="config-help">Master switch for Recon Lab API actions. Disable to block new recon jobs.</div>
-              </div>
-              <div>
-                <label for="cfg-recon-phoneinfoga-enabled">Phone mode (PhoneInfoga)</label>
-                <select id="cfg-recon-phoneinfoga-enabled">
-                  <option value="true">Enabled</option>
-                  <option value="false">Disabled</option>
-                </select>
-                <div class="config-help">Allows phone-number recon scans. Username/email scans still use Blackbird.</div>
-              </div>
-              <div>
-                <label for="cfg-recon-ai-enabled">Blackbird AI</label>
-                <select id="cfg-recon-ai-enabled">
-                  <option value="false">Disabled</option>
-                  <option value="true">Enabled</option>
-                </select>
-                <div class="config-help">Passes Blackbird --ai on eligible runs. Requires Blackbird AI key setup.</div>
-              </div>
-              <div>
-                <label for="cfg-recon-no-nsfw">Hide NSFW sites</label>
-                <select id="cfg-recon-no-nsfw">
-                  <option value="true">Enabled</option>
-                  <option value="false">Disabled</option>
-                </select>
-                <div class="config-help">When enabled, Blackbird excludes NSFW sources from result matching.</div>
-              </div>
-              <div>
-                <label for="cfg-recon-max-concurrency">Max concurrent jobs</label>
-                <input id="cfg-recon-max-concurrency" type="number" min="1" max="8">
-                <div class="config-help">Queue limit for active recon workers. Higher values increase CPU/network load.</div>
-              </div>
-              <div>
-                <label for="cfg-recon-queue-limit">Queue capacity</label>
-                <input id="cfg-recon-queue-limit" type="number" min="1" max="500">
-                <div class="config-help">Maximum queued + running recon jobs accepted before new jobs are rejected.</div>
-              </div>
-              <div>
-                <label for="cfg-recon-timeout-seconds">Job timeout (sec)</label>
-                <input id="cfg-recon-timeout-seconds" type="number" min="15" max="1800">
-                <div class="config-help">Hard timeout applied to each tool invocation before job is marked as error.</div>
-              </div>
-              <div>
-                <label for="cfg-recon-retention-days">Artifact retention (days)</label>
-                <input id="cfg-recon-retention-days" type="number" min="0" max="3650">
-                <div class="config-help">Deletes old recon raw artifacts from disk on schedule. Set 0 to disable.</div>
-              </div>
-            </div>
-          </div>
-          <div class="config-card">
             <h4>Schedule defaults</h4>
             <div class="config-grid">
               <div>
@@ -1445,8 +1255,6 @@
     const POLL_ACTIVE_UNFOLLOW_MS = 9000;
     const POLL_IDLE_UNFOLLOW_MS = 300000;
     const POLL_HIDDEN_MIN_MS = 240000;
-    let reconHistoryCache = [];
-    let reconCurrentJobId = '';
 
     function log(msg) {
       const ts = new Date().toISOString();
@@ -1984,14 +1792,6 @@
         const monSel = document.getElementById('cfg-monitor-login');
         if (monSel) monSel.value = src.monitor_login_username;
       }
-      document.getElementById('cfg-recon-enabled').value = (src.recon_enabled ?? true) ? 'true' : 'false';
-      document.getElementById('cfg-recon-phoneinfoga-enabled').value = (src.recon_phoneinfoga_enabled ?? true) ? 'true' : 'false';
-      document.getElementById('cfg-recon-ai-enabled').value = (src.recon_blackbird_ai_enabled ?? false) ? 'true' : 'false';
-      document.getElementById('cfg-recon-no-nsfw').value = (src.recon_blackbird_no_nsfw ?? true) ? 'true' : 'false';
-      document.getElementById('cfg-recon-max-concurrency').value = src.recon_max_concurrency ?? 2;
-      document.getElementById('cfg-recon-queue-limit').value = src.recon_queue_limit ?? 20;
-      document.getElementById('cfg-recon-timeout-seconds').value = src.recon_timeout_seconds ?? 240;
-      document.getElementById('cfg-recon-retention-days').value = src.recon_artifact_retention_days ?? 30;
       document.getElementById('cfg-proxy-enabled').value = (src.proxy_enabled ?? false) ? 'true' : 'false';
       document.getElementById('cfg-proxy-provider').value = src.proxy_provider ?? 'decodo';
       document.getElementById('cfg-proxy-access').value = src.proxy_access_mode ?? 'native';
@@ -2065,14 +1865,6 @@
         monitor_threshold_delta: Number(document.getElementById('cfg-monitor-threshold').value || 0),
         monitor_min_gap_minutes: Number(document.getElementById('cfg-monitor-gap').value || 0),
         monitor_login_username: document.getElementById('cfg-monitor-login').value || '',
-        recon_enabled: document.getElementById('cfg-recon-enabled').value === 'true',
-        recon_phoneinfoga_enabled: document.getElementById('cfg-recon-phoneinfoga-enabled').value === 'true',
-        recon_blackbird_ai_enabled: document.getElementById('cfg-recon-ai-enabled').value === 'true',
-        recon_blackbird_no_nsfw: document.getElementById('cfg-recon-no-nsfw').value === 'true',
-        recon_max_concurrency: Number(document.getElementById('cfg-recon-max-concurrency').value || 0),
-        recon_queue_limit: Number(document.getElementById('cfg-recon-queue-limit').value || 0),
-        recon_timeout_seconds: Number(document.getElementById('cfg-recon-timeout-seconds').value || 0),
-        recon_artifact_retention_days: Number(document.getElementById('cfg-recon-retention-days').value || 0),
         proxy_enabled: document.getElementById('cfg-proxy-enabled').value === 'true',
         proxy_provider: document.getElementById('cfg-proxy-provider').value,
         proxy_access_mode: document.getElementById('cfg-proxy-access').value,
@@ -3131,12 +2923,6 @@
     function openHistoryModal(target) {
       openExplorer(target);
     }
-    function reconToneForConfidence(conf) {
-      const c = String(conf || '').toLowerCase();
-      if (c === 'high') return 'good';
-      if (c === 'medium') return 'warn';
-      return 'neutral';
-    }
     function formatSecondsShort(value) {
       const n = Number(value);
       if (!Number.isFinite(n) || n < 0) return '—';
@@ -3154,402 +2940,6 @@
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
-    }
-    function reconDetailText(finding) {
-      const category = String(finding?.category || '').toLowerCase();
-      const evidence = finding?.evidence_json && typeof finding.evidence_json === 'object'
-        ? finding.evidence_json
-        : {};
-      if (category === 'telephony') {
-        const parts = [];
-        if (evidence.country) parts.push(`Country: ${evidence.country}`);
-        if (evidence.countryCode) parts.push(`Country Code: +${evidence.countryCode}`);
-        if (evidence.carrier) parts.push(`Carrier: ${evidence.carrier}`);
-        if (evidence.carrier_id) parts.push(`Carrier ID: ${evidence.carrier_id}`);
-        if (evidence.caller_id || evidence.caller_name) parts.push(`Caller ID: ${evidence.caller_id || evidence.caller_name}`);
-        if (evidence.e164) parts.push(`E.164: ${evidence.e164}`);
-        if (evidence.local) parts.push(`Local: ${evidence.local}`);
-        if (evidence.international) parts.push(`Intl: ${evidence.international}`);
-        if (typeof evidence.valid === 'boolean') parts.push(`Valid: ${evidence.valid ? 'yes' : 'no'}`);
-        return parts.join(' · ');
-      }
-      if (category === 'phone_osint') {
-        if (evidence.error) return `Scanner error: ${evidence.error}`;
-        const result = evidence.result && typeof evidence.result === 'object' ? evidence.result : {};
-        const parts = [];
-        if (result.country || result.country_name) parts.push(`Country: ${result.country || result.country_name}`);
-        if (result.country_code) parts.push(`Country Code: +${result.country_code}`);
-        if (result.carrier || result.operator) parts.push(`Carrier: ${result.carrier || result.operator}`);
-        if (result.carrier_id) parts.push(`Carrier ID: ${result.carrier_id}`);
-        if (result.caller_id || result.caller_name) parts.push(`Caller ID: ${result.caller_id || result.caller_name}`);
-        if (result.line_type || result.type) parts.push(`Type: ${result.line_type || result.type}`);
-        if (result.e164) parts.push(`E.164: ${result.e164}`);
-        if (!parts.length && Object.keys(result).length) {
-          parts.push(`Fields: ${Object.keys(result).slice(0, 4).join(', ')}`);
-        }
-        return parts.join(' · ');
-      }
-      return '';
-    }
-    function firstNonEmpty(values) {
-      for (const value of values || []) {
-        if (value === null || value === undefined) continue;
-        const text = String(value).trim();
-        if (text) return text;
-      }
-      return '';
-    }
-    function derivePhoneProfile(findings) {
-      const telephony = (findings || []).find(f => String(f?.category || '').toLowerCase() === 'telephony');
-      const scannerResults = (findings || [])
-        .filter(f => String(f?.category || '').toLowerCase() === 'phone_osint')
-        .map(f => (f?.evidence_json && typeof f.evidence_json === 'object' ? f.evidence_json.result : null))
-        .filter(v => v && typeof v === 'object');
-      const t = telephony?.evidence_json && typeof telephony.evidence_json === 'object' ? telephony.evidence_json : {};
-      const profile = {
-        callerId: firstNonEmpty([t.caller_id, t.caller_name]),
-        carrier: firstNonEmpty([t.carrier, ...scannerResults.map(r => r.carrier || r.operator)]),
-        carrierId: firstNonEmpty([t.carrier_id, ...scannerResults.map(r => r.carrier_id)]),
-        lineType: firstNonEmpty([t.line_type, ...scannerResults.map(r => r.line_type || r.type)]),
-        country: firstNonEmpty([t.country, ...scannerResults.map(r => r.country || r.country_name)]),
-        countryCode: firstNonEmpty([t.countryCode, ...scannerResults.map(r => r.country_code)]),
-        e164: firstNonEmpty([t.e164, ...scannerResults.map(r => r.e164)]),
-        local: firstNonEmpty([t.local, ...scannerResults.map(r => r.local)]),
-        valid: typeof t.valid === 'boolean' ? t.valid : null,
-      };
-      const riskReasons = [];
-      const lineTypeLc = String(profile.lineType || '').toLowerCase();
-      if (profile.valid === false) riskReasons.push('number flagged invalid by telephony parser');
-      if (lineTypeLc.includes('voip')) riskReasons.push('line type appears to be VoIP');
-      if (lineTypeLc.includes('virtual')) riskReasons.push('line type appears virtual');
-      if (!profile.carrier) riskReasons.push('carrier unresolved from available sources');
-      let score = 90;
-      if (profile.valid === false) score -= 45;
-      if (lineTypeLc.includes('voip') || lineTypeLc.includes('virtual')) score -= 20;
-      if (!profile.carrier) score -= 15;
-      if (!profile.country) score -= 10;
-      score = Math.max(0, Math.min(100, score));
-      const risk = score >= 75 ? 'Low' : (score >= 45 ? 'Medium' : 'High');
-      return {profile, risk, score, riskReasons, hasData: Boolean(telephony || scannerResults.length)};
-    }
-    function renderReconPhoneProfile(findings) {
-      const el = document.getElementById('recon-phone-profile');
-      if (!el) return;
-      const summary = derivePhoneProfile(findings || []);
-      if (!summary.hasData) {
-        el.style.display = 'none';
-        el.innerHTML = '';
-        return;
-      }
-      const cc = summary.profile.countryCode ? `+${summary.profile.countryCode}` : '—';
-      const reasons = summary.riskReasons.length ? summary.riskReasons.join(' | ') : 'no immediate high-risk indicators from current sources';
-      el.style.display = 'block';
-      el.innerHTML = `
-        <strong>Caller Profile</strong><br>
-        Caller ID: ${escapeHtml(summary.profile.callerId || 'Not found')} ·
-        Carrier: ${escapeHtml(summary.profile.carrier || 'Unknown')} ·
-        Carrier ID: ${escapeHtml(summary.profile.carrierId || 'Unknown')} ·
-        Line Type: ${escapeHtml(summary.profile.lineType || 'Unknown')}<br>
-        Country: ${escapeHtml(summary.profile.country || 'Unknown')} (${escapeHtml(cc)}) ·
-        E.164: ${escapeHtml(summary.profile.e164 || 'Unknown')} ·
-        Local: ${escapeHtml(summary.profile.local || 'Unknown')}<br>
-        Risk: ${escapeHtml(summary.risk)} (${summary.score}/100 confidence) · Signals: ${escapeHtml(reasons)}
-      `;
-    }
-    function renderReconQueue(data) {
-      const meta = document.getElementById('recon-queue-meta');
-      const body = document.getElementById('recon-queue-body');
-      if (!meta || !body) return;
-      const rows = Array.isArray(data?.queue) ? data.queue : [];
-      const running = Number(data?.running || 0);
-      const queued = Number(data?.queued || 0);
-      const maxConc = Number(data?.max_concurrency || 0);
-      const limit = Number(data?.queue_limit || 0);
-      meta.textContent = `Running ${running}/${maxConc} · Queued ${queued} · Pending ${rows.length}/${limit}`;
-      if (!rows.length) {
-        body.innerHTML = '<tr><td colspan="5" class="muted">No active recon jobs.</td></tr>';
-        return;
-      }
-      body.innerHTML = rows.map(r => `
-        <tr>
-          <td>${r.state || '—'}</td>
-          <td>${r.query_value || '—'}</td>
-          <td>${formatSecondsShort(r.elapsed_seconds)}</td>
-          <td>${r.queue_position || '—'}</td>
-          <td>${formatSecondsShort(r.timeout_remaining_seconds)}</td>
-        </tr>
-      `).join('');
-    }
-    async function loadReconQueue() {
-      try {
-        const data = await fetchJSON('/recon/queue');
-        renderReconQueue(data);
-      } catch (e) {
-        const meta = document.getElementById('recon-queue-meta');
-        if (meta) meta.textContent = `Queue unavailable: ${e.message}`;
-      }
-    }
-    function updateReconOptionState() {
-      const mode = document.getElementById('recon-mode')?.value || 'username';
-      const ai = document.getElementById('recon-opt-ai');
-      const pdf = document.getElementById('recon-opt-pdf');
-      const modeHelp = document.getElementById('recon-mode-help');
-      if (!ai || !pdf) return;
-      const isBlackbirdMode = mode === 'username' || mode === 'email';
-      ai.disabled = !isBlackbirdMode;
-      pdf.disabled = !isBlackbirdMode;
-      if (!isBlackbirdMode) {
-        ai.checked = false;
-        pdf.checked = false;
-      }
-      if (modeHelp) {
-        if (mode === 'phone') {
-          modeHelp.textContent = 'Phone mode uses PhoneInfoga enrichment and does not generate PDF reports.';
-        } else if (mode === 'email') {
-          modeHelp.textContent = 'Email mode uses Blackbird discovery.';
-        } else {
-          modeHelp.textContent = 'Username mode uses Blackbird discovery.';
-        }
-      }
-    }
-    async function loadReconHealth() {
-      const statusEl = document.getElementById('recon-ai-status');
-      const setupBtn = document.getElementById('recon-ai-setup-btn');
-      try {
-        const data = await fetchJSON('/recon/health');
-        const keyConfigured = !!data?.ai?.key_configured;
-        const aiEnabled = !!data?.ai?.enabled;
-        if (statusEl) {
-          statusEl.textContent = keyConfigured
-            ? 'AI key status: configured'
-            : 'AI key status: missing (enable via Blackbird --setup-ai in container).';
-        }
-        if (setupBtn) setupBtn.disabled = keyConfigured;
-        const aiOpt = document.getElementById('recon-opt-ai');
-        if (aiOpt) {
-          aiOpt.checked = aiEnabled;
-          if (!keyConfigured) aiOpt.checked = false;
-        }
-      } catch (e) {
-        if (statusEl) statusEl.textContent = `AI key status: unavailable (${e.message})`;
-        if (setupBtn) setupBtn.disabled = false;
-      }
-    }
-    async function setupReconAiKey() {
-      const btn = document.getElementById('recon-ai-setup-btn');
-      if (btn) btn.disabled = true;
-      try {
-        const res = await fetchJSON('/recon/ai/setup', {method: 'POST', body: JSON.stringify({})});
-        if (res?.key_configured) {
-          showToast('Blackbird AI key configured', 'good');
-        } else {
-          showToast('AI setup completed but key not detected', 'warn');
-        }
-      } catch (e) {
-        showToast('AI setup failed: ' + e.message, 'bad');
-      } finally {
-        await loadReconHealth();
-      }
-    }
-    function renderReconFindings(findings) {
-      const body = document.getElementById('recon-findings-body');
-      const chips = document.getElementById('recon-result-chips');
-      const insights = document.getElementById('recon-result-insights');
-      if (!body || !chips) return;
-      if (!Array.isArray(findings) || !findings.length) {
-        body.innerHTML = '<tr><td colspan="5" class="muted">No findings yet.</td></tr>';
-        chips.innerHTML = '';
-        if (insights) insights.textContent = '';
-        renderReconPhoneProfile([]);
-        return;
-      }
-      const high = findings.filter(f => (f.confidence_tier || '').toLowerCase() === 'high').length;
-      const medium = findings.filter(f => (f.confidence_tier || '').toLowerCase() === 'medium').length;
-      const low = findings.length - high - medium;
-      chips.innerHTML = `
-        <span class="chip good">High ${high}</span>
-        <span class="chip warn">Medium ${medium}</span>
-        <span class="chip neutral">Low ${low}</span>
-      `;
-      const phoneInsight = findings.find(f => String(f.category || '').toLowerCase() === 'telephony');
-      if (insights) {
-        const details = phoneInsight ? reconDetailText(phoneInsight) : '';
-        insights.textContent = details ? `Phone summary: ${details}` : '';
-      }
-      body.innerHTML = findings.map(f => {
-        const tone = reconToneForConfidence(f.confidence_tier);
-        const url = f.url ? `<a href="${f.url}" target="_blank" rel="noopener">${f.url}</a>` : '—';
-        const detailText = reconDetailText(f);
-        const detailsCell = detailText ? `<span class="muted">${escapeHtml(detailText)}</span>` : '—';
-        return `
-          <tr>
-            <td>${escapeHtml(f.platform || '—')}</td>
-            <td><span class="chip ${tone}">${escapeHtml(f.confidence_tier || 'low')}</span></td>
-            <td>${escapeHtml(f.tool_status || '—')}</td>
-            <td>${url}</td>
-            <td>${detailsCell}</td>
-            </tr>
-        `;
-      }).join('');
-      renderReconPhoneProfile(findings);
-    }
-    async function loadReconJob(jobId) {
-      if (!jobId) return;
-      try {
-        const data = await fetchJSON(`/recon/run/${encodeURIComponent(jobId)}`);
-        reconCurrentJobId = jobId;
-        const job = data.job || {};
-        const meta = document.getElementById('recon-result-meta');
-        if (meta) {
-          meta.textContent = `${renderTime(job.created_at)} · ${job.mode || '—'} · ${job.query_value || '—'} · ${job.status || '—'} · findings ${data.findings?.length || 0}`;
-        }
-        renderReconFindings(data.findings || []);
-        const btnJson = document.getElementById('recon-export-json');
-        const btnCsv = document.getElementById('recon-export-csv');
-        const btnReport = document.getElementById('recon-download-report');
-        if (btnJson) btnJson.disabled = false;
-        if (btnCsv) btnCsv.disabled = false;
-        const isPhoneMode = String(job.mode || '').toLowerCase() === 'phone';
-        const hasPdf = Array.isArray(data.artifacts)
-          && data.artifacts.some(a => String(a.artifact_type || '').toLowerCase().startsWith('pdf'));
-        if (btnReport) btnReport.disabled = !hasPdf || isPhoneMode;
-      } catch (e) {
-        log('Recon load error: ' + e.message);
-        showToast('Recon load failed: ' + e.message, 'bad');
-      }
-    }
-    async function cancelReconJob(jobId) {
-      if (!jobId) return;
-      try {
-        await fetchJSON(`/recon/run/${encodeURIComponent(jobId)}/cancel`, {method: 'POST'});
-        showToast('Recon job cancelled', 'warn');
-        await loadReconHistory();
-        if (reconCurrentJobId === jobId) {
-          await loadReconJob(jobId);
-        }
-      } catch (e) {
-        showToast('Cancel failed: ' + e.message, 'bad');
-      }
-    }
-    async function deleteReconJob(jobId) {
-      if (!jobId) return;
-      if (!window.confirm(`Delete recon job ${jobId}? This removes findings, artifacts, and local job files.`)) {
-        return;
-      }
-      try {
-        await fetchJSON(`/recon/run/${encodeURIComponent(jobId)}`, {method: 'DELETE'});
-        if (reconCurrentJobId === jobId) {
-          reconCurrentJobId = '';
-          const meta = document.getElementById('recon-result-meta');
-          if (meta) meta.textContent = 'No scan selected.';
-          renderReconFindings([]);
-          const btnJson = document.getElementById('recon-export-json');
-          const btnCsv = document.getElementById('recon-export-csv');
-          const btnReport = document.getElementById('recon-download-report');
-          if (btnJson) btnJson.disabled = true;
-          if (btnCsv) btnCsv.disabled = true;
-          if (btnReport) btnReport.disabled = true;
-        }
-        showToast('Recon job deleted', 'good');
-        await loadReconHistory();
-      } catch (e) {
-        showToast('Delete failed: ' + e.message, 'bad');
-      }
-    }
-    function renderReconHistory(rows) {
-      const body = document.getElementById('recon-history-body');
-      if (!body) return;
-      if (!rows || !rows.length) {
-        body.innerHTML = '<tr><td colspan="6" class="muted">No recon jobs yet.</td></tr>';
-        return;
-      }
-      body.innerHTML = rows.map(r => `
-        <tr>
-          <td>${renderTime(r.created_at)}</td>
-          <td>${r.mode || '—'}</td>
-          <td>${r.query_value || '—'}</td>
-          <td>${r.status || '—'}</td>
-          <td>${r.findings_count ?? 0} ${(String(r.mode || '').toLowerCase() !== 'phone' && Number(r.report_count || 0) > 0) ? '<span class="chip good">PDF</span>' : ''}</td>
-          <td>
-            <button class="secondary" data-recon-open="${r.id}">Open</button>
-            ${(String(r.mode || '').toLowerCase() !== 'phone' && Number(r.report_count || 0) > 0)
-              ? `<button class="secondary" data-recon-report="${r.id}">Report</button>`
-              : ''}
-            ${['queued', 'running'].includes(String(r.status || '').toLowerCase())
-              ? `<button class="secondary" data-recon-cancel="${r.id}">Cancel</button>`
-              : `<button class="secondary" data-recon-delete="${r.id}">Delete</button>`}
-          </td>
-        </tr>
-      `).join('');
-      body.querySelectorAll('button[data-recon-open]').forEach(btn => {
-        btn.onclick = () => loadReconJob(btn.dataset.reconOpen);
-      });
-      body.querySelectorAll('button[data-recon-cancel]').forEach(btn => {
-        btn.onclick = () => cancelReconJob(btn.dataset.reconCancel);
-      });
-      body.querySelectorAll('button[data-recon-report]').forEach(btn => {
-        btn.onclick = () => window.open(`${API_BASE}/recon/report/${encodeURIComponent(btn.dataset.reconReport)}`, '_blank');
-      });
-      body.querySelectorAll('button[data-recon-delete]').forEach(btn => {
-        btn.onclick = () => deleteReconJob(btn.dataset.reconDelete);
-      });
-    }
-    async function loadReconHistory() {
-      const mode = document.getElementById('recon-filter-mode')?.value || '';
-      const status = document.getElementById('recon-filter-status')?.value || '';
-      const q = (document.getElementById('recon-filter-q')?.value || '').trim();
-      const params = new URLSearchParams();
-      if (mode) params.set('mode', mode);
-      if (status) params.set('status', status);
-      if (q) params.set('q', q);
-      params.set('limit', '50');
-      try {
-        const rows = await fetchJSON(`/recon/history?${params.toString()}`);
-        reconHistoryCache = rows || [];
-        renderReconHistory(reconHistoryCache);
-      } catch (e) {
-        log('Recon history error: ' + e.message);
-      }
-    }
-    async function runRecon() {
-      const mode = document.getElementById('recon-mode')?.value || 'username';
-      const query = (document.getElementById('recon-query')?.value || '').trim();
-      if (!query) {
-        showToast('Enter a recon query first', 'warn');
-        return;
-      }
-      const aiEnabled = !!document.getElementById('recon-opt-ai')?.checked;
-      const reportEnabled = !!document.getElementById('recon-opt-pdf')?.checked;
-      const isBlackbirdMode = mode === 'username' || mode === 'email';
-      const btn = document.getElementById('recon-run-btn');
-      if (btn) btn.disabled = true;
-      try {
-        const options = {
-          no_nsfw: getConfigValue('recon_blackbird_no_nsfw', true),
-        };
-        if (isBlackbirdMode) {
-          options.ai = aiEnabled;
-          options.generate_pdf = reportEnabled;
-        }
-        const res = await fetchJSON('/recon/run', {
-          method: 'POST',
-          body: JSON.stringify({
-            mode: mode,
-            query_value: query,
-            requested_by: document.getElementById('run-login')?.value || '',
-            options: options,
-          }),
-        });
-        showToast(`Recon queued (${res.job_id})`, 'good');
-        await loadReconHistory();
-        if (res.job_id) {
-          setTimeout(() => loadReconJob(res.job_id), 1200);
-        }
-      } catch (e) {
-        showToast('Recon run failed: ' + e.message, 'bad');
-      } finally {
-        if (btn) btn.disabled = false;
-      }
     }
     async function createSchedule() {
       const login = document.getElementById('sch-login').value;
@@ -4792,38 +4182,6 @@
       });
       eventsUserInput.addEventListener('blur', () => loadRelationshipEvents(currentHistoryTarget));
     }
-    const reconRunBtn = document.getElementById('recon-run-btn');
-    if (reconRunBtn) reconRunBtn.onclick = runRecon;
-    const reconModeSel = document.getElementById('recon-mode');
-    if (reconModeSel) reconModeSel.onchange = updateReconOptionState;
-    const reconRefreshBtn = document.getElementById('recon-refresh-btn');
-    if (reconRefreshBtn) reconRefreshBtn.onclick = async () => { await loadReconHistory(); await loadReconHealth(); await loadReconQueue(); };
-    const reconHistoryLoadBtn = document.getElementById('recon-history-load');
-    if (reconHistoryLoadBtn) reconHistoryLoadBtn.onclick = loadReconHistory;
-    const reconExportJsonBtn = document.getElementById('recon-export-json');
-    if (reconExportJsonBtn) {
-      reconExportJsonBtn.onclick = () => {
-        if (!reconCurrentJobId) return;
-        window.open(`${API_BASE}/recon/export/${encodeURIComponent(reconCurrentJobId)}?format=json`, '_blank');
-      };
-    }
-    const reconExportCsvBtn = document.getElementById('recon-export-csv');
-    if (reconExportCsvBtn) {
-      reconExportCsvBtn.onclick = () => {
-        if (!reconCurrentJobId) return;
-        window.open(`${API_BASE}/recon/export/${encodeURIComponent(reconCurrentJobId)}?format=csv`, '_blank');
-      };
-    }
-    const reconReportBtn = document.getElementById('recon-download-report');
-    if (reconReportBtn) {
-      reconReportBtn.onclick = () => {
-        if (!reconCurrentJobId) return;
-        window.open(`${API_BASE}/recon/report/${encodeURIComponent(reconCurrentJobId)}`, '_blank');
-      };
-    }
-    const reconAiSetupBtn = document.getElementById('recon-ai-setup-btn');
-    if (reconAiSetupBtn) reconAiSetupBtn.onclick = setupReconAiKey;
-
     function showAPIError(show = true) {
       const banner = document.getElementById('api-error-banner');
       if (banner) {
@@ -4841,16 +4199,11 @@
         await loadConfig();
         await loadLogins();
         await Promise.all([loadSchedules(), loadTargetsOverview(), loadTargetsForHistory(), loadLastStatus(), loadSummary()]);
-        await loadReconHistory();
-        await loadReconHealth();
-        await loadReconQueue();
-        updateReconOptionState();
         toggleFrequencyUI();
         fetchSystemStatus();
         fetchUnfollowStatus();
         scheduleAdaptivePolling(true);
         document.addEventListener('visibilitychange', () => scheduleAdaptivePolling(true));
-        setInterval(loadReconQueue, 5000);
         // Hide API error banner if everything loaded successfully
         showAPIError(false);
       } catch (e) {

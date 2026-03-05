@@ -543,7 +543,22 @@ def _load_settings(login_username: str) -> dict | None:
             pass
         return settings
     except Exception:
+        try:
+            path.unlink()
+        except Exception:
+            pass
         return None
+
+
+def _clear_cached_session(login_username: str) -> None:
+    clear_session_settings(login_username)
+    path = _settings_path(login_username)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
 
 
 def _save_settings(login_username: str, settings: dict) -> None:
@@ -757,7 +772,18 @@ def _needs_device_upgrade(current: dict | None, desired: dict | None) -> bool:
         return False
     if not current:
         return True
-    for key in ("app_version", "version_code", "android_version", "android_release"):
+    for key in (
+        "app_version",
+        "version_code",
+        "android_version",
+        "android_release",
+        "manufacturer",
+        "device",
+        "model",
+        "resolution",
+        "dpi",
+        "cpu",
+    ):
         if str(current.get(key) or "") != str(desired.get(key) or ""):
             return True
     return False
@@ -782,16 +808,27 @@ def _apply_device_settings(
     *,
     force: bool = False,
 ) -> bool:
-    current = (client.get_settings() or {}).get("device_settings") or client.device_settings or {}
-    if not desired:
+    current_settings = client.get_settings() or {}
+    current = current_settings.get("device_settings") or client.device_settings or {}
+    changed = False
+    needs_device_upgrade = bool(desired) and (force or _needs_device_upgrade(current, desired))
+    if needs_device_upgrade:
+        merged = dict(current or {})
+        merged.update({k: v for k, v in (desired or {}).items() if v is not None and v != ""})
+        client.set_device(merged)
+        changed = True
+    normalized_user_agent = (user_agent or "").strip()
+    if normalized_user_agent:
+        current_user_agent = str(
+            current_settings.get("user_agent")
+            or getattr(client, "user_agent", "")
+            or ""
+        ).strip()
+        if force or current_user_agent != normalized_user_agent:
+            client.set_user_agent(normalized_user_agent)
+            changed = True
+    if not changed:
         return False
-    if not force and not _needs_device_upgrade(current, desired):
-        return False
-    merged = dict(current or {})
-    merged.update({k: v for k, v in desired.items() if v is not None and v != ""})
-    client.set_device(merged)
-    if user_agent:
-        client.set_user_agent(user_agent)
     try:
         _save_settings(login_username, client.get_settings())
     except Exception:
@@ -1143,7 +1180,7 @@ def _build_client(
                         session_fail_streak=streak,
                     )
                     if streak >= SESSION_STALE_THRESHOLD:
-                        clear_session_settings(login_username)
+                        _clear_cached_session(login_username)
                         _auth_trace(
                             login_username,
                             "session_marked_stale",
@@ -1162,7 +1199,7 @@ def _build_client(
                         session_fail_streak=streak,
                     )
                     if streak >= SESSION_STALE_THRESHOLD:
-                        clear_session_settings(login_username)
+                        _clear_cached_session(login_username)
                         _auth_trace(
                             login_username,
                             "session_marked_stale",
@@ -1181,7 +1218,7 @@ def _build_client(
                         session_fail_streak=streak,
                     )
                     if streak >= SESSION_STALE_THRESHOLD:
-                        clear_session_settings(login_username)
+                        _clear_cached_session(login_username)
                         _auth_trace(
                             login_username,
                             "session_marked_stale",

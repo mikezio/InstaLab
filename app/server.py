@@ -75,6 +75,7 @@ from recon_store import (
 from recon_worker import ReconExecutionError, run_recon_scan
 from validation import ValidationError, sanitize_sql_limit
 from proxy_utils import load_proxy_from_env
+from browser_tracker import browser_storage_path_for_login
 
 # Ensure consistent HOME for session/cache files
 os.environ.setdefault("HOME", "/home/stremio")
@@ -280,11 +281,44 @@ RUN_LOGIN_MODE_ALIASES = {
 
 SCRAPER_BACKEND_ALLOWED = {"private", "browser"}
 SCRAPER_BACKEND_ALIASES = {
+    "instagrapi": "private",
+    "ingrapi": "private",
     "private_api": "private",
     "private-api": "private",
     "osintgram": "private",
     "guided_browser": "browser",
     "playwright": "browser",
+}
+
+RUN_BACKEND_TUNING_PROFILES = {
+    # Safer cadence for instagrapi/private API to reduce throttling risk.
+    "private": {
+        "run_http_timeout_seconds": 60.0,
+        "run_request_timeout": 60.0,
+        "run_private_request_sleep_seconds": 0.8,
+        "run_item_delay_min": 0.6,
+        "run_item_delay_max": 1.4,
+        "run_initial_fetch_delay_seconds": 6.0,
+        "run_pause_every_min": 120,
+        "run_pause_every_max": 180,
+        "run_pause_seconds_min": 20.0,
+        "run_pause_seconds_max": 45.0,
+        "run_rate_limit_cooldown_seconds": 3600,
+    },
+    # Browser collector can run faster while keeping basic jitter.
+    "browser": {
+        "run_http_timeout_seconds": 60.0,
+        "run_request_timeout": 60.0,
+        "run_private_request_sleep_seconds": 0.0,
+        "run_item_delay_min": 0.25,
+        "run_item_delay_max": 0.75,
+        "run_initial_fetch_delay_seconds": 1.0,
+        "run_pause_every_min": 0,
+        "run_pause_every_max": 0,
+        "run_pause_seconds_min": 0.0,
+        "run_pause_seconds_max": 0.0,
+        "run_rate_limit_cooldown_seconds": 1800,
+    },
 }
 
 
@@ -310,6 +344,12 @@ def _normalize_scraper_backend(value: str | None) -> str:
 
 def _is_private_backend_name(value: str | None) -> bool:
     return _normalize_scraper_backend(value) == "private"
+
+
+def _backend_tuning_profile(value: str | None) -> dict:
+    backend = _normalize_scraper_backend(value)
+    profile = RUN_BACKEND_TUNING_PROFILES.get(backend, {})
+    return dict(profile)
 
 CONFIG_DEFAULTS = {
     "run_stall_seconds": int(os.getenv("RUN_STALL_SECONDS", "1200")),
@@ -1499,6 +1539,17 @@ def _apply_proxy_env(env: dict, *, session_id: str | None = None, login_username
     proxy = _get_proxy_config(session_id=session_id, login_username=login_username)
     if not proxy.get("enabled"):
         env["INSTALAB_PROXY_ENABLED"] = "false"
+        for key in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ):
+            env.pop(key, None)
         return
     env["INSTALAB_PROXY_ENABLED"] = "true"
     env["INSTALAB_PROXY_PROVIDER"] = proxy.get("provider", "decodo")
@@ -3084,6 +3135,16 @@ ACCOUNT_CREATE_LOG = []
 RUN_WATCHDOG_STOP = threading.Event()
 
 
+def _collector_storage_path(login_username: str) -> str:
+    username = str(login_username or "").strip()
+    if not username:
+        return UNFOLLOW_STORAGE
+    try:
+        return str(browser_storage_path_for_login(username))
+    except Exception:
+        return UNFOLLOW_STORAGE
+
+
 def _get_run_lock(login_username: str) -> threading.Lock:
     key = login_username or "_default"
     with RUN_LOCKS_GUARD:
@@ -3453,6 +3514,12 @@ _schedule_recon_maintenance_job()
 threading.Thread(target=_watchdog_loop, daemon=True).start()
 
 app = Flask(__name__)
+
+
+@app.before_request
+def _block_removed_recon_routes():
+    if request.path == "/api/recon" or request.path.startswith("/api/recon/"):
+        return jsonify({"error": "recon feature has been removed"}), 410
 
 
 @app.route("/api/logins", methods=["GET"])
@@ -4739,6 +4806,12 @@ def api_run_detail(run_id):
         run["followers_removed_list"] = sorted(prev_followers - cur_f)
         run["followees_added_list"] = sorted(cur_fe - prev_followees)
         run["followees_removed_list"] = sorted(prev_followees - cur_fe)
+        # Keep headline delta counters aligned with the same computed baseline
+        # used by the detailed username lists (important when prior runs were deleted).
+        run["followers_added"] = len(run["followers_added_list"])
+        run["followers_removed"] = len(run["followers_removed_list"])
+        run["followees_added"] = len(run["followees_added_list"])
+        run["followees_removed"] = len(run["followees_removed_list"])
         follower_change_names = sorted(set(run["followers_added_list"]) | set(run["followers_removed_list"]))
         followee_change_names = sorted(set(run["followees_added_list"]) | set(run["followees_removed_list"]))
         follower_hist = _load_relationship_history_rows(
@@ -5289,7 +5362,6 @@ def api_health_detail():
         "scraper": _health_check_scraper(),
         "runs": _health_check_runs(),
         "unfollow": _health_check_unfollow(),
-        "recon": _health_check_recon(),
     }
     status = _merge_health_status(checks)
     return jsonify({"status": status, "checks": checks})
@@ -5344,12 +5416,24 @@ def api_config_update():
     data = request.get_json(force=True) or {}
     if not isinstance(data, dict) or not data:
         return jsonify({"error": "config payload required"}), 400
+    apply_backend_profile = False
+    profile_applied_backend = None
     try:
         cleaned = {}
         for key, value in data.items():
+            if key == "_apply_backend_profile":
+                apply_backend_profile = _parse_bool(value)
+                continue
             if key in SENSITIVE_CONFIG_KEYS and (value is None or str(value).strip() == ""):
                 continue
             cleaned[key] = value
+        if "run_scraper_backend" in cleaned:
+            cleaned["run_scraper_backend"] = _normalize_scraper_backend(cleaned.get("run_scraper_backend"))
+        if apply_backend_profile:
+            profile_applied_backend = str(
+                cleaned.get("run_scraper_backend", _get_config_value("run_scraper_backend", "browser"))
+            )
+            cleaned.update(_backend_tuning_profile(profile_applied_backend))
         # Keep legacy + new timeout keys aligned for older callers.
         if "run_request_timeout" in cleaned and "run_http_timeout_seconds" not in cleaned:
             cleaned["run_http_timeout_seconds"] = cleaned["run_request_timeout"]
@@ -5376,7 +5460,13 @@ def api_config_update():
     except Exception:
         pass
     cfg = _get_config(force=True)
-    return jsonify({"updated": list(updated.keys()), "config": _mask_config_for_api(cfg)})
+    return jsonify(
+        {
+            "updated": list(updated.keys()),
+            "profile_applied_backend": profile_applied_backend,
+            "config": _mask_config_for_api(cfg),
+        }
+    )
 
 
 @app.route("/api/integrations/whatsapp/webhook", methods=["GET"])
@@ -5430,6 +5520,55 @@ def api_whatsapp_test():
     if not ok:
         return jsonify({"ok": False, "error": detail}), 502
     return jsonify({"ok": True, "to": to_number})
+
+
+@app.route("/api/collector/auth/status", methods=["GET"])
+def api_collector_auth_status():
+    login_username = str(request.args.get("login_username") or "").strip()
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    storage_path = _collector_storage_path(login_username)
+    storage_file = Path(storage_path)
+    return jsonify(
+        {
+            "login_username": login_username,
+            "scraper_backend": _normalize_scraper_backend(_get_config_value("run_scraper_backend", "browser")),
+            "storage_path": storage_path,
+            "storage_exists": storage_file.exists(),
+            "auth_ready": ensure_auth_state(storage_path),
+            "storage_mtime": storage_file.stat().st_mtime if storage_file.exists() else None,
+        }
+    )
+
+
+@app.route("/api/collector/auth/init", methods=["POST"])
+def api_collector_auth_init():
+    data = request.get_json(force=True) or {}
+    login_username = str(data.get("login_username") or "").strip()
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    try:
+        max_wait_seconds = int(data.get("max_wait_seconds") or 300)
+    except Exception:
+        max_wait_seconds = 300
+    storage_path = _collector_storage_path(login_username)
+    proxy = _get_proxy_config(session_id=_generate_proxy_session_id())
+    executor.submit(
+        init_login,
+        storage_path,
+        proxy.get("server") if proxy.get("enabled") else None,
+        proxy.get("username"),
+        proxy.get("password"),
+        max_wait_seconds,
+    )
+    return jsonify(
+        {
+            "started": True,
+            "note": "interactive collector login opened",
+            "login_username": login_username,
+            "storage_path": storage_path,
+        }
+    )
 
 
 @app.route("/api/unfollow/status", methods=["GET"])
@@ -5577,6 +5716,11 @@ def api_unfollow_cancel():
 
 @app.route("/api/unfollow/init", methods=["POST"])
 def api_unfollow_init():
+    data = request.get_json(silent=True) or {}
+    try:
+        max_wait_seconds = int(data.get("max_wait_seconds") or 300)
+    except Exception:
+        max_wait_seconds = 300
     if UNFOLLOW_LOCK.locked():
         return jsonify({"error": "unfollow job running"}), 409
     # Launch interactive login in background (requires display on server)
@@ -5587,6 +5731,7 @@ def api_unfollow_init():
         proxy.get("server") if proxy.get("enabled") else None,
         proxy.get("username"),
         proxy.get("password"),
+        max_wait_seconds,
     )
     return jsonify({"started": True, "note": "interactive login opened"})
 
