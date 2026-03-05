@@ -16,6 +16,7 @@ import {
   getLogins,
   getRelationshipEvents,
   getRelationshipHistory,
+  getManualActions,
   getRunStatus,
   getSchedules,
   getTargetsSummary,
@@ -37,6 +38,7 @@ import {
   testProxy,
   undoRun,
   updateConfig,
+  resolveManualAction,
 } from "./lib/api";
 import type { ConfigValues } from "./lib/schemas";
 
@@ -742,6 +744,7 @@ function OperationsPage() {
   const schedulesQ = useQuery({ queryKey: ["schedules"], queryFn: getSchedules, refetchInterval: 20000 });
   const loginsQ = useQuery({ queryKey: ["logins"], queryFn: getLogins, refetchInterval: 20000 });
   const runStatusQ = useQuery({ queryKey: ["run-status"], queryFn: getRunStatus, refetchInterval: 6000 });
+  const manualActionsQ = useQuery({ queryKey: ["manual-actions"], queryFn: getManualActions, refetchInterval: 6000 });
   const [manualLogin, setManualLogin] = useState("");
   const [manualTarget, setManualTarget] = useState("");
   const [manualJobId, setManualJobId] = useState("");
@@ -790,6 +793,13 @@ function OperationsPage() {
   const cancelRunMutation = useMutation({
     mutationFn: cancelRun,
     onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["run-status"] });
+    },
+  });
+  const resolveManualMutation = useMutation({
+    mutationFn: ({ actionId, note }: { actionId: string; note?: string }) => resolveManualAction(actionId, note),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["manual-actions"] });
       await qc.invalidateQueries({ queryKey: ["run-status"] });
     },
   });
@@ -893,6 +903,11 @@ function OperationsPage() {
         <p className="hint">
           Active {runStatusQ.data?.active_jobs?.length ?? 0} · Queued {runStatusQ.data?.queued_jobs?.length ?? 0}
         </p>
+        {runStatusQ.data?.cooldowns?.length ? (
+          <p className="hint">
+            Cooldowns: {(runStatusQ.data.cooldowns ?? []).map((c) => `@${c.login_username} (${c.cooldown_seconds}s)`).join(" · ")}
+          </p>
+        ) : null}
         {manualJobId ? (
           <>
             <p className="hint">
@@ -912,6 +927,51 @@ function OperationsPage() {
             </div>
           </>
         ) : null}
+      </article>
+      <article className="card">
+        <h3>Manual Action Queue</h3>
+        <p className="hint">Items that require human action before runs can continue safely.</p>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>When</th>
+                <th>Login</th>
+                <th>Target</th>
+                <th>Type</th>
+                <th>Reason</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(manualActionsQ.data?.actions ?? []).map((item, idx) => (
+                <tr key={`${String(item.action_id || "manual")}-${idx}`}>
+                  <td>{formatTime(String(item.updated_at || item.created_at || ""))}</td>
+                  <td>{String(item.login_username || "-")}</td>
+                  <td>{String(item.target_username || "-")}</td>
+                  <td>{String(item.action_type || "-")}</td>
+                  <td>
+                    {String(item.error_code || item.reason || "-")}
+                    {item.error_message ? ` · ${String(item.error_message).slice(0, 90)}` : ""}
+                  </td>
+                  <td>
+                    <button
+                      className="btn-secondary"
+                      disabled={resolveManualMutation.isPending || !item.action_id}
+                      onClick={() => resolveManualMutation.mutate({ actionId: String(item.action_id), note: "resolved from operations ui" })}
+                    >
+                      Resolve
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!((manualActionsQ.data?.actions ?? []).length) ? (
+                <tr><td colSpan={6} className="hint">No open manual actions.</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+        {resolveManualMutation.error ? <p className="error">{(resolveManualMutation.error as Error).message}</p> : null}
       </article>
       <article className="card">
         <h3>Schedule Setup</h3>

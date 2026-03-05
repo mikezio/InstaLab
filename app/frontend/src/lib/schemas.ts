@@ -6,6 +6,34 @@ export const appStatusSchema = z.object({
 
 export const runStatusSchema = z.object({
   state: z.string().optional(),
+  manual_actions_open: z.number().optional(),
+  manual_actions: z
+    .array(
+      z.object({
+        action_id: z.string().optional(),
+        login_username: z.string().optional(),
+        target_username: z.string().optional(),
+        job_id: z.string().optional(),
+        action_type: z.string().optional(),
+        reason: z.string().optional(),
+        error_code: z.string().nullable().optional(),
+        error_message: z.string().nullable().optional(),
+        recommended_step: z.string().optional(),
+        created_at: z.string().optional(),
+        updated_at: z.string().optional(),
+      })
+    )
+    .optional(),
+  cooldowns: z
+    .array(
+      z.object({
+        login_username: z.string().optional(),
+        cooldown_seconds: z.number().optional(),
+        error_code: z.string().nullable().optional(),
+        error_message: z.string().nullable().optional(),
+      })
+    )
+    .optional(),
   active_jobs: z
     .array(
       z.object({
