@@ -1944,6 +1944,69 @@ def _account_create_retry_policy(error_code: str, error_message: str) -> tuple[s
     return ("fatal", [])
 
 
+def _account_create_post_setup(
+    *,
+    login_username: str,
+    auto_set_runner: bool,
+    warmup_target_username: str | None,
+    queue_warmup_run: bool,
+    schedule_interval: str | None,
+) -> dict:
+    result: dict[str, object] = {
+        "runner_set": False,
+        "warmup_job_id": None,
+        "schedule_id": None,
+        "warnings": [],
+    }
+    warnings: list[str] = []
+    target = str(warmup_target_username or "").strip().lstrip("@")
+    cron_expr = str(schedule_interval or "").strip()
+
+    if auto_set_runner:
+        try:
+            _set_config_values({"monitor_login_username": login_username})
+            result["runner_set"] = True
+            _log_account_create(f"set @{login_username} as monitor runner login")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"failed to set monitor runner login: {exc}")
+
+    if target and queue_warmup_run:
+        try:
+            if _is_blocked_login(login_username):
+                raise RuntimeError("login is blocked")
+            if _get_run_lock(login_username).locked():
+                raise RuntimeError("another run is already in progress for this login")
+            if _is_target_busy(target):
+                raise RuntimeError("another run is already in progress for this target")
+            if UNFOLLOW_LOCK.locked() and (UNFOLLOW_JOB.get("login_username") or "") == login_username:
+                raise RuntimeError("unfollow job is running for this login")
+            cooldown_seconds = _get_run_cooldown_remaining(login_username)
+            if cooldown_seconds > 0:
+                raise RuntimeError(f"login in cooldown ({cooldown_seconds}s)")
+            job_id = _queue_run(login_username, target, source="account_factory")
+            result["warmup_job_id"] = job_id
+            _log_account_create(f"queued warmup run job_id={job_id} for @{target}")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"failed to queue warmup run: {exc}")
+    elif queue_warmup_run and not target:
+        warnings.append("warmup run requested but no target username provided")
+
+    if cron_expr and target:
+        try:
+            CronTrigger.from_crontab(cron_expr)
+            schedule_id = _persist_schedule(login_username, target, cron_expr)
+            _schedule_job(schedule_id, login_username, target, cron_expr)
+            result["schedule_id"] = schedule_id
+            _log_account_create(f"created schedule id={schedule_id} for @{target} ({cron_expr})")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"failed to create schedule: {exc}")
+    elif cron_expr and not target:
+        warnings.append("schedule interval provided but no target username provided")
+
+    result["warnings"] = warnings
+    return result
+
+
 def _account_create_worker(
     *,
     created_placeholder: bool,
@@ -1957,6 +2020,10 @@ def _account_create_worker(
     birth_month: int | None,
     birth_day: int | None,
     max_wait_seconds: int,
+    auto_set_runner: bool,
+    warmup_target_username: str | None,
+    queue_warmup_run: bool,
+    schedule_interval: str | None,
 ):
     strategy = (strategy or "private_api").strip().lower()
     if strategy not in {"private_api", "guided_browser"}:
@@ -1974,6 +2041,13 @@ def _account_create_worker(
             "message": None,
             "last_url": None,
             "saved_login": False,
+            "auto_set_runner": bool(auto_set_runner),
+            "warmup_target_username": str(warmup_target_username or "").strip().lstrip("@") or None,
+            "queue_warmup_run": bool(queue_warmup_run),
+            "warmup_job_id": None,
+            "schedule_interval": str(schedule_interval or "").strip() or None,
+            "schedule_id": None,
+            "warnings": [],
         }
     )
     _log_account_create(f"starting account creation using strategy={strategy}")
@@ -2099,10 +2173,31 @@ def _account_create_worker(
         )
         disable_login(login_username, False)
         _clear_login_cache()
+        post_setup = _account_create_post_setup(
+            login_username=login_username,
+            auto_set_runner=bool(auto_set_runner),
+            warmup_target_username=warmup_target_username,
+            queue_warmup_run=bool(queue_warmup_run),
+            schedule_interval=schedule_interval,
+        )
+        warnings = list(post_setup.get("warnings") or [])
+        ACCOUNT_CREATE_JOB["auto_set_runner"] = bool(auto_set_runner)
+        ACCOUNT_CREATE_JOB["warmup_target_username"] = str(warmup_target_username or "").strip().lstrip("@") or None
+        ACCOUNT_CREATE_JOB["queue_warmup_run"] = bool(queue_warmup_run)
+        ACCOUNT_CREATE_JOB["warmup_job_id"] = post_setup.get("warmup_job_id")
+        ACCOUNT_CREATE_JOB["schedule_interval"] = str(schedule_interval or "").strip() or None
+        ACCOUNT_CREATE_JOB["schedule_id"] = post_setup.get("schedule_id")
+        ACCOUNT_CREATE_JOB["warnings"] = warnings
         ACCOUNT_CREATE_JOB["saved_login"] = True
         ACCOUNT_CREATE_JOB["state"] = "done"
-        ACCOUNT_CREATE_JOB["message"] = "account created and added to Login Vault"
+        ACCOUNT_CREATE_JOB["message"] = (
+            "account created and added to Login Vault"
+            if not warnings
+            else f"account created with warnings ({len(warnings)})"
+        )
         _log_account_create(f"created @{login_username} and saved to Login Vault")
+        for warning in warnings:
+            _log_account_create(f"warning: {warning}")
     except Exception as exc:  # noqa: BLE001
         ACCOUNT_CREATE_JOB["state"] = "error"
         ACCOUNT_CREATE_JOB["message"] = str(exc)
@@ -3183,6 +3278,13 @@ ACCOUNT_CREATE_JOB = {
     "message": None,
     "last_url": None,
     "saved_login": False,
+    "auto_set_runner": True,
+    "warmup_target_username": None,
+    "queue_warmup_run": False,
+    "warmup_job_id": None,
+    "schedule_interval": None,
+    "schedule_id": None,
+    "warnings": [],
 }
 ACCOUNT_CREATE_LOG = []
 RUN_WATCHDOG_STOP = threading.Event()
@@ -4074,6 +4176,10 @@ def api_logins_create_start():
     login_password = (data.get("login_password") or "").strip()
     phone_number = (data.get("phone_number") or "").strip()
     strategy = (data.get("strategy") or "private_api").strip().lower()
+    auto_set_runner = _parse_bool(data.get("auto_set_runner", True))
+    queue_warmup_run = _parse_bool(data.get("queue_warmup_run", False))
+    warmup_target_username = _sanitize_target_username(data.get("warmup_target_username") or "")
+    schedule_interval = str(data.get("schedule_interval") or "").strip()
     try:
         max_wait_seconds = int(data.get("max_wait_seconds") or 300)
     except Exception:
@@ -4118,6 +4224,15 @@ def api_logins_create_start():
             return jsonify({"error": "private_api signup requires proxy username/password"}), 400
     if strategy == "guided_browser" and not os.getenv("DISPLAY"):
         return jsonify({"error": "guided_browser strategy requires a display server (DISPLAY not set)"}), 400
+    if schedule_interval:
+        if not warmup_target_username:
+            return jsonify({"error": "warmup_target_username is required when schedule_interval is provided"}), 400
+        try:
+            CronTrigger.from_crontab(schedule_interval)
+        except Exception:
+            return jsonify({"error": "schedule_interval must be a valid crontab expression"}), 400
+    if queue_warmup_run and not warmup_target_username:
+        return jsonify({"error": "warmup_target_username is required when queue_warmup_run=true"}), 400
     if _is_blocked_login(login_username):
         return jsonify({"error": "login_username is blocked"}), 400
     if _get_run_lock(login_username).locked():
@@ -4164,6 +4279,10 @@ def api_logins_create_start():
         birth_month=birth_month,
         birth_day=birth_day,
         max_wait_seconds=max_wait_seconds,
+        auto_set_runner=auto_set_runner,
+        warmup_target_username=warmup_target_username or None,
+        queue_warmup_run=queue_warmup_run,
+        schedule_interval=schedule_interval or None,
     )
     return jsonify(
         {
@@ -4171,6 +4290,10 @@ def api_logins_create_start():
             "strategy": strategy,
             "login_username": login_username,
             "max_wait_seconds": max_wait_seconds,
+            "auto_set_runner": auto_set_runner,
+            "queue_warmup_run": queue_warmup_run,
+            "warmup_target_username": warmup_target_username or None,
+            "schedule_interval": schedule_interval or None,
         }
     )
 

@@ -152,7 +152,20 @@ export async function startAccountCreate(payload: {
   login_username: string;
   login_password: string;
   max_wait_seconds?: number;
-}): Promise<{ started: boolean; strategy: string; login_username: string; max_wait_seconds: number }> {
+  auto_set_runner?: boolean;
+  warmup_target_username?: string;
+  queue_warmup_run?: boolean;
+  schedule_interval?: string;
+}): Promise<{
+  started: boolean;
+  strategy: string;
+  login_username: string;
+  max_wait_seconds: number;
+  auto_set_runner?: boolean;
+  warmup_target_username?: string | null;
+  queue_warmup_run?: boolean;
+  schedule_interval?: string | null;
+}> {
   return fetchJson("/logins/create/start", {
     method: "POST",
     body: JSON.stringify(payload),

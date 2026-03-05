@@ -215,6 +215,13 @@ export const accountCreateStatusSchema = z.object({
       message: z.string().nullable().optional(),
       last_url: z.string().nullable().optional(),
       saved_login: z.boolean().optional(),
+      auto_set_runner: z.boolean().optional(),
+      warmup_target_username: z.string().nullable().optional(),
+      queue_warmup_run: z.boolean().optional(),
+      warmup_job_id: z.string().nullable().optional(),
+      schedule_interval: z.string().nullable().optional(),
+      schedule_id: z.number().nullable().optional(),
+      warnings: z.array(z.string()).optional(),
       elapsed_seconds: z.number().nullable().optional(),
     })
     .optional(),

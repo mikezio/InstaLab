@@ -1251,6 +1251,10 @@ function AccountsPage() {
   const [createFullName, setCreateFullName] = useState("");
   const [createUsername, setCreateUsername] = useState("");
   const [createPassword, setCreatePassword] = useState("");
+  const [autoSetRunner, setAutoSetRunner] = useState(true);
+  const [warmupTargetUsername, setWarmupTargetUsername] = useState("");
+  const [queueWarmupRun, setQueueWarmupRun] = useState(false);
+  const [scheduleInterval, setScheduleInterval] = useState("");
   const [selectedAuthLogin, setSelectedAuthLogin] = useState("");
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [passwordModalLogin, setPasswordModalLogin] = useState("");
@@ -1322,6 +1326,9 @@ function AccountsPage() {
 
   const onStartAccountCreate = () => {
     if (!createEmail.trim() || !createFullName.trim() || !createUsername.trim() || !createPassword.trim()) return;
+    const warmupTarget = warmupTargetUsername.trim().replace(/^@+/, "");
+    const cron = scheduleInterval.trim();
+    const shouldQueueWarmup = queueWarmupRun && Boolean(warmupTarget);
     startAccountCreateMutation.mutate({
       strategy: createStrategy,
       email: createEmail.trim(),
@@ -1329,6 +1336,10 @@ function AccountsPage() {
       login_username: createUsername.trim(),
       login_password: createPassword.trim(),
       max_wait_seconds: 300,
+      auto_set_runner: autoSetRunner,
+      warmup_target_username: warmupTarget || undefined,
+      queue_warmup_run: shouldQueueWarmup,
+      schedule_interval: cron || undefined,
     });
   };
 
@@ -1351,6 +1362,14 @@ function AccountsPage() {
       setSelectedAuthLogin(options[0]);
     }
   }, [loginsQ.data, selectedAuthLogin]);
+
+  useEffect(() => {
+    if (!cfgQ.data?.config) return;
+    const proxyEnabled = Boolean(cfgQ.data.config.proxy_enabled);
+    if (!proxyEnabled && createStrategy === "private_api") {
+      setCreateStrategy("guided_browser");
+    }
+  }, [cfgQ.data, createStrategy]);
 
   return (
     <section>
@@ -1433,6 +1452,36 @@ function AccountsPage() {
             Password
             <input type="password" value={createPassword} onChange={(e) => setCreatePassword(e.target.value)} placeholder="strong password" />
           </label>
+          <label>
+            Auto-set as runner login
+            <select value={autoSetRunner ? "true" : "false"} onChange={(e) => setAutoSetRunner(e.target.value === "true")}>
+              <option value="true">true</option>
+              <option value="false">false</option>
+            </select>
+          </label>
+          <label>
+            Warmup target (optional)
+            <input
+              value={warmupTargetUsername}
+              onChange={(e) => setWarmupTargetUsername(e.target.value)}
+              placeholder="target username for first run"
+            />
+          </label>
+          <label>
+            Queue warmup run
+            <select value={queueWarmupRun ? "true" : "false"} onChange={(e) => setQueueWarmupRun(e.target.value === "true")}>
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </label>
+          <label>
+            Schedule cron (optional)
+            <input
+              value={scheduleInterval}
+              onChange={(e) => setScheduleInterval(e.target.value)}
+              placeholder="e.g. 0 */6 * * *"
+            />
+          </label>
         </div>
         <div className="row gap">
           <button onClick={onStartAccountCreate} disabled={startAccountCreateMutation.isPending}>
@@ -1449,6 +1498,18 @@ function AccountsPage() {
           {accountCreateQ.data?.job?.login_username ? ` · @${accountCreateQ.data.job.login_username}` : ""}
           {accountCreateQ.data?.job?.message ? ` · ${accountCreateQ.data.job.message}` : ""}
         </p>
+        <p className="hint">
+          Runner set: {accountCreateQ.data?.job?.auto_set_runner ? "yes" : "no"}
+          {accountCreateQ.data?.job?.warmup_job_id ? ` · warmup job ${accountCreateQ.data.job.warmup_job_id}` : ""}
+          {accountCreateQ.data?.job?.schedule_id ? ` · schedule #${accountCreateQ.data.job.schedule_id}` : ""}
+        </p>
+        {(accountCreateQ.data?.job?.warnings ?? []).length ? (
+          <div className="table-wrap">
+            <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+              {(accountCreateQ.data?.job?.warnings ?? []).map((w) => `- ${w}`).join("\n")}
+            </pre>
+          </div>
+        ) : null}
         <p className="hint">For private API mode, submit email/SMS verification code in the legacy Account Vault challenge field if prompted.</p>
         <div className="table-wrap">
           <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
