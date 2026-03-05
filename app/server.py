@@ -1539,6 +1539,17 @@ def _apply_proxy_env(env: dict, *, session_id: str | None = None, login_username
     proxy = _get_proxy_config(session_id=session_id, login_username=login_username)
     if not proxy.get("enabled"):
         env["INSTALAB_PROXY_ENABLED"] = "false"
+        for key in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ):
+            env.pop(key, None)
         return
     env["INSTALAB_PROXY_ENABLED"] = "true"
     env["INSTALAB_PROXY_PROVIDER"] = proxy.get("provider", "decodo")
