@@ -612,6 +612,8 @@ def snapshot_profile(
                 "timestamp": timestamp,
                 "followers_count": followers_total,
                 "followees_count": following_total,
+                "followers_collected_count": followers_total,
+                "followees_collected_count": following_total,
                 "followers": [],
                 "followees": [],
                 "non_followbacks_count": 0,
@@ -679,6 +681,8 @@ def snapshot_profile(
             followees_fetch_seconds=followees_fetch_seconds,
             followers_rate=followers_rate,
             followees_rate=followees_rate,
+            followers_total_hint=followers_total,
+            followees_total_hint=following_total,
         )
         return {
             "timestamp": timestamp,

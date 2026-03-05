@@ -23,7 +23,11 @@ def _init_db(conn):
                 followees_removed INTEGER NOT NULL,
                 prev_run_id INTEGER,
                 created_at TEXT NOT NULL,
-                duration_seconds INTEGER
+                duration_seconds INTEGER,
+                followers_collected_count INTEGER,
+                followees_collected_count INTEGER,
+                snapshot_complete INTEGER NOT NULL DEFAULT 1,
+                snapshot_note TEXT
             )
             """
         )
@@ -143,6 +147,14 @@ def _init_db(conn):
         conn.execute("ALTER TABLE runs ADD COLUMN confidence_score INTEGER")
     if "confidence_flag" not in cols:
         conn.execute("ALTER TABLE runs ADD COLUMN confidence_flag TEXT")
+    if "followers_collected_count" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN followers_collected_count INTEGER")
+    if "followees_collected_count" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN followees_collected_count INTEGER")
+    if "snapshot_complete" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN snapshot_complete INTEGER NOT NULL DEFAULT 1")
+    if "snapshot_note" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN snapshot_note TEXT")
 
 
 def _update_history_table(
@@ -403,6 +415,9 @@ def write_run_metadata(
     followees_fetch_seconds=None,
     followers_rate=None,
     followees_rate=None,
+    followers_total_hint=None,
+    followees_total_hint=None,
+    snapshot_note=None,
 ):
     tz = ZoneInfo("America/New_York")
     if not is_postgres():
@@ -420,8 +435,23 @@ def write_run_metadata(
         prev_followers = prev[2] if prev else set()
         prev_followees = prev[3] if prev else set()
 
-        current_followers = set(followers)
-        current_followees = set(followees)
+        raw_followers = [str(u or "").strip().lower() for u in (followers or []) if str(u or "").strip()]
+        raw_followees = [str(u or "").strip().lower() for u in (followees or []) if str(u or "").strip()]
+        current_followers = set(raw_followers)
+        current_followees = set(raw_followees)
+        guardrail_notes = []
+        if len(current_followers) != len(raw_followers):
+            guardrail_notes.append("followers_deduped")
+        if len(current_followees) != len(raw_followees):
+            guardrail_notes.append("followees_deduped")
+        if prev_timestamp and str(timestamp) <= str(prev_timestamp):
+            guardrail_notes.append("non_monotonic_timestamp")
+        if followers_total_hint is not None and int(followers_total_hint) > len(current_followers):
+            guardrail_notes.append("followers_partial_collection")
+        if followees_total_hint is not None and int(followees_total_hint) > len(current_followees):
+            guardrail_notes.append("followees_partial_collection")
+        if snapshot_note:
+            guardrail_notes.append(str(snapshot_note))
 
         # If this is the first run for this target, treat it as baseline only.
         if prev_run_id is None:
@@ -451,15 +481,20 @@ def write_run_metadata(
                 followers_fetch_seconds,
                 followees_fetch_seconds,
                 followers_rate,
-                followees_rate
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                followees_rate,
+                followers_collected_count,
+                followees_collected_count,
+                snapshot_complete,
+                snapshot_note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
+        snapshot_complete = 0 if guardrail_notes else 1
         params = (
             target_username,
             login_username,
             timestamp,
-            len(followers),
-            len(followees),
+            len(current_followers),
+            len(current_followees),
             non_followbacks_count,
             len(followers_added),
             len(followers_removed),
@@ -471,6 +506,10 @@ def write_run_metadata(
             followees_fetch_seconds,
             followers_rate,
             followees_rate,
+            len(current_followers),
+            len(current_followees),
+            snapshot_complete,
+            ";".join(guardrail_notes) if guardrail_notes else None,
         )
         if is_postgres():
             cur = conn.execute(insert_sql + " RETURNING id", params)
@@ -481,11 +520,11 @@ def write_run_metadata(
 
         conn.executemany(
             insert_ignore_sql("run_followers", ["run_id", "username"]),
-            [(run_id, username) for username in followers],
+            [(run_id, username) for username in sorted(current_followers)],
         )
         conn.executemany(
             insert_ignore_sql("run_followees", ["run_id", "username"]),
-            [(run_id, username) for username in followees],
+            [(run_id, username) for username in sorted(current_followees)],
         )
         relationship_events_recorded = _insert_relationship_events(
             conn,
@@ -551,6 +590,8 @@ def write_run_metadata(
             "followers": {"added": followers_added, "removed": followers_removed},
             "followees": {"added": followees_added, "removed": followees_removed},
             "relationship_events_recorded": relationship_events_recorded,
+            "snapshot_complete": bool(snapshot_complete),
+            "snapshot_note": ";".join(guardrail_notes) if guardrail_notes else None,
         },
         run_id,
     )
@@ -595,8 +636,12 @@ def write_run_profile_counts(
                 followers_fetch_seconds,
                 followees_fetch_seconds,
                 followers_rate,
-                followees_rate
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                followees_rate,
+                followers_collected_count,
+                followees_collected_count,
+                snapshot_complete,
+                snapshot_note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         params = (
             target_username,
@@ -615,6 +660,10 @@ def write_run_profile_counts(
             0,
             None,
             None,
+            int(followers_count),
+            int(followees_count),
+            0,
+            "profile_only",
         )
         if is_postgres():
             cur = conn.execute(insert_sql + " RETURNING id", params)
@@ -631,6 +680,8 @@ def write_run_profile_counts(
             "previous_timestamp": None,
             "followers": {"added": [], "removed": []},
             "followees": {"added": [], "removed": []},
+            "snapshot_complete": False,
+            "snapshot_note": "profile_only",
         },
         run_id,
     )

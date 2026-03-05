@@ -202,6 +202,11 @@ def main():
                 "followees_fetch_seconds": res.get("followees_fetch_seconds"),
                 "followers_rate": res.get("followers_rate"),
                 "followees_rate": res.get("followees_rate"),
+                "followers_collected_count": res.get("followers_collected_count"),
+                "followees_collected_count": res.get("followees_collected_count"),
+                "partial_collection": bool(res.get("partial_collection")),
+                "snapshot_complete": bool((res.get("changes") or {}).get("snapshot_complete", True)),
+                "snapshot_note": (res.get("changes") or {}).get("snapshot_note"),
             }
             payload = {"status": "success", "result": slim}
             _write_json(args.result, payload)
