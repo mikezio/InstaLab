@@ -2916,6 +2916,15 @@ def _sanitize_login_username(value: str) -> str:
     return username
 
 
+def _sanitize_target_username(value: str) -> str:
+    username = (value or "").strip().lstrip("@")
+    if not username:
+        return ""
+    if not re.match(r"^[A-Za-z0-9._]+$", username):
+        return ""
+    return username
+
+
 def _read_json_file(path: Path):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -4022,7 +4031,6 @@ _restore_schedules()
 _schedule_monitor_job()
 _schedule_recon_maintenance_job()
 threading.Thread(target=_watchdog_loop, daemon=True).start()
-threading.Thread(target=_run_dispatcher_loop, daemon=True).start()
 
 app = Flask(__name__)
 
@@ -5757,6 +5765,9 @@ def _run_dispatcher_loop():
             time.sleep(0.25)
         else:
             time.sleep(1.0)
+
+
+threading.Thread(target=_run_dispatcher_loop, daemon=True).start()
 
 
 def _queue_run(login_username, target_username, *, source="api", two_factor_code=None, challenge_code=None, rebuild=True):

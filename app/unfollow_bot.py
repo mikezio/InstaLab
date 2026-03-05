@@ -437,37 +437,82 @@ def create_account_guided(
         page = context.new_page()
         page.set_default_timeout(20000)
 
+        def _visible_input(selectors: list[str]):
+            for selector in selectors:
+                try:
+                    node = page.locator(selector).first
+                    if node.count() > 0 and node.is_visible():
+                        return node
+                except Exception:
+                    continue
+            return None
+
+        def _fill_required(field_name: str, selectors: list[str], value: str) -> bool:
+            node = _visible_input(selectors)
+            if not node:
+                log(f"missing required field: {field_name}")
+                return False
+            try:
+                node.click(timeout=3000)
+                node.fill("")
+                node.type(value, delay=random.randint(25, 65))
+                return True
+            except Exception as exc:  # noqa: BLE001
+                log(f"failed to fill {field_name}: {exc}")
+                return False
+
+        def _click_submit() -> bool:
+            for label in ("Sign up", "Sign Up", "Next"):
+                try:
+                    btn = page.get_by_role("button", name=label)
+                    if btn.count() > 0 and btn.first.is_visible() and btn.first.is_enabled():
+                        btn.first.click(timeout=3000)
+                        return True
+                except Exception:
+                    continue
+            for selector in (
+                'button[type="submit"]',
+                "form button",
+            ):
+                try:
+                    btn = page.locator(selector).first
+                    if btn.count() > 0 and btn.is_visible() and btn.is_enabled():
+                        btn.click(timeout=3000)
+                        return True
+                except Exception:
+                    continue
+            return False
+
         try:
             page.goto("https://www.instagram.com/accounts/emailsignup/", wait_until="domcontentloaded")
             _maybe_accept_cookies(page)
             page.wait_for_timeout(800)
-
-            page.locator('input[name="emailOrPhone"]').first.fill(email)
-            page.locator('input[name="fullName"]').first.fill(full_name)
-            page.locator('input[name="username"]').first.fill(username)
-            page.locator('input[name="password"]').first.fill(password)
+            required_ok = [
+                _fill_required("email_or_phone", ['input[name="emailOrPhone"]', 'input[name="email"]'], email),
+                _fill_required("full_name", ['input[name="fullName"]'], full_name),
+                _fill_required("username", ['input[name="username"]'], username),
+                _fill_required("password", ['input[name="password"]'], password),
+            ]
+            if not all(required_ok):
+                return {
+                    "completed": False,
+                    "cancelled": False,
+                    "last_url": page.url or "",
+                    "reason": "missing_required_signup_fields",
+                }
             log("filled signup form")
 
-            submit_clicked = False
-            for label in ("Sign up", "Sign Up"):
-                try:
-                    btn = page.get_by_role("button", name=label)
-                    if btn.count() > 0:
-                        btn.first.click(timeout=3000)
-                        submit_clicked = True
-                        break
-                except Exception:
-                    continue
-            if not submit_clicked:
-                try:
-                    page.keyboard.press("Enter")
-                    submit_clicked = True
-                except Exception:
-                    pass
+            submit_clicked = _click_submit()
             if submit_clicked:
                 log("submitted signup form; waiting for verification/account completion")
             else:
-                log("could not auto-submit form; continue manually in the open browser")
+                log("could not auto-submit form; no matching submit button found")
+                return {
+                    "completed": False,
+                    "cancelled": False,
+                    "last_url": page.url or "",
+                    "reason": "signup_submit_not_found",
+                }
 
             detected_login = False
             while (time.time() - started) < max_wait_seconds:
