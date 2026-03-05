@@ -1050,13 +1050,7 @@ def _health_check_runs():
         if elapsed is not None and elapsed > run_max:
             stalled.append(item)
 
-    for jid, meta in RUN_META.items():
-        fut = RUN_FUTURES.get(jid)
-        if not fut or fut.done():
-            continue
-        if meta.get("login_username") in {j["login_username"] for j in active}:
-            continue
-        queued.append({"job_id": jid, "meta": meta})
+    queued = _list_run_jobs_by_status("queued", limit=500)
 
     status = "ok"
     if stalled:
@@ -1387,12 +1381,7 @@ def _whatsapp_handle_command(sender: str, text: str) -> str:
         return _whatsapp_command_help()
     if verb in {"status", "/status"}:
         active = len(ACTIVE_JOBS)
-        queued = 0
-        for jid, fut in RUN_FUTURES.items():
-            if fut and not fut.done():
-                meta = RUN_META.get(jid) or {}
-                if meta.get("state") == "queued":
-                    queued += 1
+        queued = len(_list_run_jobs_by_status("queued", limit=500))
         return f"InstaLab status: active={active}, queued={queued}."
     if verb in {"run", "/run"}:
         if len(tokens) < 3:
@@ -1617,6 +1606,59 @@ def _init_run_tables():
     conn = _get_db()
     try:
         _init_run_db(conn)
+        conn.execute(
+            ddl(
+                """
+                CREATE TABLE IF NOT EXISTS run_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    login_username TEXT NOT NULL,
+                    target_username TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    submitted_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    state_reason TEXT,
+                    error_code TEXT,
+                    error_message TEXT,
+                    cooldown_seconds INTEGER,
+                    result_json TEXT
+                )
+                """
+            )
+        )
+        conn.execute(
+            ddl(
+                """
+                CREATE TABLE IF NOT EXISTS run_job_events (
+                    id SERIAL PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    event_at TEXT NOT NULL,
+                    event TEXT NOT NULL,
+                    details_json TEXT
+                )
+                """
+            )
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_run_jobs_status_submitted ON run_jobs(status, submitted_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_run_jobs_login_submitted ON run_jobs(login_username, submitted_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_run_job_events_job_time ON run_job_events(job_id, event_at)")
+        conn.execute(
+            """
+            UPDATE run_jobs
+            SET status = 'error',
+                finished_at = ?,
+                state_reason = ?,
+                error_message = ?
+            WHERE status = 'running'
+            """,
+            (
+                datetime.now(LOCAL_TZ).isoformat(),
+                "server_restart",
+                "job interrupted by server restart",
+            ),
+        )
         backfill_relationship_events(conn)
         conn.commit()
     finally:
@@ -3092,6 +3134,7 @@ scheduler.add_job(
 # Track in-flight manual runs
 RUN_FUTURES = {}
 RUN_META = {}
+RUN_INPUTS = {}
 RUN_LOCKS = {}
 RUN_LOCKS_GUARD = threading.Lock()
 RUN_COOLDOWN_UNTIL = {}
@@ -3143,6 +3186,7 @@ ACCOUNT_CREATE_JOB = {
 }
 ACCOUNT_CREATE_LOG = []
 RUN_WATCHDOG_STOP = threading.Event()
+RUN_DISPATCH_STOP = threading.Event()
 MANUAL_ACTIONS_LOCK = threading.Lock()
 MANUAL_ACTIONS: dict[str, dict] = {}
 RUN_STATE_ALLOWED = {
@@ -3179,6 +3223,242 @@ def _run_state_set(job_id: str, state: str, *, reason: str | None = None, **extr
             continue
         meta[key] = value
 
+
+def _record_run_job_event(job_id: str, event: str, details: dict | None = None) -> None:
+    conn = _get_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO run_job_events (job_id, event_at, event, details_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                datetime.now(LOCAL_TZ).isoformat(),
+                str(event or "").strip() or "event",
+                json.dumps(details or {}, separators=(",", ":")),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _load_run_job_record(job_id: str) -> dict | None:
+    conn = _get_db()
+    try:
+        row = conn.execute("SELECT * FROM run_jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        raw_result = data.get("result_json")
+        if raw_result:
+            try:
+                data["result"] = json.loads(raw_result)
+            except Exception:
+                data["result"] = None
+        else:
+            data["result"] = None
+        return data
+    finally:
+        conn.close()
+
+
+def _create_run_job_record(
+    *,
+    job_id: str,
+    login_username: str,
+    target_username: str,
+    source: str,
+) -> dict:
+    now_iso = datetime.now(LOCAL_TZ).isoformat()
+    conn = _get_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO run_jobs (
+                job_id,
+                login_username,
+                target_username,
+                source,
+                status,
+                submitted_at
+            ) VALUES (?, ?, ?, ?, 'queued', ?)
+            """,
+            (job_id, login_username, target_username, source, now_iso),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _record_run_job_event(job_id, "queued", {"source": source})
+    return {
+        "job_id": job_id,
+        "login_username": login_username,
+        "target_username": target_username,
+        "source": source,
+        "status": "queued",
+        "submitted_at": now_iso,
+    }
+
+
+def _update_run_job_record(
+    job_id: str,
+    *,
+    status: str | None = None,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    cancel_requested: bool | None = None,
+    state_reason: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    cooldown_seconds: int | None = None,
+    result: dict | None = None,
+) -> None:
+    updates = []
+    params: list = []
+    if status is not None:
+        updates.append("status = ?")
+        params.append(status)
+    if started_at is not None:
+        updates.append("started_at = ?")
+        params.append(started_at)
+    if finished_at is not None:
+        updates.append("finished_at = ?")
+        params.append(finished_at)
+    if cancel_requested is not None:
+        updates.append("cancel_requested = ?")
+        params.append(1 if cancel_requested else 0)
+    if state_reason is not None:
+        updates.append("state_reason = ?")
+        params.append(state_reason)
+    if error_code is not None:
+        updates.append("error_code = ?")
+        params.append(error_code)
+    if error_message is not None:
+        updates.append("error_message = ?")
+        params.append(error_message)
+    if cooldown_seconds is not None:
+        updates.append("cooldown_seconds = ?")
+        params.append(int(cooldown_seconds))
+    if result is not None:
+        updates.append("result_json = ?")
+        params.append(json.dumps(result, separators=(",", ":")))
+    if not updates:
+        return
+    params.append(job_id)
+    conn = _get_db()
+    try:
+        conn.execute(f"UPDATE run_jobs SET {', '.join(updates)} WHERE job_id = ?", tuple(params))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _claim_next_run_jobs(limit: int = 25) -> list[dict]:
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT job_id, login_username, target_username, source, submitted_at
+            FROM run_jobs
+            WHERE status = 'queued'
+            ORDER BY submitted_at ASC, job_id ASC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _mark_run_job_running(job_id: str) -> bool:
+    now_iso = datetime.now(LOCAL_TZ).isoformat()
+    conn = _get_db()
+    try:
+        cur = conn.execute(
+            """
+            UPDATE run_jobs
+            SET status = 'running',
+                started_at = ?,
+                state_reason = NULL,
+                error_code = NULL,
+                error_message = NULL,
+                cooldown_seconds = NULL
+            WHERE job_id = ? AND status = 'queued'
+            """,
+            (now_iso, job_id),
+        )
+        conn.commit()
+        claimed = int(getattr(cur, "rowcount", 0) or 0) > 0
+    finally:
+        conn.close()
+    if claimed:
+        _record_run_job_event(job_id, "running", {"started_at": now_iso})
+    return claimed
+
+
+def _list_run_jobs_by_status(*statuses: str, limit: int = 200) -> list[dict]:
+    wanted = [str(s or "").strip().lower() for s in statuses if str(s or "").strip()]
+    if not wanted:
+        return []
+    placeholders = ",".join(["?"] * len(wanted))
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT job_id, login_username, target_username, source, status, submitted_at, started_at, finished_at, state_reason, cooldown_seconds
+            FROM run_jobs
+            WHERE status IN ({placeholders})
+            ORDER BY submitted_at ASC, job_id ASC
+            LIMIT ?
+            """,
+            (*wanted, max(1, int(limit))),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def _latest_run_job_for_login(login_username: str) -> dict | None:
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM run_jobs
+            WHERE login_username = ?
+            ORDER BY submitted_at DESC, job_id DESC
+            LIMIT 1
+            """,
+            (login_username,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def _run_record_meta(record: dict | None) -> dict | None:
+    if not record:
+        return None
+    meta = {
+        "login_username": record.get("login_username"),
+        "target_username": record.get("target_username"),
+        "submitted_at": record.get("submitted_at"),
+        "started_at": record.get("started_at"),
+        "finished_at": record.get("finished_at"),
+        "source": record.get("source"),
+        "state": record.get("status"),
+    }
+    if record.get("state_reason"):
+        meta["state_reason"] = record.get("state_reason")
+    if record.get("error_code"):
+        meta["error_code"] = record.get("error_code")
+    if record.get("error_message"):
+        meta["error_message"] = record.get("error_message")
+    if record.get("cooldown_seconds"):
+        meta["cooldown_seconds"] = record.get("cooldown_seconds")
+    return meta
 
 def _manual_action_key(login_username: str, target_username: str, action_type: str) -> str:
     return f"{str(login_username or '').strip().lower()}::{str(target_username or '').strip().lower()}::{str(action_type or '').strip().lower()}"
@@ -3640,6 +3920,7 @@ _restore_schedules()
 _schedule_monitor_job()
 _schedule_recon_maintenance_job()
 threading.Thread(target=_watchdog_loop, daemon=True).start()
+threading.Thread(target=_run_dispatcher_loop, daemon=True).start()
 
 app = Flask(__name__)
 
@@ -5151,15 +5432,208 @@ def api_relationship_history():
         conn.close()
 
 
-def _is_target_busy(target_username: str) -> bool:
+def _is_target_busy(target_username: str, *, exclude_job_id: str | None = None, include_queued: bool = True) -> bool:
+    normalized_target = str(target_username or "").strip().lower()
+    if not normalized_target:
+        return False
+    exclude = str(exclude_job_id or "").strip()
     for job in ACTIVE_JOBS.values():
-        if job.get("target_username") == target_username:
+        if str(job.get("target_username") or "").strip().lower() == normalized_target:
+            if exclude and str(job.get("job_id") or "").strip() == exclude:
+                continue
             return True
     for jid, meta in RUN_META.items():
+        if exclude and str(jid) == exclude:
+            continue
         fut = RUN_FUTURES.get(jid)
-        if fut and not fut.done() and meta.get("target_username") == target_username:
+        if fut and not fut.done() and str(meta.get("target_username") or "").strip().lower() == normalized_target:
+            return True
+    statuses = ["running"]
+    if include_queued:
+        statuses.append("queued")
+    for row in _list_run_jobs_by_status(*statuses, limit=500):
+        if exclude and str(row.get("job_id") or "") == exclude:
+            continue
+        if str(row.get("target_username") or "").strip().lower() == normalized_target:
             return True
     return False
+
+
+def _execute_run_job(job_id: str, login_username: str, target_username: str, source: str):
+    started = datetime.now(LOCAL_TZ).isoformat()
+    meta = RUN_META.setdefault(
+        job_id,
+        {
+            "login_username": login_username,
+            "target_username": target_username,
+            "submitted_at": started,
+            "source": source,
+        },
+    )
+    meta["started_at"] = started
+    _run_state_set(job_id, "running")
+    inputs = RUN_INPUTS.get(job_id) or {}
+    two_factor_code = inputs.get("two_factor_code")
+    challenge_code = inputs.get("challenge_code")
+    try:
+        res = guarded_run(
+            login_username,
+            target_username,
+            source=source,
+            job_id=job_id,
+            two_factor_code=two_factor_code,
+            challenge_code=challenge_code,
+        )
+        finished = datetime.now(LOCAL_TZ).isoformat()
+        try:
+            elapsed = int((datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds())
+            if isinstance(res, dict) and res.get("run_id"):
+                update_run_duration(DB_PATH_DEFAULT, res["run_id"], elapsed)
+                conn = _get_db()
+                try:
+                    _update_run_quality(conn, res["run_id"], login_username, target_username)
+                finally:
+                    conn.close()
+        except Exception:
+            pass
+        job = ACTIVE_JOBS.get(login_username)
+        if job and isinstance(res, dict):
+            job["followers_total"] = res.get("followers_count")
+            job["following_total"] = res.get("followees_count")
+            job["phase"] = "done"
+        _run_state_set(job_id, "done", finished_at=finished)
+        _update_run_job_record(
+            job_id,
+            status="done",
+            finished_at=finished,
+            state_reason=None,
+            error_code=None,
+            error_message=None,
+            cooldown_seconds=None,
+            result=res if isinstance(res, dict) else {"value": res},
+        )
+        _record_run_job_event(job_id, "done", {"finished_at": finished})
+        _resolve_manual_actions_for(login_username, target_username, note=f"run succeeded ({job_id})")
+        _clear_run_cooldown(login_username)
+        _whatsapp_notify_run_event(
+            "run_done",
+            login_username,
+            target_username,
+            f"job_id: {job_id}",
+        )
+        return {"status": "success", "started_at": started, "finished_at": finished, "result": res}
+    except Exception as exc:  # noqa: BLE001
+        finished = datetime.now(LOCAL_TZ).isoformat()
+        code = getattr(exc, "code", None)
+        cooldown_seconds = 0
+        if str(code or "").strip().lower() in {"rate_limited", "feedback_required"}:
+            cooldown_seconds = _set_run_cooldown(login_username, code, str(exc))
+        terminal_state = _classify_terminal_run_state(code, str(exc), cooldown_seconds)
+        _run_state_set(
+            job_id,
+            terminal_state,
+            reason=str(code or exc.__class__.__name__),
+            finished_at=finished,
+            cooldown_seconds=cooldown_seconds if cooldown_seconds > 0 else None,
+        )
+        _update_run_job_record(
+            job_id,
+            status=terminal_state,
+            finished_at=finished,
+            state_reason=str(code or exc.__class__.__name__),
+            error_code=str(code or "") or None,
+            error_message=str(exc),
+            cooldown_seconds=cooldown_seconds if cooldown_seconds > 0 else None,
+        )
+        _record_run_job_event(
+            job_id,
+            terminal_state,
+            {
+                "finished_at": finished,
+                "error": str(exc),
+                "error_code": str(code or ""),
+                "cooldown_seconds": cooldown_seconds,
+            },
+        )
+        if terminal_state in {"challenge_required", "manual_required", "blocked"}:
+            action_type = str(code or terminal_state).strip().lower()
+            if action_type not in {"challenge_required", "two_factor_required"}:
+                action_type = terminal_state
+            _enqueue_manual_action(
+                login_username=login_username,
+                target_username=target_username,
+                job_id=job_id,
+                action_type=action_type,
+                reason=terminal_state,
+                error_code=str(code or ""),
+                error_message=str(exc),
+            )
+        _whatsapp_notify_run_event(
+            "run_error",
+            login_username,
+            target_username,
+            (
+                f"job_id: {job_id} · error: {exc}"
+                + (f" · cooldown: {cooldown_seconds}s" if cooldown_seconds > 0 else "")
+            ),
+        )
+        payload = {"status": "error", "started_at": started, "finished_at": finished, "error": str(exc)}
+        if code:
+            payload["error_code"] = code
+        if cooldown_seconds > 0:
+            payload["cooldown_seconds"] = cooldown_seconds
+        return payload
+    finally:
+        RUN_INPUTS.pop(job_id, None)
+
+
+def _run_dispatcher_loop():
+    while not RUN_DISPATCH_STOP.is_set():
+        dispatched = False
+        try:
+            for row in _claim_next_run_jobs(limit=25):
+                if RUN_DISPATCH_STOP.is_set():
+                    break
+                job_id = str(row.get("job_id") or "")
+                login_username = str(row.get("login_username") or "").strip()
+                target_username = str(row.get("target_username") or "").strip()
+                source = str(row.get("source") or "api").strip() or "api"
+                if not job_id or not login_username or not target_username:
+                    continue
+                if _get_run_cooldown_remaining(login_username) > 0:
+                    continue
+                if UNFOLLOW_LOCK.locked() and str(UNFOLLOW_JOB.get("login_username") or "") == login_username:
+                    continue
+                if _get_run_lock(login_username).locked():
+                    continue
+                if _is_target_busy(target_username, exclude_job_id=job_id, include_queued=False):
+                    continue
+                if not _mark_run_job_running(job_id):
+                    continue
+                started_at = datetime.now(LOCAL_TZ).isoformat()
+                RUN_META[job_id] = {
+                    "login_username": login_username,
+                    "target_username": target_username,
+                    "submitted_at": row.get("submitted_at") or started_at,
+                    "started_at": started_at,
+                    "state": "running",
+                    "source": source,
+                }
+                _run_state_set(job_id, "running")
+                RUN_FUTURES[job_id] = executor.submit(
+                    _execute_run_job,
+                    job_id,
+                    login_username,
+                    target_username,
+                    source,
+                )
+                dispatched = True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[run-dispatcher] loop error: {exc}", file=sys.stderr)
+        if dispatched:
+            time.sleep(0.25)
+        else:
+            time.sleep(1.0)
 
 
 def _queue_run(login_username, target_username, *, source="api", two_factor_code=None, challenge_code=None, rebuild=True):
@@ -5172,100 +5646,12 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
             target_username,
             f"job_id: {job_id}",
         )
-
-    def _runner():
-        started = datetime.now(LOCAL_TZ).isoformat()
-        meta = RUN_META.setdefault(
-            job_id,
-            {
-                "login_username": login_username,
-                "target_username": target_username,
-                "submitted_at": started,
-                "state": "queued",
-                "source": source,
-            },
-        )
-        meta["started_at"] = started
-        _run_state_set(job_id, "running")
-        try:
-            res = guarded_run(
-                login_username,
-                target_username,
-                source=source,
-                job_id=job_id,
-                two_factor_code=two_factor_code,
-                challenge_code=challenge_code,
-            )
-            finished = datetime.now(LOCAL_TZ).isoformat()
-            try:
-                elapsed = int((datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds())
-                if isinstance(res, dict) and res.get("run_id"):
-                    update_run_duration(DB_PATH_DEFAULT, res["run_id"], elapsed)
-                    conn = _get_db()
-                    try:
-                        _update_run_quality(conn, res["run_id"], login_username, target_username)
-                    finally:
-                        conn.close()
-            except Exception:
-                pass
-            job = ACTIVE_JOBS.get(login_username)
-            if job and isinstance(res, dict):
-                job["followers_total"] = res.get("followers_count")
-                job["following_total"] = res.get("followees_count")
-                job["phase"] = "done"
-            _run_state_set(job_id, "done", finished_at=finished)
-            _resolve_manual_actions_for(login_username, target_username, note=f"run succeeded ({job_id})")
-            _clear_run_cooldown(login_username)
-            _whatsapp_notify_run_event(
-                "run_done",
-                login_username,
-                target_username,
-                f"job_id: {job_id}",
-            )
-            return {"status": "success", "started_at": started, "finished_at": finished, "result": res}
-        except Exception as exc:  # noqa: BLE001
-            finished = datetime.now(LOCAL_TZ).isoformat()
-            code = getattr(exc, "code", None)
-            cooldown_seconds = 0
-            if str(code or "").strip().lower() in {"rate_limited", "feedback_required"}:
-                cooldown_seconds = _set_run_cooldown(login_username, code, str(exc))
-            terminal_state = _classify_terminal_run_state(code, str(exc), cooldown_seconds)
-            _run_state_set(
-                job_id,
-                terminal_state,
-                reason=str(code or exc.__class__.__name__),
-                finished_at=finished,
-                cooldown_seconds=cooldown_seconds if cooldown_seconds > 0 else None,
-            )
-            if terminal_state in {"challenge_required", "manual_required", "blocked"}:
-                action_type = str(code or terminal_state).strip().lower()
-                if action_type not in {"challenge_required", "two_factor_required"}:
-                    action_type = terminal_state
-                _enqueue_manual_action(
-                    login_username=login_username,
-                    target_username=target_username,
-                    job_id=job_id,
-                    action_type=action_type,
-                    reason=terminal_state,
-                    error_code=str(code or ""),
-                    error_message=str(exc),
-                )
-            _whatsapp_notify_run_event(
-                "run_error",
-                login_username,
-                target_username,
-                (
-                    f"job_id: {job_id} · error: {exc}"
-                    + (f" · cooldown: {cooldown_seconds}s" if cooldown_seconds > 0 else "")
-                ),
-            )
-            payload = {"status": "error", "started_at": started, "finished_at": finished, "error": str(exc)}
-            if code:
-                payload["error_code"] = code
-            if cooldown_seconds > 0:
-                payload["cooldown_seconds"] = cooldown_seconds
-            return payload
-
+    _create_run_job_record(
+        job_id=job_id,
+        login_username=login_username,
+        target_username=target_username,
+        source=source,
+    )
     RUN_META[job_id] = {
         "login_username": login_username,
         "target_username": target_username,
@@ -5274,7 +5660,11 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
         "source": source,
     }
     _run_state_set(job_id, "queued")
-    RUN_FUTURES[job_id] = executor.submit(_runner)
+    if two_factor_code or challenge_code:
+        RUN_INPUTS[job_id] = {
+            "two_factor_code": two_factor_code,
+            "challenge_code": challenge_code,
+        }
     return job_id
 
 
@@ -5328,16 +5718,37 @@ def api_run():
 
 @app.route("/api/run/<job_id>", methods=["GET"])
 def api_run_status(job_id):
-    fut = RUN_FUTURES.get(job_id)
-    if not fut:
+    record = _load_run_job_record(job_id)
+    if not record:
         return jsonify({"error": "unknown job_id"}), 404
-    if fut.done():
+    fut = RUN_FUTURES.get(job_id)
+    merged_meta = _run_record_meta(record) or {}
+    if RUN_META.get(job_id):
+        merged_meta.update(RUN_META.get(job_id) or {})
+        merged_meta["state"] = record.get("status")
+    terminal = str(record.get("status") or "").strip().lower() in RUN_STATE_TERMINAL
+    if fut and fut.done():
         try:
             payload = fut.result()
         except Exception as exc:  # noqa: BLE001
             payload = {"status": "error", "error": str(exc)}
-        return jsonify({"done": True, "payload": payload, "meta": RUN_META.get(job_id)})
-    return jsonify({"done": False, "meta": RUN_META.get(job_id)})
+        return jsonify({"done": True, "payload": payload, "meta": merged_meta})
+    if terminal:
+        payload = {
+            "status": "success" if record.get("status") == "done" else "error",
+            "started_at": record.get("started_at"),
+            "finished_at": record.get("finished_at"),
+        }
+        if record.get("result"):
+            payload["result"] = record.get("result")
+        if record.get("error_message"):
+            payload["error"] = record.get("error_message")
+        if record.get("error_code"):
+            payload["error_code"] = record.get("error_code")
+        if record.get("cooldown_seconds"):
+            payload["cooldown_seconds"] = record.get("cooldown_seconds")
+        return jsonify({"done": True, "payload": payload, "meta": merged_meta})
+    return jsonify({"done": False, "meta": merged_meta})
 
 
 @app.route("/api/jobs/<job_id>/detail", methods=["GET"])
@@ -5367,36 +5778,34 @@ def api_job_latest():
     login_username = (request.args.get("login_username") or "").strip()
     if not login_username:
         return jsonify({"error": "login_username is required"}), 400
-    job_id = LAST_JOB_BY_LOGIN.get(login_username)
-    if not job_id:
-        candidates = []
-        for jid, meta in RUN_META.items():
-            if meta.get("login_username") != login_username:
-                continue
-            submitted_at = meta.get("submitted_at")
-            if not submitted_at:
-                continue
-            try:
-                ts = datetime.fromisoformat(submitted_at)
-            except Exception:
-                ts = None
-            candidates.append((ts, jid))
-        if candidates:
-            candidates.sort(key=lambda x: x[0] or datetime.min, reverse=True)
-            job_id = candidates[0][1]
+    latest = _latest_run_job_for_login(login_username)
+    if not latest:
+        return jsonify({"error": "no job found for login"}), 404
+    job_id = str(latest.get("job_id") or "")
     if not job_id:
         return jsonify({"error": "no job found for login"}), 404
     job_dir = JOB_TMP_DIR / f"job_{job_id}"
+    payload = {
+        "job_id": job_id,
+        "meta": _run_record_meta(latest),
+        "status": latest.get("status"),
+        "db_result": None,
+    }
+    raw_result = latest.get("result_json")
+    if raw_result:
+        try:
+            payload["db_result"] = json.loads(raw_result)
+        except Exception:
+            payload["db_result"] = None
     if not job_dir.exists():
-        return jsonify({"error": "job not found"}), 404
+        return jsonify(payload)
     progress_path = job_dir / "progress.json"
     result_path = job_dir / "result.json"
     out_path = job_dir / "worker.out"
     err_path = job_dir / "worker.err"
     trace_path = job_dir / "trace.jsonl"
-    return jsonify(
+    payload.update(
         {
-            "job_id": job_id,
             "progress": _read_json_file(progress_path),
             "result": _read_json_file(result_path),
             "worker_out_tail": _tail_file(out_path, lines=60),
@@ -5404,6 +5813,7 @@ def api_job_latest():
             "trace_tail": _tail_file(trace_path, lines=80),
         }
     )
+    return jsonify(payload)
 
 
 @app.route("/api/status", methods=["GET"])
@@ -5427,23 +5837,16 @@ def api_status():
         if job.get("job_id"):
             active_job_ids.add(job["job_id"])
 
-    queued = []
-    inflight = []
-    for jid, meta in RUN_META.items():
-        fut = RUN_FUTURES.get(jid)
-        if not fut or fut.done():
-            continue
-        if meta.get("login_username") in active_logins:
-            continue
-        # Determine running vs queued based on meta state/started_at
-        if meta.get("state") == "running" or meta.get("started_at"):
-            inflight.append({"job_id": jid, "meta": meta})
-        else:
-            queued.append({"job_id": jid, "meta": meta})
+    queued_rows = _list_run_jobs_by_status("queued", limit=500)
+    running_rows = _list_run_jobs_by_status("running", limit=500)
+    queued = [{"job_id": row.get("job_id"), "meta": _run_record_meta(row)} for row in queued_rows]
 
-    # If we have inflight runs without ACTIVE_JOBS, surface them as running.
-    for item in inflight:
-        meta = item["meta"] or {}
+    # If we have DB running rows without ACTIVE_JOBS, surface them as running.
+    for row in running_rows:
+        job_id = str(row.get("job_id") or "")
+        if not job_id or job_id in active_job_ids:
+            continue
+        meta = _run_record_meta(row) or {}
         started_at = meta.get("started_at") or meta.get("submitted_at")
         try:
             started = datetime.fromisoformat(started_at) if started_at else None
@@ -5459,7 +5862,7 @@ def api_status():
                 "target_username": meta.get("target_username"),
                 "started_at": started_at,
                 "cancelled": False,
-                "job_id": item["job_id"],
+                "job_id": job_id,
                 "elapsed_seconds": elapsed,
                 "avg_duration_seconds": avg,
                 "eta_seconds": eta,
@@ -5994,10 +6397,14 @@ def api_run_cancel():
     target_username = data.get("target_username")
     job_id = data.get("job_id")
     worker_pid = None
+    queued_cancelled = False
+    record = None
+    if job_id:
+        record = _load_run_job_record(str(job_id))
     if (not login_username or not target_username) and job_id:
-        meta = RUN_META.get(job_id) or {}
-        login_username = login_username or meta.get("login_username")
-        target_username = target_username or meta.get("target_username")
+        meta = RUN_META.get(job_id) or _run_record_meta(record) or {}
+        login_username = login_username or meta.get("login_username") or (record or {}).get("login_username")
+        target_username = target_username or meta.get("target_username") or (record or {}).get("target_username")
         if not login_username or not target_username:
             for login, job in list(ACTIVE_JOBS.items()):
                 if job.get("job_id") == job_id:
@@ -6005,10 +6412,25 @@ def api_run_cancel():
                     target_username = target_username or job.get("target_username")
                     worker_pid = job.get("worker_pid")
                     break
+    if record and str(record.get("status") or "") == "queued":
+        _update_run_job_record(
+            str(job_id),
+            status="cancelled",
+            finished_at=datetime.now(LOCAL_TZ).isoformat(),
+            cancel_requested=True,
+            state_reason="cancel_requested",
+            error_message="job cancelled while queued",
+        )
+        _record_run_job_event(str(job_id), "cancelled", {"reason": "cancel_requested", "phase": "queued"})
+        _run_state_set(str(job_id), "cancelled", reason="cancel_requested")
+        queued_cancelled = True
     if not login_username or not target_username:
         return jsonify({"error": "login_username and target_username are required"}), 400
     # mark cancel
     CANCEL_REQUESTS.add((login_username, target_username))
+    if job_id and record and str(record.get("status") or "") == "running":
+        _update_run_job_record(str(job_id), cancel_requested=True, state_reason="cancel_requested")
+        _record_run_job_event(str(job_id), "cancel_requested", {"phase": "running"})
     # best-effort: if current active matches, mark cancelled flag
     job = ACTIVE_JOBS.get(login_username)
     if job and job.get("target_username") == target_username:
@@ -6021,9 +6443,9 @@ def api_run_cancel():
             os.kill(int(worker_pid), signal.SIGTERM)
         except Exception:
             pass
-    if job_id and (job_id in RUN_META):
+    if job_id and (job_id in RUN_META) and queued_cancelled:
         _run_state_set(job_id, "cancelled", reason="cancel_requested")
-    return jsonify({"cancelled": True})
+    return jsonify({"cancelled": True, "queued_cancelled": queued_cancelled})
 
 
 @app.route("/api/run/<int:run_id>", methods=["DELETE"])
