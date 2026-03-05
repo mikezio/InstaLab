@@ -2095,11 +2095,8 @@ def _account_create_worker(
                         proxy.get("username") or "",
                         proxy.get("password") or "",
                     )
-                if not proxy_url:
-                    raise RuntimeError("proxy unavailable for private_api signup")
-                _log_account_create(
-                    f"signup attempt {attempt}/3 via proxy session {session_id[:8]}"
-                )
+                mode = f"proxy session {session_id[:8]}" if proxy_url else "direct network"
+                _log_account_create(f"signup attempt {attempt}/{max_attempts} via {mode}")
                 try:
                     result = signup_account_private_api(
                         login_username=login_username,
@@ -4220,17 +4217,6 @@ def api_logins_create_start():
         return jsonify({"error": "login_password must be at least 6 characters"}), 400
     if strategy not in {"private_api", "guided_browser"}:
         return jsonify({"error": "strategy must be private_api or guided_browser"}), 400
-    if strategy == "private_api":
-        proxy_check = _get_proxy_config(
-            session_id=_generate_proxy_session_id(login_username=login_username),
-            login_username=login_username,
-        )
-        if not proxy_check.get("enabled"):
-            return jsonify({"error": "private_api signup requires proxy_enabled=true"}), 400
-        if not proxy_check.get("host") or not proxy_check.get("port"):
-            return jsonify({"error": "private_api signup requires proxy host/port"}), 400
-        if not proxy_check.get("username") or not proxy_check.get("password"):
-            return jsonify({"error": "private_api signup requires proxy username/password"}), 400
     if strategy == "guided_browser" and not os.getenv("DISPLAY"):
         return jsonify({"error": "guided_browser strategy requires a display server (DISPLAY not set)"}), 400
     if schedule_interval:
