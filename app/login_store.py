@@ -175,6 +175,15 @@ def upsert_login(
     enc_totp = encrypt_value(totp_seed)
     enc_challenge = encrypt_value(challenge_code)
     enc_new_password = encrypt_value(new_password)
+    existing_challenge = existing.get("challenge_code") if existing else None
+    existing_challenge_at = existing.get("challenge_code_at") if existing else None
+    if challenge_code:
+        if challenge_code != existing_challenge or not existing_challenge_at:
+            challenge_code_at = _utc_now()
+        else:
+            challenge_code_at = existing_challenge_at
+    else:
+        challenge_code_at = None
 
     conn = get_db()
     try:
@@ -205,7 +214,7 @@ def upsert_login(
                     enc_password,
                     enc_totp,
                     enc_challenge,
-                    _utc_now() if challenge_code else None,
+                    challenge_code_at,
                     enc_new_password,
                     cookie_file,
                     disabled,
@@ -231,7 +240,7 @@ def upsert_login(
                     enc_password,
                     enc_totp,
                     enc_challenge,
-                    _utc_now() if challenge_code else None,
+                    challenge_code_at,
                     enc_new_password,
                     cookie_file,
                     disabled,

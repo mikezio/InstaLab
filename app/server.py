@@ -334,6 +334,16 @@ def _is_anonymous_run_login_mode(value: str | None) -> bool:
     return _normalize_run_login_mode(value) == "anonymous"
 
 
+def _session_stale_threshold() -> int:
+    try:
+        from private_api_tracker import SESSION_STALE_THRESHOLD
+
+        value = int(SESSION_STALE_THRESHOLD)
+    except Exception:
+        value = 3
+    return max(1, value)
+
+
 def _normalize_scraper_backend(value: str | None) -> str:
     backend = str(value or "browser").strip().lower()
     backend = SCRAPER_BACKEND_ALIASES.get(backend, backend)
@@ -3550,7 +3560,7 @@ def api_logins():
                 "last_error": entry.get("last_error"),
                 "session_fail_streak": fail_streak,
                 "session_last_fail_at": entry.get("session_last_fail_at"),
-                "session_marked_stale": fail_streak >= 3,
+                "session_marked_stale": fail_streak >= _session_stale_threshold(),
                 "two_factor_method": auth_state.get("two_factor_method"),
                 "auth_last_event": auth_state.get("last_event"),
                 "auth_last_event_at": auth_state.get("last_event_at"),
@@ -3614,7 +3624,7 @@ def api_logins_auth_preflight():
     abs_skew = int(clock_skew.get("abs_skew_seconds") or 0) if clock_skew.get("ok") else None
     if abs_skew is not None and abs_skew > 15:
         warnings.append(f"clock skew is high ({abs_skew}s); TOTP can fail when skew exceeds ~15s")
-    if fail_streak >= 3:
+    if fail_streak >= _session_stale_threshold():
         warnings.append("session marked stale after repeated session validation failures; re-init login is recommended")
     if auth_state.get("two_factor_method") == "unknown":
         warnings.append("two-factor method not confirmed yet; run one login to detect TOTP/SMS/email path")
@@ -3629,7 +3639,7 @@ def api_logins_auth_preflight():
             "has_password": bool(entry.get("has_password")),
             "has_totp_seed": bool(entry.get("has_totp_seed")),
             "session_fail_streak": fail_streak,
-            "session_marked_stale": fail_streak >= 3,
+            "session_marked_stale": fail_streak >= _session_stale_threshold(),
             "session_last_fail_at": entry.get("session_last_fail_at"),
             "two_factor_method": auth_state.get("two_factor_method"),
             "clock_skew": clock_skew,
