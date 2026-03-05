@@ -68,6 +68,14 @@ Example:
 feat(api): add rate limiting
 ```
 
+### API/Private-Flow Change Workflow (required)
+- Start from `dev` and create a dedicated branch for each API/private-flow change.
+- Keep commits small and scoped to one coherent behavior change.
+- Push early and often so every step is recoverable in GitHub history.
+- Open a PR to `dev` for any meaningful API/private-flow update (draft PR is fine while iterating).
+- Prefer one squash merge per completed fix/feature into `dev` to keep rollback simple.
+- If behavior changes, include a short risk note and rollback note in the PR description.
+
 ## Testing
 
 ### Python
