@@ -41,7 +41,8 @@ from tracker_db import (
     write_run_metadata,
     _init_db as _init_run_db,
 )
-from unfollow_bot import AuthRequiredError, create_account_guided, ensure_auth_state, unfollow_users, init_login
+from account_browser_flow import AuthRequiredError, create_account_guided, ensure_auth_state, init_login
+from unfollow_bot import unfollow_users
 from db import get_db, get_columns, ddl, is_postgres
 from login_store import (
     clear_session_settings,
