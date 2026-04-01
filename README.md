@@ -1,6 +1,6 @@
 # InstaLab
 
-InstaLab is an operations console for Instagram snapshot runs (followers/following), scheduling, run history, insights, and unfollow cleanup. It runs as a two-container stack: Flask API + Django UI. Collection supports two backends: **browser** (Playwright session, default) and **private** (`instagrapi`).
+InstaLab is an operations console for Instagram snapshot runs (followers/following), scheduling, run history, insights, and unfollow cleanup. It runs as a two-container stack: Flask API + Django UI. Collection supports two collector families: **browser** (web session collectors) and **private_api** (`instagrapi`).
 
 ## What you get
 - Single‑pane UI for queueing runs, viewing history, and monitoring status.
@@ -43,9 +43,12 @@ If you already have Postgres running, set the `INSTALAB_DB_*` values in `.env` a
 - Default DB name/user: `instalab` (see `docker-compose.local-postgres.yml`).
 
 ## Authentication flow
-- Browser backend (default): initialize collector auth via `POST /api/collector/auth/init` for a specific `login_username`, then confirm readiness with `GET /api/collector/auth/status?login_username=<login>`. Browser auth state is stored per login under `INSTALAB_BROWSER_STORAGE_DIR` (default `/data/instalab/browser/<login>.json`).
-- Private backend (`instagrapi`): logins are stored in Postgres `login_accounts` and encrypted at rest.
-- For private backend, a first successful login caches session settings; subsequent runs reuse the session.
+- Browser collector family: initialize collector auth via `POST /api/collector/auth/init` for a specific `login_username`, then confirm readiness with `GET /api/collector/auth/status?login_username=<login>`. Browser auth state is stored per login under `INSTALAB_BROWSER_STORAGE_DIR` (default `/data/instalab/browser/<login>.json`).
+- Browser collection method: when `run_scraper_backend=browser`, the concrete browser collector is selected by `run_browser_collection_method`:
+  - `browser_native` for live browser collection plus browser/web-session top-off
+  - `instaloader_session` for dedicated-session Instaloader using the per-login browser session
+- Private API collector family (`instagrapi`): logins are stored in Postgres `login_accounts` and encrypted at rest.
+- For the private API family, a first successful login caches session settings; subsequent runs reuse the session.
 - 2FA is supported via TOTP or SMS/email challenge codes.
 - Device profile settings are persisted to avoid “new device” loops.
 - Collector setup and collector->target execution runbook: [docs/COLLECTOR_TARGET_SETUP_FLOW.md](docs/COLLECTOR_TARGET_SETUP_FLOW.md).

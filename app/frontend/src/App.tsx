@@ -318,7 +318,7 @@ function scheduleSummary(schedule: {
 function sectionSummary(section: string, keys: string[]): string {
   switch (section) {
     case "Run":
-      return "Collector backend, pacing, and timeout controls.";
+      return "Collector family, collection method, pacing, and timeout controls.";
     case "Proxy":
       return "Proxy reachability and credential handling.";
     case "Schedule":
@@ -330,6 +330,20 @@ function sectionSummary(section: string, keys: string[]): string {
     default:
       return `${keys.length} additional runtime setting${keys.length === 1 ? "" : "s"}.`;
   }
+}
+
+function collectorFamilyLabel(value: string | undefined): string {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "browser") return "browser web session";
+  if (normalized === "private" || normalized === "private_api") return "private API (instagrapi)";
+  return normalized || "-";
+}
+
+function browserCollectionMethodLabel(value: string | undefined): string {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "browser_native") return "browser_native - live browser collection";
+  if (normalized === "instaloader_session") return "instaloader_session - dedicated session";
+  return normalized || "-";
 }
 
 function AppShell({ children }: { children: React.ReactNode }) {
@@ -1578,8 +1592,12 @@ function SystemPage() {
               </div>
               <div className="summary-lineup">
                 <div className="summary-pill">
-                  <span>Backend</span>
-                  <strong>{config?.run_scraper_backend || "-"}</strong>
+                  <span>Collector family</span>
+                  <strong>{collectorFamilyLabel(config?.run_scraper_backend)}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span>Browser method</span>
+                  <strong>{browserCollectionMethodLabel(config?.run_browser_collection_method)}</strong>
                 </div>
                 <div className="summary-pill">
                   <span>Login mode</span>
@@ -3199,11 +3217,19 @@ function SettingsPage() {
   };
 
   const labelForKey = (key: string): string =>
-    key
-      .replace(/_set$/, " configured")
-      .split("_")
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(" ");
+    {
+      const customLabels: Record<string, string> = {
+        run_scraper_backend: "Collector Family",
+        run_browser_collection_method: "Browser Collection Method",
+        run_login_mode: "Login Mode",
+      };
+      if (customLabels[key]) return customLabels[key];
+      return key
+        .replace(/_set$/, " configured")
+        .split("_")
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+    };
 
   const onSaveConfig = () => {
     const payload: Partial<ConfigValues> & { proxy_password?: string; _apply_backend_profile?: boolean } = {};
@@ -3255,8 +3281,8 @@ function SettingsPage() {
           <strong>{numericCount}</strong>
         </article>
         <article className="dossier-cell">
-          <span>Backend</span>
-          <strong>{String(draft.run_scraper_backend || "-")}</strong>
+          <span>Collector Family</span>
+          <strong>{collectorFamilyLabel(String(draft.run_scraper_backend || "-"))}</strong>
         </article>
       </div>
       {!cfgQ.data?.config ? (
@@ -3298,10 +3324,25 @@ function SettingsPage() {
                           })
                         }
                       >
-                        <option value="browser">browser (web session)</option>
-                        <option value="private">instagrapi (private API)</option>
+                        <option value="browser">browser - web session collectors</option>
+                        <option value="private">private_api - instagrapi</option>
                       </select>
-                      <span className="hint">Switching backend auto-loads the tuned delay/rate profile.</span>
+                      <span className="hint">This chooses the collector family. Switching families auto-loads the tuned delay and rate profile.</span>
+                    </label>
+                  );
+                }
+                if (key === "run_browser_collection_method") {
+                  return (
+                    <label key={key}>
+                      {labelForKey(key)}
+                      <select
+                        value={String(value)}
+                        onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
+                      >
+                        <option value="browser_native">browser_native - live browser dialog plus web top-off</option>
+                        <option value="instaloader_session">instaloader_session - dedicated logged-in session</option>
+                      </select>
+                      <span className="hint">Used only when Collector Family is set to browser.</span>
                     </label>
                   );
                 }

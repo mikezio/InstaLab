@@ -1,11 +1,15 @@
 import json
 
 from account_browser_flow import storage_state_has_session
+from browser_tracker import current_browser_collection_method
 from browser_tracker import _friendship_users_payload
 from browser_tracker import _graphql_edge_payload
 from browser_tracker import _web_profile_payload
 from browser_tracker import _visibility_limited_message as browser_visibility_limited_message
+from browser_tracker import fetch_counts
+from browser_tracker import normalize_browser_collection_method
 from private_api_tracker import _visibility_limited_message as private_visibility_limited_message
+import browser_tracker
 
 
 def test_storage_state_has_session_requires_instagram_session_cookie(tmp_path):
@@ -193,3 +197,65 @@ def test_friendship_users_payload_extracts_users_and_next_max_id():
     users, next_max_id = _friendship_users_payload(payload, "followers")
     assert [user["username"] for user in users] == ["alice", "bob"]
     assert next_max_id == "abc123"
+
+
+def test_normalize_browser_collection_method_aliases():
+    assert normalize_browser_collection_method("instaloader") == "instaloader_session"
+    assert normalize_browser_collection_method("dedicated-session") == "instaloader_session"
+    assert normalize_browser_collection_method("native") == "browser_native"
+    assert normalize_browser_collection_method("unknown") == "browser_native"
+
+
+def test_current_browser_collection_method_prefers_run_env(monkeypatch):
+    monkeypatch.setenv("INSTALAB_BROWSER_COLLECTION_METHOD", "browser_native")
+    monkeypatch.setenv("RUN_BROWSER_COLLECTION_METHOD", "instaloader")
+    assert current_browser_collection_method() == "instaloader_session"
+
+
+def test_fetch_counts_uses_instaloader_session_method(monkeypatch):
+    called = {}
+
+    def fake_instaloader(**kwargs):
+        called["instaloader"] = kwargs
+        return {"timestamp": "2026-01-01_00-00-00", "followers_count": 12, "followees_count": 9}
+
+    def fail_native(**kwargs):
+        raise AssertionError("browser-native path should not be used")
+
+    monkeypatch.setenv("RUN_BROWSER_COLLECTION_METHOD", "instaloader_session")
+    monkeypatch.setattr(browser_tracker, "_fetch_counts_instaloader_session", fake_instaloader)
+    monkeypatch.setattr(browser_tracker, "_fetch_counts_browser_native", fail_native)
+
+    result = fetch_counts(
+        login_username="iglab2026fl",
+        login_password="secret",
+        target_username="target",
+        http_timeout_seconds=120,
+        login_mode="session_only",
+    )
+    assert result["followers_count"] == 12
+    assert called["instaloader"]["login_username"] == "iglab2026fl"
+
+
+def test_snapshot_profile_uses_instaloader_session_method(monkeypatch):
+    called = {}
+
+    def fake_instaloader(**kwargs):
+        called["instaloader"] = kwargs
+        return {"timestamp": "2026-01-01_00-00-00", "followers_count": 12, "followees_count": 9, "run_id": 7}
+
+    def fail_native(**kwargs):
+        raise AssertionError("browser-native path should not be used")
+
+    monkeypatch.setenv("RUN_BROWSER_COLLECTION_METHOD", "instaloader")
+    monkeypatch.setattr(browser_tracker, "_snapshot_profile_instaloader_session", fake_instaloader)
+    monkeypatch.setattr(browser_tracker, "_snapshot_profile_browser_native", fail_native)
+
+    result = browser_tracker.snapshot_profile(
+        login_username="iglab2026fl",
+        login_password="secret",
+        target_username="target",
+        db_path="/tmp/test.db",
+    )
+    assert result["run_id"] == 7
+    assert called["instaloader"]["login_username"] == "iglab2026fl"

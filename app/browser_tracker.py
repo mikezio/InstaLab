@@ -64,6 +64,16 @@ FOLLOWERS_QUERY_HASH = "37479f2b8209594dde7facb0d904896a"
 FOLLOWING_QUERY_HASH = "58712303d941c6855d4e888c5f0cd22f"
 INSTAGRAM_WEB_APP_ID = "936619743392459"
 INSTAGRAM_AJAX_VERSION = "1011846198"
+BROWSER_COLLECTION_METHOD_ALLOWED = {"browser_native", "instaloader_session"}
+BROWSER_COLLECTION_METHOD_ALIASES = {
+    "native": "browser_native",
+    "playwright_native": "browser_native",
+    "playwright-native": "browser_native",
+    "instaloader": "instaloader_session",
+    "session": "instaloader_session",
+    "dedicated_session": "instaloader_session",
+    "dedicated-session": "instaloader_session",
+}
 
 
 class BrowserTrackerError(RuntimeError):
@@ -102,6 +112,22 @@ def _normalize_login_mode(login_mode: str | None) -> str:
 
 def _is_anonymous_login_mode(login_mode: str | None) -> bool:
     return _normalize_login_mode(login_mode) in ANONYMOUS_LOGIN_MODES
+
+
+def normalize_browser_collection_method(value: str | None) -> str:
+    method = str(value or "browser_native").strip().lower()
+    method = BROWSER_COLLECTION_METHOD_ALIASES.get(method, method)
+    if method not in BROWSER_COLLECTION_METHOD_ALLOWED:
+        return "browser_native"
+    return method
+
+
+def current_browser_collection_method() -> str:
+    return normalize_browser_collection_method(
+        os.getenv("RUN_BROWSER_COLLECTION_METHOD")
+        or os.getenv("INSTALAB_BROWSER_COLLECTION_METHOD")
+        or "browser_native"
+    )
 
 
 def _safe_username(value: str) -> str:
@@ -1790,25 +1816,13 @@ def _with_browser_context(login_username: str, login_mode: str, fn, *, timeout_m
             context.close()
 
 
-def fetch_counts(
+def _fetch_counts_browser_native(
     *,
     login_username: str,
-    login_password: str,
     target_username: str,
-    cookie_file=None,
-    http_timeout_seconds: float = 120.0,
-    request_sleep_seconds: float = 0.0,
-    login_mode: str = "auto",
-    two_factor_code=None,
-    challenge_code=None,
-    totp_seed=None,
-    delay_min: float = 0.0,
-    delay_max: float = 0.0,
-    device_settings_json=None,
-    user_agent=None,
+    http_timeout_seconds: float,
+    login_mode: str,
 ):
-    del login_password, cookie_file, request_sleep_seconds
-    del two_factor_code, challenge_code, totp_seed, device_settings_json, delay_min, delay_max
     timeout_ms = max(15000, int(float(http_timeout_seconds or 120.0) * 1000))
 
     def _runner(page):
@@ -1836,40 +1850,86 @@ def fetch_counts(
         raise BrowserTrackerError("browser_error", str(exc)) from exc
 
 
-def snapshot_profile(
+def _fetch_counts_instaloader_session(
+    *,
+    login_username: str,
+    target_username: str,
+    http_timeout_seconds: float,
+    login_mode: str,
+    user_agent: str | None = None,
+):
+    try:
+        profile = _fetch_profile_via_instaloader(
+            login_username=login_username,
+            target_username=target_username,
+            login_mode=login_mode,
+            http_timeout_seconds=float(http_timeout_seconds or 120.0),
+            user_agent=user_agent,
+        )
+        return {
+            "timestamp": _now_snapshot_ts(),
+            "followers_count": int(profile["followers_count"]),
+            "followees_count": int(profile["followees_count"]),
+        }
+    except Exception as exc:
+        raise _map_instaloader_exception(exc) from exc
+
+
+def fetch_counts(
     *,
     login_username: str,
     login_password: str,
     target_username: str,
     cookie_file=None,
-    http_timeout_seconds: float = 600.0,
+    http_timeout_seconds: float = 120.0,
     request_sleep_seconds: float = 0.0,
-    db_path: str = "tracker_data.db",
-    profile_only: bool = False,
     login_mode: str = "auto",
-    item_delay_min: float = 0.25,
-    item_delay_max: float = 0.75,
-    fetch_order: str = "followers_first",
-    initial_fetch_delay_seconds: float = 0.0,
-    pause_every_min: int = 0,
-    pause_every_max: int = 0,
-    pause_seconds_min: float = 0.0,
-    pause_seconds_max: float = 0.0,
-    trace_enabled: bool = False,
-    trace_path: str = "",
     two_factor_code=None,
     challenge_code=None,
     totp_seed=None,
+    delay_min: float = 0.0,
+    delay_max: float = 0.0,
     device_settings_json=None,
     user_agent=None,
+):
+    del login_password, cookie_file, request_sleep_seconds
+    del two_factor_code, challenge_code, totp_seed, device_settings_json, delay_min, delay_max
+    method = current_browser_collection_method()
+    if method == "instaloader_session":
+        return _fetch_counts_instaloader_session(
+            login_username=login_username,
+            target_username=target_username,
+            http_timeout_seconds=http_timeout_seconds,
+            login_mode=login_mode,
+            user_agent=user_agent,
+        )
+    return _fetch_counts_browser_native(
+        login_username=login_username,
+        target_username=target_username,
+        http_timeout_seconds=http_timeout_seconds,
+        login_mode=login_mode,
+    )
+
+
+def _snapshot_profile_browser_native(
+    *,
+    login_username: str,
+    target_username: str,
+    db_path: str,
+    profile_only: bool,
+    login_mode: str,
+    http_timeout_seconds: float,
+    item_delay_min: float,
+    item_delay_max: float,
+    fetch_order: str,
+    initial_fetch_delay_seconds: float,
+    pause_every_min: int,
+    pause_every_max: int,
+    pause_seconds_min: float,
+    pause_seconds_max: float,
     progress=None,
     artifact_dir: str | None = None,
 ):
-    del login_password, cookie_file, request_sleep_seconds
-    del trace_enabled, trace_path, two_factor_code, challenge_code, totp_seed, device_settings_json
-    if progress:
-        progress("bootstrap", 0)
-
     timestamp = _now_snapshot_ts()
     timeout_ms = max(15000, int(float(http_timeout_seconds or 600.0) * 1000))
 
@@ -2128,6 +2188,28 @@ def snapshot_profile(
         raise BrowserTrackerError("timeout", f"browser timeout during snapshot: {exc}") from exc
     except Exception as exc:
         raise BrowserTrackerError("browser_error", str(exc)) from exc
+
+
+def _snapshot_profile_instaloader_session(
+    *,
+    login_username: str,
+    target_username: str,
+    db_path: str,
+    profile_only: bool,
+    login_mode: str,
+    http_timeout_seconds: float,
+    item_delay_min: float,
+    item_delay_max: float,
+    fetch_order: str,
+    initial_fetch_delay_seconds: float,
+    pause_every_min: int,
+    pause_every_max: int,
+    pause_seconds_min: float,
+    pause_seconds_max: float,
+    user_agent: str | None = None,
+    progress=None,
+):
+    timestamp = _now_snapshot_ts()
     try:
         loader = _load_logged_in_instaloader(
             login_username=login_username,
@@ -2257,3 +2339,66 @@ def snapshot_profile(
         }
     except Exception as exc:
         raise _map_instaloader_exception(exc) from exc
+
+
+def snapshot_profile(
+    *,
+    login_username: str,
+    login_password: str,
+    target_username: str,
+    cookie_file=None,
+    http_timeout_seconds: float = 600.0,
+    request_sleep_seconds: float = 0.0,
+    db_path: str = "tracker_data.db",
+    profile_only: bool = False,
+    login_mode: str = "auto",
+    item_delay_min: float = 0.25,
+    item_delay_max: float = 0.75,
+    fetch_order: str = "followers_first",
+    initial_fetch_delay_seconds: float = 0.0,
+    pause_every_min: int = 0,
+    pause_every_max: int = 0,
+    pause_seconds_min: float = 0.0,
+    pause_seconds_max: float = 0.0,
+    trace_enabled: bool = False,
+    trace_path: str = "",
+    two_factor_code=None,
+    challenge_code=None,
+    totp_seed=None,
+    device_settings_json=None,
+    user_agent=None,
+    progress=None,
+    artifact_dir: str | None = None,
+):
+    del login_password, cookie_file, request_sleep_seconds
+    del trace_enabled, trace_path, two_factor_code, challenge_code, totp_seed, device_settings_json
+    if progress:
+        progress("bootstrap", 0)
+
+    method = current_browser_collection_method()
+    common_kwargs = {
+        "login_username": login_username,
+        "target_username": target_username,
+        "db_path": db_path,
+        "profile_only": profile_only,
+        "login_mode": login_mode,
+        "http_timeout_seconds": http_timeout_seconds,
+        "item_delay_min": item_delay_min,
+        "item_delay_max": item_delay_max,
+        "fetch_order": fetch_order,
+        "initial_fetch_delay_seconds": initial_fetch_delay_seconds,
+        "pause_every_min": pause_every_min,
+        "pause_every_max": pause_every_max,
+        "pause_seconds_min": pause_seconds_min,
+        "pause_seconds_max": pause_seconds_max,
+        "progress": progress,
+    }
+    if method == "instaloader_session":
+        return _snapshot_profile_instaloader_session(
+            **common_kwargs,
+            user_agent=user_agent,
+        )
+    return _snapshot_profile_browser_native(
+        **common_kwargs,
+        artifact_dir=artifact_dir,
+    )

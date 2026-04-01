@@ -351,6 +351,10 @@ Returns current config + defaults (masked for sensitive values).
 
 Update config values. If `proxy_enabled` is true, host/port/user/pass are required.
 
+Relevant runtime keys include:
+- `run_scraper_backend`: collector family, either `browser` or `private` (`private_api` is accepted as a compatibility alias)
+- `run_browser_collection_method`: browser collector method, either `browser_native` or `instaloader_session` when the collector family is `browser`
+
 ---
 
 ## Integrations

@@ -1,5 +1,5 @@
 """
-Lightweight web control panel + scheduler for the InstaLab private API pipeline.
+Lightweight web control panel + scheduler for InstaLab collector pipelines.
 
 Features:
 - One-off runs via /api/run
@@ -302,6 +302,16 @@ SCRAPER_BACKEND_ALIASES = {
     "guided_browser": "browser",
     "playwright": "browser",
 }
+BROWSER_COLLECTION_METHOD_ALLOWED = {"browser_native", "instaloader_session"}
+BROWSER_COLLECTION_METHOD_ALIASES = {
+    "native": "browser_native",
+    "playwright_native": "browser_native",
+    "playwright-native": "browser_native",
+    "instaloader": "instaloader_session",
+    "session": "instaloader_session",
+    "dedicated_session": "instaloader_session",
+    "dedicated-session": "instaloader_session",
+}
 
 SCHEDULE_MODE_ALLOWED = {"full_run", "count_watch"}
 SCHEDULE_MODE_ALIASES = {
@@ -336,7 +346,7 @@ WEEKDAY_LABELS = {
 }
 
 RUN_BACKEND_TUNING_PROFILES = {
-    # Safer cadence for instagrapi/private API to reduce throttling risk.
+    # Safer cadence for the instagrapi/private API collector family.
     "private": {
         "run_http_timeout_seconds": 60.0,
         "run_request_timeout": 60.0,
@@ -399,6 +409,14 @@ def _normalize_scraper_backend(value: str | None) -> str:
 
 def _is_private_backend_name(value: str | None) -> bool:
     return _normalize_scraper_backend(value) == "private"
+
+
+def _normalize_browser_collection_method(value: str | None) -> str:
+    method = str(value or "browser_native").strip().lower()
+    method = BROWSER_COLLECTION_METHOD_ALIASES.get(method, method)
+    if method not in BROWSER_COLLECTION_METHOD_ALLOWED:
+        return "browser_native"
+    return method
 
 
 def _normalize_schedule_mode(value: str | None) -> str:
@@ -562,6 +580,9 @@ CONFIG_DEFAULTS = {
     "run_profile_only": os.getenv("RUN_PROFILE_ONLY", "false").lower() in {"1", "true", "yes", "on"},
     "run_login_mode": _normalize_run_login_mode(os.getenv("RUN_LOGIN_MODE", "auto")),
     "run_scraper_backend": _normalize_scraper_backend(os.getenv("INSTALAB_SCRAPER_BACKEND", "browser")),
+    "run_browser_collection_method": _normalize_browser_collection_method(
+        os.getenv("INSTALAB_BROWSER_COLLECTION_METHOD", "browser_native")
+    ),
     "private_device_settings_json": os.getenv("INSTALAB_PRIVATE_DEVICE_SETTINGS_JSON", ""),
     "private_user_agent": os.getenv("INSTALAB_PRIVATE_USER_AGENT", ""),
     "proxy_enabled": os.getenv("INSTALAB_PROXY_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
@@ -625,6 +646,7 @@ CONFIG_SCHEMA = {
     "run_profile_only": {"type": "bool"},
     "run_login_mode": {"type": "str", "allowed": RUN_LOGIN_MODE_ALLOWED},
     "run_scraper_backend": {"type": "str", "allowed": SCRAPER_BACKEND_ALLOWED},
+    "run_browser_collection_method": {"type": "str", "allowed": BROWSER_COLLECTION_METHOD_ALLOWED},
     "private_device_settings_json": {"type": "str"},
     "private_user_agent": {"type": "str"},
     "proxy_enabled": {"type": "bool"},
@@ -1294,6 +1316,8 @@ def _coerce_config_value(key, value, strict=False):
                 sv = _normalize_run_login_mode(value)
             elif key == "run_scraper_backend":
                 sv = _normalize_scraper_backend(value)
+            elif key == "run_browser_collection_method":
+                sv = _normalize_browser_collection_method(value)
             else:
                 sv = str(value).strip()
             allowed = schema.get("allowed")
@@ -2788,6 +2812,9 @@ def _fetch_count_watch_sample(login_username, target_username, *, config_overrid
     env = os.environ.copy()
     env["INSTALAB_SCRAPER_BACKEND"] = scraper_backend
     env["SCRAPER_BACKEND"] = scraper_backend
+    env["RUN_BROWSER_COLLECTION_METHOD"] = _normalize_browser_collection_method(
+        _cfg("run_browser_collection_method", "browser_native")
+    )
     env["RUN_LOGIN_MODE"] = login_mode
     if creds.get("login_password"):
         env["RUN_LOGIN_PASSWORD"] = creds["login_password"]
@@ -3317,6 +3344,9 @@ def run_snapshot(
     if trace_enabled:
         env["RUN_TRACE_PATH"] = str(job_dir / "trace.jsonl")
     env["RUN_PROFILE_ONLY"] = "true" if profile_only else "false"
+    env["RUN_BROWSER_COLLECTION_METHOD"] = _normalize_browser_collection_method(
+        _cfg("run_browser_collection_method", "browser_native")
+    )
     cmd = [
         sys.executable,
         str(BASE_DIR / "snapshot_worker.py"),
@@ -7056,6 +7086,10 @@ def api_config_update():
             cleaned[key] = value
         if "run_scraper_backend" in cleaned:
             cleaned["run_scraper_backend"] = _normalize_scraper_backend(cleaned.get("run_scraper_backend"))
+        if "run_browser_collection_method" in cleaned:
+            cleaned["run_browser_collection_method"] = _normalize_browser_collection_method(
+                cleaned.get("run_browser_collection_method")
+            )
         if apply_backend_profile:
             profile_applied_backend = str(
                 cleaned.get("run_scraper_backend", _get_config_value("run_scraper_backend", "browser"))

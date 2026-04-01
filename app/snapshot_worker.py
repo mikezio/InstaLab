@@ -19,7 +19,7 @@ def _select_backend():
         from browser_tracker import has_session, snapshot_profile  # type: ignore
         return has_session, snapshot_profile
     raise RuntimeError(
-        "unsupported backend; set INSTALAB_SCRAPER_BACKEND=private or INSTALAB_SCRAPER_BACKEND=browser"
+        "unsupported collector family; set INSTALAB_SCRAPER_BACKEND=private or INSTALAB_SCRAPER_BACKEND=browser"
     )
 
 
@@ -83,6 +83,7 @@ def main():
     http_timeout_seconds = float(args.http_timeout if args.http_timeout is not None else (args.request_timeout if args.request_timeout is not None else 600.0))
     request_sleep_seconds = float(args.request_sleep if args.request_sleep is not None else (os.environ.get("RUN_PRIVATE_REQUEST_SLEEP_SECONDS") or 0))
     backend_name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "browser").strip().lower()
+    browser_collection_method = (os.getenv("RUN_BROWSER_COLLECTION_METHOD") or os.getenv("INSTALAB_BROWSER_COLLECTION_METHOD") or "browser_native").strip().lower()
     proxy_set = bool(os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"))
     proxy_enabled_flag = str(os.environ.get("INSTALAB_PROXY_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
     proxy_session_id = (os.environ.get("RUN_PROXY_SESSION_ID") or "").strip()
@@ -90,6 +91,8 @@ def main():
     run_post_login_flow = str(os.environ.get("RUN_POST_LOGIN_FLOW", "")).strip().lower() in {"1", "true", "yes", "on"}
     proxy_access_mode = "native"
     print(f"Proxy enabled: {'yes' if proxy_set else 'no'}")
+    if backend_name in {"browser", "guided_browser", "playwright"}:
+        print(f"Browser collection method: {browser_collection_method}")
     if proxy_session_id:
         print(f"Proxy session id: {proxy_session_id}")
     print(f"Run pre-login flow: {'enabled' if run_pre_login_flow else 'disabled'}")
