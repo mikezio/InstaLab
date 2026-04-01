@@ -259,10 +259,11 @@ def _get_previous_run(conn, target_username):
         SELECT id, timestamp
         FROM runs
         WHERE target_username = ?
+          AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
         ORDER BY timestamp DESC, id DESC
         LIMIT 1
         """,
-        (target_username,),
+        (target_username, "%profile_only%"),
     )
     row = cur.fetchone()
     if not row:

@@ -83,6 +83,15 @@ function usernameKey(value?: string): string {
   return normalizeUsername(value).toLowerCase();
 }
 
+const targetHandleInputProps = {
+  type: "text" as const,
+  inputMode: "url" as const,
+  autoComplete: "off",
+  autoCorrect: "off" as const,
+  autoCapitalize: "none" as const,
+  spellCheck: false,
+};
+
 type LaunchSchedulePreset = "once_daily" | "twice_daily" | "weekly" | "every_n_days";
 
 const WEEKDAY_OPTIONS = [
@@ -569,12 +578,8 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
   const [showCodeModal, setShowCodeModal] = useState(false);
   const [showAddTargetModal, setShowAddTargetModal] = useState(false);
   const [draftTargetUsername, setDraftTargetUsername] = useState("");
-
-  useEffect(() => {
-    if (!selectedTarget && (targetsQ.data?.length || 0) > 0) {
-      setSelectedTarget(String(targetsQ.data?.[0]?.target_username || ""));
-    }
-  }, [selectedTarget, targetsQ.data]);
+  const [showLaunchPanel, setShowLaunchPanel] = useState(false);
+  const [launchMode, setLaunchMode] = useState<"manual" | "schedule">("manual");
 
   useEffect(() => {
     setViewMode(initialView);
@@ -589,6 +594,8 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
 
   const selectedSummary =
     (targetsQ.data ?? []).find((target) => usernameKey(target.target_username) === usernameKey(selectedTarget)) || null;
+  const hasTrackedTarget = Boolean(selectedSummary);
+  const hasTargetContext = Boolean(selectedTarget);
   const timeline = timelineQ.data ?? [];
   const latestBatch = timeline[0] ?? null;
   const matchingSchedules = (schedulesQ.data ?? []).filter(
@@ -809,7 +816,7 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
         <strong>{formatTime(selectedSummary?.last_change_at || undefined)}</strong>
       </div>
       <div className="summary-pill">
-        <span>People tracked</span>
+        <span>People loaded</span>
         <strong>{peopleRows.length}</strong>
       </div>
     </div>
@@ -923,6 +930,8 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
     if (!nextTarget) return;
     setSelectedTarget(nextTarget);
     setViewMode("overview");
+    setShowLaunchPanel(true);
+    setLaunchMode("manual");
     setDraftTargetUsername("");
     setShowAddTargetModal(false);
   };
@@ -973,7 +982,11 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
               <button
                 key={`${target.target_username || "target"}-${idx}`}
                 className={`targets-sidebar-row ${usernameKey(selectedTarget) === usernameKey(target.target_username) ? "active" : ""}`}
-                onClick={() => setSelectedTarget(String(target.target_username || ""))}
+                onClick={() => {
+                  setSelectedTarget(String(target.target_username || ""));
+                  setShowLaunchPanel(false);
+                  setLaunchMode("manual");
+                }}
               >
                 <div className="ledger-title">@{target.target_username || "-"}</div>
                 <div className="ledger-meta">
@@ -998,7 +1011,7 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
                   <div>
                     <div className="dossier-headline">
                       <div>
-                        <h2>@{selectedTarget || "-"}</h2>
+                        <h2>{selectedTarget ? `@${selectedTarget}` : "Choose a target"}</h2>
                       </div>
                       {selectedTarget ? (
                         <a
@@ -1012,8 +1025,10 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
                       ) : null}
                     </div>
                     <p className="hint targets-summary-subtitle">
-                      {selectedSummary
-                        ? "Inspect the target, then launch or adjust collection from the same surface."
+                      {!selectedTarget
+                        ? "Pick a target from the watchlist or create a new one before opening target detail views."
+                        : selectedSummary
+                        ? "Inspect recent activity here. Open run controls only when you want to start or schedule collection."
                         : "This target is not on the watchlist yet. Start a run or add a schedule to begin tracking it."}
                     </p>
                   </div>
@@ -1022,191 +1037,278 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
                     <span>
                       {matchingSchedules[0]?.next_run
                         ? `Next check ${formatTime(matchingSchedules[0].next_run || undefined)}`
-                        : "Use the launch panel below to start one-off runs or create recurring checks."}
+                        : "Open run controls when you want a one-off run or recurring checks."}
                     </span>
                   </div>
                 </div>
-                <div className="desktop-only">{summaryMetrics}</div>
-                <details className="mobile-collapsible mobile-only" open>
-                  <summary>Key metrics</summary>
-                  {summaryMetrics}
-                </details>
+                {hasTrackedTarget ? <div className="desktop-only">{summaryMetrics}</div> : null}
+                {hasTrackedTarget ? (
+                  <details className="mobile-collapsible mobile-only" open>
+                    <summary>Key metrics</summary>
+                    {summaryMetrics}
+                  </details>
+                ) : null}
               </div>
               <section className="card panel-flat target-launch-card">
                 <div className="panel-head">
                   <div>
-                    <h3>Launch</h3>
-                  <p className="hint">
-                    Existing targets run from the watchlist context. New targets start here too, using the same flow.
-                  </p>
-                </div>
-                <NavLink to="/operations" className="text-link">
-                  Advanced queue
-                </NavLink>
-              </div>
-              <div className="target-launch-grid">
-                <label>
-                  Target username
-                  <input
-                    value={selectedTarget}
-                    onChange={(e) => setSelectedTarget(normalizeUsername(e.target.value))}
-                    placeholder="e.g. davidjones.tv"
-                  />
-                </label>
-                <label>
-                  Collector login
-                  <select value={launchLogin} onChange={(e) => setLaunchLogin(e.target.value)}>
-                    <option value="">Select login</option>
-                    {(loginsQ.data ?? []).map((login, idx) => (
-                      <option key={`${login.login_username || "login"}-${idx}`} value={login.login_username || ""}>
-                        {login.login_username || "-"}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Schedule
-                  <select value={launchSchedulePreset} onChange={(e) => setLaunchSchedulePreset(e.target.value as LaunchSchedulePreset)}>
-                    <option value="once_daily">Once daily</option>
-                    <option value="twice_daily">Twice daily</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="every_n_days">Every few days</option>
-                  </select>
-                </label>
-                <label>
-                  {launchSchedulePreset === "twice_daily" ? "First run" : "Run time"}
-                  <input
-                    type="time"
-                    value={launchScheduleTime1}
-                    onChange={(e) => setLaunchScheduleTime1(e.target.value)}
-                  />
-                </label>
-                {launchSchedulePreset === "twice_daily" ? (
-                  <label>
-                    Second run
-                    <input type="time" value={launchScheduleTime2} onChange={(e) => setLaunchScheduleTime2(e.target.value)} />
-                  </label>
-                ) : null}
-                {launchSchedulePreset === "weekly" ? (
-                  <label>
-                    Day
-                    <select value={launchScheduleWeekday} onChange={(e) => setLaunchScheduleWeekday(e.target.value)}>
-                      {WEEKDAY_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-                {launchSchedulePreset === "every_n_days" ? (
-                  <label>
-                    Repeat every
-                    <input
-                      type="number"
-                      min={1}
-                      step={1}
-                      value={launchScheduleIntervalDays}
-                      onChange={(e) => setLaunchScheduleIntervalDays(e.target.value)}
-                    />
-                  </label>
-                ) : null}
-              </div>
-              <p className="hint target-launch-plan">{launchSchedulePlan?.summary || "Choose a valid time to create a schedule."}</p>
-              {!loginsQ.data?.length ? (
-                <div className="target-launch-help">
-                  <p className="hint">Add or refresh a collector account before starting runs from this target.</p>
-                  <NavLink to="/accounts" className="text-link">
-                    Open accounts
-                  </NavLink>
-                </div>
-              ) : null}
-              <div className="target-launch-strip">
-                <div className="target-launch-stat">
-                  <span>Schedules</span>
-                  <strong>{matchingSchedules.length}</strong>
-                </div>
-                <div className="target-launch-stat">
-                  <span>Queue state</span>
-                  <strong>{activeTargetJobs.length ? `${activeTargetJobs.length} active` : "Idle"}</strong>
-                </div>
-                <div className="target-launch-stat">
-                  <span>Collector</span>
-                  <strong>{launchLogin ? `@${launchLogin}` : "Select login"}</strong>
-                </div>
-                <div className="target-launch-stat">
-                  <span>Cooldown</span>
-                  <strong>{launchCooldown?.cooldown_seconds ? `${launchCooldown.cooldown_seconds}s` : "Ready"}</strong>
-                </div>
-              </div>
-              <div className="row gap">
-                <button onClick={onStartTargetRun} disabled={runNowMutation.isPending || !selectedTarget || !launchLogin}>
-                  {runNowMutation.isPending ? "Queueing..." : selectedSummary ? "Start run" : "Start first run"}
-                </button>
-                <button
-                  className="btn-secondary"
-                  onClick={onCreateTargetSchedule}
-                  disabled={createScheduleMutation.isPending || !selectedTarget || !launchLogin || !launchSchedulePlan}
-                >
-                  {createScheduleMutation.isPending ? "Saving..." : matchingSchedules.length ? "Add schedule" : "Create schedule"}
-                </button>
-                <button
-                  className="btn-secondary"
-                  onClick={() => cancelRunMutation.mutate({ job_id: launchJobId })}
-                  disabled={cancelRunMutation.isPending || !launchJobId}
-                >
-                  {cancelRunMutation.isPending ? "Cancelling..." : "Cancel job"}
-                </button>
-              </div>
-              {runNowMutation.error ? <p className="error">{(runNowMutation.error as Error).message}</p> : null}
-              {createScheduleMutation.error ? <p className="error">{(createScheduleMutation.error as Error).message}</p> : null}
-              {cancelRunMutation.error ? <p className="error">{(cancelRunMutation.error as Error).message}</p> : null}
-              {launchJobId ? (
-                <div className="target-launch-live">
-                  <p className="hint">
-                    Job {launchJobId} · {runDone ? (runPayload?.status || runMeta?.state || "done") : (runMeta?.state || "running")}
-                    {runPayload?.error ? ` · ${runPayload.error}` : ""}
-                  </p>
-                  {runPayload?.result ? (
+                    <h3>Run controls</h3>
                     <p className="hint">
-                      Result: followers {String(runPayload.result.followers_count ?? "-")} · following {String(runPayload.result.followees_count ?? "-")} · run_id {String(runPayload.result.run_id ?? "-")}
+                      Keep target detail focused on inspection. Open this only when you want to launch or schedule work.
                     </p>
-                  ) : null}
-                  {submitChallengeMutation.error ? <p className="error">{(submitChallengeMutation.error as Error).message}</p> : null}
-                  <div className="table-wrap">
-                    <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
-                      {(runJobDetailQ.data?.worker_out_tail || runJobDetailQ.data?.worker_err_tail || "").trim() || "(waiting for run logs)"}
-                    </pre>
+                  </div>
+                    <div className="row gap">
+                      <button
+                        className="btn-secondary"
+                        type="button"
+                        onClick={() => setShowLaunchPanel((value) => !value)}
+                      >
+                        {showLaunchPanel ? "Hide controls" : hasTargetContext ? "Open actions" : "New target / run"}
+                      </button>
+                      <NavLink to="/operations" className="text-link">
+                        Advanced queue
+                    </NavLink>
                   </div>
                 </div>
-              ) : null}
-            {matchingSchedules.length ? (
-                <div className="target-schedule-list">
-                  {matchingSchedules.map((schedule, idx) => (
-                    <div className="ledger-row" key={`${schedule.id || "schedule"}-${idx}`}>
-                      <div>
-                        <div className="ledger-title">@{schedule.login_username || "-"}</div>
-                        <div className="ledger-meta">{schedule.schedule_label || schedule.interval || "-"}</div>
-                      </div>
-                      <div className="ledger-side">{formatTime(schedule.next_run || undefined)}</div>
+                {showLaunchPanel || !hasTrackedTarget ? (
+                  <>
+                    <div className="system-tabs" style={{ marginBottom: "0.9rem" }}>
+                      <button
+                        className={`system-tab ${launchMode === "manual" ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setLaunchMode("manual")}
+                      >
+                        Run now
+                      </button>
+                      <button
+                        className={`system-tab ${launchMode === "schedule" ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setLaunchMode("schedule")}
+                      >
+                        Schedule
+                      </button>
                     </div>
-                  ))}
-                </div>
-              ) : null}
+                    {!hasTrackedTarget ? (
+                      <label style={{ display: "block", marginBottom: "0.9rem" }}>
+                        Target username
+                        <input
+                          {...targetHandleInputProps}
+                          value={selectedTarget}
+                          onChange={(e) => setSelectedTarget(normalizeUsername(e.target.value))}
+                          placeholder="e.g. davidjones.tv"
+                        />
+                      </label>
+                    ) : (
+                      <div className="target-launch-strip" style={{ marginBottom: "0.9rem" }}>
+                        <div className="target-launch-stat">
+                          <span>Target</span>
+                          <strong>@{selectedTarget}</strong>
+                        </div>
+                        <div className="target-launch-stat">
+                          <span>Last full run</span>
+                          <strong>{formatTime(selectedSummary?.last_full_run_at || undefined)}</strong>
+                        </div>
+                      </div>
+                    )}
+                    <div className="target-launch-grid">
+                      <label>
+                        Collector login
+                        <select value={launchLogin} onChange={(e) => setLaunchLogin(e.target.value)}>
+                          <option value="">Select login</option>
+                          {(loginsQ.data ?? []).map((login, idx) => (
+                            <option key={`${login.login_username || "login"}-${idx}`} value={login.login_username || ""}>
+                              {login.login_username || "-"}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {launchMode === "schedule" ? (
+                        <>
+                          <label>
+                            Schedule
+                            <select value={launchSchedulePreset} onChange={(e) => setLaunchSchedulePreset(e.target.value as LaunchSchedulePreset)}>
+                              <option value="once_daily">Once daily</option>
+                              <option value="twice_daily">Twice daily</option>
+                              <option value="weekly">Weekly</option>
+                              <option value="every_n_days">Every few days</option>
+                            </select>
+                          </label>
+                          <label>
+                            {launchSchedulePreset === "twice_daily" ? "First run" : "Run time"}
+                            <input
+                              type="time"
+                              value={launchScheduleTime1}
+                              onChange={(e) => setLaunchScheduleTime1(e.target.value)}
+                            />
+                          </label>
+                          {launchSchedulePreset === "twice_daily" ? (
+                            <label>
+                              Second run
+                              <input type="time" value={launchScheduleTime2} onChange={(e) => setLaunchScheduleTime2(e.target.value)} />
+                            </label>
+                          ) : null}
+                          {launchSchedulePreset === "weekly" ? (
+                            <label>
+                              Day
+                              <select value={launchScheduleWeekday} onChange={(e) => setLaunchScheduleWeekday(e.target.value)}>
+                                {WEEKDAY_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          ) : null}
+                          {launchSchedulePreset === "every_n_days" ? (
+                            <label>
+                              Repeat every
+                              <input
+                                type="number"
+                                min={1}
+                                step={1}
+                                value={launchScheduleIntervalDays}
+                                onChange={(e) => setLaunchScheduleIntervalDays(e.target.value)}
+                              />
+                            </label>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                    <p className="hint target-launch-plan">
+                      {launchMode === "schedule"
+                        ? launchSchedulePlan?.summary || "Choose a valid time to create a schedule."
+                        : "Manual runs use the selected collector immediately and do not change the recurring schedule."}
+                    </p>
+                    {!loginsQ.data?.length ? (
+                      <div className="target-launch-help">
+                        <p className="hint">Add or refresh a collector account before starting runs from this target.</p>
+                        <NavLink to="/accounts" className="text-link">
+                          Open accounts
+                        </NavLink>
+                      </div>
+                    ) : null}
+                    <div className="target-launch-strip">
+                      <div className="target-launch-stat">
+                        <span>Schedules</span>
+                        <strong>{matchingSchedules.length}</strong>
+                      </div>
+                      <div className="target-launch-stat">
+                        <span>Queue state</span>
+                        <strong>{activeTargetJobs.length ? `${activeTargetJobs.length} active` : "Idle"}</strong>
+                      </div>
+                      <div className="target-launch-stat">
+                        <span>Collector</span>
+                        <strong>{launchLogin ? `@${launchLogin}` : "Select login"}</strong>
+                      </div>
+                      <div className="target-launch-stat">
+                        <span>Cooldown</span>
+                        <strong>{launchCooldown?.cooldown_seconds ? `${launchCooldown.cooldown_seconds}s` : "Ready"}</strong>
+                      </div>
+                    </div>
+                    <div className="row gap">
+                      {launchMode === "manual" ? (
+                        <button onClick={onStartTargetRun} disabled={runNowMutation.isPending || !selectedTarget || !launchLogin}>
+                          {runNowMutation.isPending ? "Queueing..." : selectedSummary ? "Start manual run" : "Start first run"}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={onCreateTargetSchedule}
+                          disabled={createScheduleMutation.isPending || !selectedTarget || !launchLogin || !launchSchedulePlan}
+                        >
+                          {createScheduleMutation.isPending ? "Saving..." : matchingSchedules.length ? "Save schedule" : "Create schedule"}
+                        </button>
+                      )}
+                      <button
+                        className="btn-secondary"
+                        onClick={() => cancelRunMutation.mutate({ job_id: launchJobId })}
+                        disabled={cancelRunMutation.isPending || !launchJobId}
+                      >
+                        {cancelRunMutation.isPending ? "Cancelling..." : "Cancel job"}
+                      </button>
+                    </div>
+                    {runNowMutation.error ? <p className="error">{(runNowMutation.error as Error).message}</p> : null}
+                    {createScheduleMutation.error ? <p className="error">{(createScheduleMutation.error as Error).message}</p> : null}
+                    {cancelRunMutation.error ? <p className="error">{(cancelRunMutation.error as Error).message}</p> : null}
+                    {launchJobId ? (
+                      <div className="target-launch-live">
+                        <p className="hint">
+                          Job {launchJobId} · {runDone ? (runPayload?.status || runMeta?.state || "done") : (runMeta?.state || "running")}
+                          {runPayload?.error ? ` · ${runPayload.error}` : ""}
+                        </p>
+                        {runPayload?.result ? (
+                          <p className="hint">
+                            Result: followers {String(runPayload.result.followers_count ?? "-")} · following {String(runPayload.result.followees_count ?? "-")} · run_id {String(runPayload.result.run_id ?? "-")}
+                          </p>
+                        ) : null}
+                        {submitChallengeMutation.error ? <p className="error">{(submitChallengeMutation.error as Error).message}</p> : null}
+                        <div className="table-wrap">
+                          <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                            {(runJobDetailQ.data?.worker_out_tail || runJobDetailQ.data?.worker_err_tail || "").trim() || "(waiting for run logs)"}
+                          </pre>
+                        </div>
+                      </div>
+                    ) : null}
+                    {launchMode === "schedule" && matchingSchedules.length ? (
+                      <div className="target-schedule-list">
+                        {matchingSchedules.map((schedule, idx) => (
+                          <div className="ledger-row" key={`${schedule.id || "schedule"}-${idx}`}>
+                            <div>
+                              <div className="ledger-title">@{schedule.login_username || "-"}</div>
+                              <div className="ledger-meta">{schedule.schedule_label || schedule.interval || "-"}</div>
+                            </div>
+                            <div className="ledger-side">{formatTime(schedule.next_run || undefined)}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="target-launch-strip">
+                    <div className="target-launch-stat">
+                      <span>Schedules</span>
+                      <strong>{matchingSchedules.length}</strong>
+                    </div>
+                    <div className="target-launch-stat">
+                      <span>Queue state</span>
+                      <strong>{activeTargetJobs.length ? `${activeTargetJobs.length} active` : "Idle"}</strong>
+                    </div>
+                    <div className="target-launch-stat">
+                      <span>Collector</span>
+                      <strong>{launchLogin ? `@${launchLogin}` : "Select login"}</strong>
+                    </div>
+                    <div className="target-launch-stat">
+                      <span>Cooldown</span>
+                      <strong>{launchCooldown?.cooldown_seconds ? `${launchCooldown.cooldown_seconds}s` : "Ready"}</strong>
+                    </div>
+                  </div>
+                )}
             </section>
 
             </div>
 
-            <div className="system-tabs">
-              <button className={`system-tab ${viewMode === "overview" ? "active" : ""}`} onClick={() => setViewMode("overview")}>
-                Overview
-              </button>
-              <button className={`system-tab ${viewMode === "people" ? "active" : ""}`} onClick={() => setViewMode("people")}>
-                People
-              </button>
-            </div>
+            {hasTrackedTarget ? (
+              <div className="system-tabs">
+                <button className={`system-tab ${viewMode === "overview" ? "active" : ""}`} onClick={() => setViewMode("overview")}>
+                  Overview
+                </button>
+                <button className={`system-tab ${viewMode === "people" ? "active" : ""}`} onClick={() => setViewMode("people")}>
+                  People
+                </button>
+              </div>
+            ) : null}
 
-            {viewMode === "overview" ? (
+            {!hasTrackedTarget ? (
+              <section className="card panel-flat">
+                <div className="panel-head">
+                  <h3>Target detail</h3>
+                </div>
+                <p className="hint">
+                  {!selectedTarget
+                    ? "Select a target from the watchlist to open Overview and People."
+                    : "This target is still a draft. Start the first run or create a schedule to turn it into tracked history."}
+                </p>
+              </section>
+            ) : viewMode === "overview" ? (
               <>
                 <div className="desktop-only">{overviewBlocks}</div>
                 <details className="mobile-collapsible mobile-only" open>
@@ -1241,6 +1343,9 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
                       <h3>People</h3>
                       <span className="count-chip">{peopleRows.length}</span>
                     </div>
+                    <p className="hint">
+                      Showing up to 300 matching people from the current network view.
+                    </p>
                     <div className="form-grid" style={{ marginBottom: "0.9rem" }}>
                       <label>
                         Relationship
@@ -1388,6 +1493,7 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
             <h3>Add Target</h3>
             <p className="hint">Create a target context first, then launch its first run or schedule from the target panel.</p>
             <input
+              {...targetHandleInputProps}
               value={draftTargetUsername}
               onChange={(e) => setDraftTargetUsername(e.target.value)}
               placeholder="e.g. davidjones.tv"
@@ -2294,6 +2400,7 @@ function OperationsPage() {
             <label>
               Target username
               <input
+                {...targetHandleInputProps}
                 placeholder="e.g. davidjones.tv"
                 value={scheduleTarget}
                 onChange={(e) => setScheduleTarget(e.target.value)}
@@ -2377,6 +2484,7 @@ function OperationsPage() {
             <label>
               Target username
               <input
+                {...targetHandleInputProps}
                 placeholder="e.g. davidjones.tv"
                 value={manualTarget}
                 onChange={(e) => setManualTarget(e.target.value)}

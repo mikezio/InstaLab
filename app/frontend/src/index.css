@@ -1002,6 +1002,7 @@ select {
   border: 1px solid var(--line-soft);
   border-radius: 0;
   padding: 0.66rem 0.78rem;
+  font-size: 16px;
   background: rgba(255, 255, 255, 0.025);
   color: var(--text-main);
   transition:
@@ -1697,11 +1698,11 @@ th {
   }
 
   .targets-main {
-    order: 1;
+    order: 2;
   }
 
   .targets-sidebar {
-    order: 2;
+    order: 1;
     margin-top: 0;
   }
 

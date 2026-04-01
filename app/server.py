@@ -6287,10 +6287,11 @@ def api_run_detail(run_id):
             SELECT id FROM runs
             WHERE target_username = ?
               AND (timestamp < ? OR (timestamp = ? AND id < ?))
+              AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
             ORDER BY timestamp DESC, id DESC
             LIMIT 1
             """,
-            (run["target_username"], run["timestamp"], run["timestamp"], run_id),
+            (run["target_username"], run["timestamp"], run["timestamp"], run_id, "%profile_only%"),
         )
         prev_row = prev_cur.fetchone()
         if prev_row:
