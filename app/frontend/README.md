@@ -1,73 +1,45 @@
-# React + TypeScript + Vite
+# InstaLab Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This directory contains the modern React operator UI. Production builds are emitted into `app/django_app/static/modern/`.
 
-Currently, two official plugins are available:
+## Dev workflow
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- Start the Vite dev server from `app/`:
+  - `npm run frontend:dev`
+- Build production assets from `app/`:
+  - `npm run build`
 
-## React Compiler
+## Operator surfaces
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- `Targets`: primary launch surface for tracked accounts, first runs, and schedule creation
+- `Activity`: run explorer and recent relationship evidence
+- `Operations`: queue state, live jobs, logs, and manual operator controls
+- `Accounts`: collector onboarding, maintenance, diagnostics, and factory flows
+- `Settings`: runtime config, backend/profile selection, and proxy testing
 
-## Expanding the ESLint configuration
+## Routing
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+The React app is mounted at `/app/` and defines these primary routes:
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+- `/app/` and `/app/digest`
+- `/app/targets` and `/app/subjects`
+- `/app/network` and `/app/people`
+- `/app/activity` and `/app/explorer`
+- `/app/system` and `/app/machinery`
+- `/app/operations`
+- `/app/unfollow`
+- `/app/accounts`
+- `/app/settings`
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+## API usage
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+- `src/lib/api.ts` talks to the Django-proxied API base `/api`
+- Active queue state comes from `GET /api/status`
+- One-off runs are launched with `POST /api/run`
+- Per-job polling uses `GET /api/run/<job_id>` and `GET /api/jobs/latest?login_username=<login>`
+- Schedules use `GET/POST/DELETE /api/schedules`
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Notes
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+- Generated assets under `app/django_app/static/modern/assets/` are build output; edit `src/` instead.
+- The legacy Django templates still exist, but the current operator flow is documented against the modern React UI.

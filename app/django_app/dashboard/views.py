@@ -44,6 +44,13 @@ def modern_app(request):
     return render(request, "dashboard/modern_index.html")
 
 
+def modern_shortcut(request, subpath: str = ""):
+    clean = (subpath or "").strip("/")
+    if clean:
+        return redirect(f"/app/{clean}")
+    return redirect("/app/")
+
+
 def healthz(request):
     return JsonResponse({"status": "ok"})
 

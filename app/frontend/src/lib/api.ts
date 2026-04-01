@@ -11,6 +11,7 @@ import {
   type RunJobDetail,
   type TargetSummaryItem,
   type ScheduleItem,
+  type CountWatchSampleItem,
   type LoginItem,
   type ConfigPayload,
   type ConfigValues,
@@ -22,10 +23,22 @@ import {
   type RunDetail,
   type UnfollowStatus,
   type UnfollowPreview,
+  type UiEvidenceItem,
+  type UiNetworkItem,
+  type UiTargetChangeItem,
+  type UiTargetItem,
   targetsSummarySchema,
   scheduleSchema,
+  countWatchSampleSchema,
   loginSchema,
   configSchema,
+  uiEvidenceSchema,
+  uiNetworkSchema,
+  uiTargetsSchema,
+  uiTargetTimelineSchema,
+  uiTargetChangesSchema,
+  uiSystemHealthSchema,
+  uiBriefSchema,
   relationshipEventSchema,
   relationshipHistorySchema,
   authTraceSchema,
@@ -93,9 +106,75 @@ export async function getTargetsSummary(): Promise<TargetSummaryItem[]> {
   return targetsSummarySchema.parse(data);
 }
 
+export async function getUiEvidence(params?: {
+  target?: string;
+  relation_type?: "followers" | "following" | "";
+  event_type?: "added" | "removed" | "";
+  limit?: number;
+}): Promise<UiEvidenceItem[]> {
+  const qs = new URLSearchParams();
+  if (params?.target) qs.set("target", params.target);
+  if (params?.relation_type) qs.set("relation_type", params.relation_type);
+  if (params?.event_type) qs.set("event_type", params.event_type);
+  if (typeof params?.limit === "number") qs.set("limit", String(params.limit));
+  const data = await fetchJson<unknown>(`/ui/evidence${qs.toString() ? `?${qs.toString()}` : ""}`);
+  return uiEvidenceSchema.parse(data).items;
+}
+
+export async function getUiTargets(): Promise<UiTargetItem[]> {
+  const data = await fetchJson<unknown>("/ui/targets");
+  return uiTargetsSchema.parse(data).items;
+}
+
+export async function getUiNetwork(params?: {
+  target?: string;
+  state?: "mutual" | "they_follow" | "subject_follows" | "disconnected" | "";
+  q?: string;
+  limit?: number;
+}): Promise<UiNetworkItem[]> {
+  const qs = new URLSearchParams();
+  if (params?.target) qs.set("target", params.target);
+  if (params?.state) qs.set("state", params.state);
+  if (params?.q) qs.set("q", params.q);
+  if (typeof params?.limit === "number") qs.set("limit", String(params.limit));
+  const data = await fetchJson<unknown>(`/ui/network${qs.toString() ? `?${qs.toString()}` : ""}`);
+  return uiNetworkSchema.parse(data).items;
+}
+
+export async function getUiTargetTimeline(target: string, limit = 20) {
+  const data = await fetchJson<unknown>(
+    `/ui/target_timeline?target=${encodeURIComponent(target)}&limit=${encodeURIComponent(String(limit))}`
+  );
+  return uiTargetTimelineSchema.parse(data).items;
+}
+
+export async function getUiTargetChanges(target: string, limit = 40): Promise<UiTargetChangeItem[]> {
+  const data = await fetchJson<unknown>(
+    `/ui/target_changes?target=${encodeURIComponent(target)}&limit=${encodeURIComponent(String(limit))}`
+  );
+  return uiTargetChangesSchema.parse(data).items;
+}
+
+export async function getUiSystemHealth() {
+  const data = await fetchJson<unknown>("/ui/system/health");
+  return uiSystemHealthSchema.parse(data);
+}
+
+export async function getUiBrief() {
+  const data = await fetchJson<unknown>("/ui/brief");
+  return uiBriefSchema.parse(data);
+}
+
 export async function getSchedules(): Promise<ScheduleItem[]> {
   const data = await fetchJson<unknown>("/schedules");
   return scheduleSchema.parse(data);
+}
+
+export async function getCountWatchSamples(target: string, limit = 20): Promise<CountWatchSampleItem[]> {
+  const data = await fetchJson<unknown>(
+    `/count_watch_samples?target=${encodeURIComponent(target)}&limit=${encodeURIComponent(String(limit))}`
+  );
+  return countWatchSampleSchema.parse(data);
 }
 
 export async function getLogins(): Promise<LoginItem[]> {
@@ -211,7 +290,14 @@ export async function runAuthPreflight(login_username: string): Promise<AuthPref
 export async function createSchedule(payload: {
   login_username: string;
   target_username: string;
-  interval: string;
+  interval?: string;
+  mode?: "full_run" | "count_watch";
+  trigger_delta?: number;
+  schedule_kind?: "daily" | "weekly" | "every_n_days" | "cron";
+  schedule_time?: string;
+  schedule_weekday?: number;
+  schedule_interval_days?: number;
+  schedule_start_date?: string;
 }): Promise<{ id: number }> {
   return fetchJson("/schedules", {
     method: "POST",

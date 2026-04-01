@@ -15,11 +15,16 @@ import {
   getConfig,
   getLogins,
   getRelationshipEvents,
-  getRelationshipHistory,
   getManualActions,
   getRunStatus,
   getSchedules,
   getTargetsSummary,
+  getUiBrief,
+  getUiTargetChanges,
+  getUiNetwork,
+  getUiTargets,
+  getUiTargetTimeline,
+  getUiSystemHealth,
   getUnfollowStatus,
   getUnfollowPreview,
   getAuthTrace,
@@ -42,14 +47,6 @@ import {
 } from "./lib/api";
 import type { ConfigValues } from "./lib/schemas";
 
-function tone(status: string | undefined): string {
-  const s = String(status || "").toLowerCase();
-  if (["success", "done", "ok", "enabled", "true", "active", "ready"].includes(s)) return "good";
-  if (["running", "queued"].includes(s)) return "info";
-  if (["error", "failed", "cancelled", "false", "disabled", "blocked"].includes(s)) return "bad";
-  return "neutral";
-}
-
 function formatTime(value?: string): string {
   if (!value) return "-";
   let normalized = value;
@@ -65,10 +62,201 @@ function formatTime(value?: string): string {
   }).format(d);
 }
 
+function formatDateSpan(start?: string | null, end?: string | null): string {
+  if (!start && !end) return "-";
+  if (start && end) return `${formatTime(start)} -> ${formatTime(end)}`;
+  if (start) return `Since ${formatTime(start)}`;
+  return `Until ${formatTime(end || undefined)}`;
+}
+
 function instagramProfileUrl(username?: string): string {
   const clean = String(username || "").trim().replace(/^@+/, "");
   if (!clean) return "https://www.instagram.com/";
   return `https://www.instagram.com/${encodeURIComponent(clean)}/`;
+}
+
+function normalizeUsername(value?: string): string {
+  return String(value || "").trim().replace(/^@+/, "");
+}
+
+function usernameKey(value?: string): string {
+  return normalizeUsername(value).toLowerCase();
+}
+
+type LaunchSchedulePreset = "once_daily" | "twice_daily" | "weekly" | "every_n_days";
+
+const WEEKDAY_OPTIONS = [
+  { value: "0", label: "Sunday" },
+  { value: "1", label: "Monday" },
+  { value: "2", label: "Tuesday" },
+  { value: "3", label: "Wednesday" },
+  { value: "4", label: "Thursday" },
+  { value: "5", label: "Friday" },
+  { value: "6", label: "Saturday" },
+] as const;
+
+function isClockValue(value?: string): boolean {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value || ""));
+}
+
+function formatClockLabel(value?: string): string {
+  if (!isClockValue(value)) return value || "--:--";
+  const [hour, minute] = String(value).split(":").map((part) => Number(part));
+  const stamp = new Date(2000, 0, 1, hour, minute);
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(stamp);
+}
+
+function parseLegacyCronSchedule(interval?: string): Partial<{
+  preset: LaunchSchedulePreset;
+  time1: string;
+  time2: string;
+  weekday: string;
+  intervalDays: string;
+}> | null {
+  const cron = String(interval || "").trim();
+  if (!cron) return null;
+  const parts = cron.split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minute, hour, dayOfMonth, , dayOfWeek] = parts;
+  if (dayOfMonth === "*/2" && !minute.includes(",") && !hour.includes(",")) {
+    return { preset: "every_n_days", time1: `${hour}:${minute}`, intervalDays: "2" };
+  }
+  if (dayOfWeek !== "*" && dayOfMonth === "*" && !minute.includes(",") && !hour.includes(",")) {
+    return { preset: "weekly", time1: `${hour}:${minute}`, weekday: dayOfWeek };
+  }
+  if (minute.includes(",") && hour.includes(",")) {
+    const minuteParts = minute.split(",");
+    const hourParts = hour.split(",");
+    if (minuteParts.length === 2 && hourParts.length === 2) {
+      return {
+        preset: "twice_daily",
+        time1: `${hourParts[0]}:${minuteParts[0]}`,
+        time2: `${hourParts[1]}:${minuteParts[1]}`,
+      };
+    }
+  }
+  if (dayOfMonth === "*" && dayOfWeek === "*" && !minute.includes(",") && !hour.includes(",")) {
+    return { preset: "once_daily", time1: `${hour}:${minute}` };
+  }
+  return null;
+}
+
+function scheduleDefaultsFromItem(
+  schedule?:
+    | {
+        interval?: string;
+        schedule_kind?: "cron" | "daily" | "weekly" | "every_n_days";
+        schedule_time?: string | null;
+        schedule_weekday?: number | null;
+        schedule_interval_days?: number | null;
+      }
+    | null
+): {
+  preset: LaunchSchedulePreset;
+  time1: string;
+  time2: string;
+  weekday: string;
+  intervalDays: string;
+} {
+  const fallback = {
+    preset: "once_daily" as LaunchSchedulePreset,
+    time1: "09:00",
+    time2: "21:00",
+    weekday: "1",
+    intervalDays: "2",
+  };
+  if (!schedule) return fallback;
+  if (schedule.schedule_kind === "daily") {
+    return {
+      ...fallback,
+      preset: "once_daily",
+      time1: isClockValue(schedule.schedule_time || "") ? String(schedule.schedule_time) : fallback.time1,
+    };
+  }
+  if (schedule.schedule_kind === "weekly") {
+    return {
+      ...fallback,
+      preset: "weekly",
+      time1: isClockValue(schedule.schedule_time || "") ? String(schedule.schedule_time) : fallback.time1,
+      weekday:
+        schedule.schedule_weekday != null && schedule.schedule_weekday >= 0 && schedule.schedule_weekday <= 6
+          ? String(schedule.schedule_weekday)
+          : fallback.weekday,
+    };
+  }
+  if (schedule.schedule_kind === "every_n_days") {
+    return {
+      ...fallback,
+      preset: "every_n_days",
+      time1: isClockValue(schedule.schedule_time || "") ? String(schedule.schedule_time) : fallback.time1,
+      intervalDays: String(Math.max(1, Number(schedule.schedule_interval_days || 2) || 2)),
+    };
+  }
+  const parsedCron = parseLegacyCronSchedule(schedule.interval);
+  return parsedCron ? { ...fallback, ...parsedCron } : fallback;
+}
+
+function buildLaunchSchedulePlan(input: {
+  preset: LaunchSchedulePreset;
+  time1: string;
+  time2: string;
+  weekday: string;
+  intervalDays: string;
+}):
+  | {
+      payload: {
+        interval?: string;
+        schedule_kind?: "daily" | "weekly" | "every_n_days" | "cron";
+        schedule_time?: string;
+        schedule_weekday?: number;
+        schedule_interval_days?: number;
+      };
+      summary: string;
+    }
+  | null {
+  if (!isClockValue(input.time1)) return null;
+  if (input.preset === "once_daily") {
+    return {
+      payload: { schedule_kind: "daily", schedule_time: input.time1 },
+      summary: `Every day at ${formatClockLabel(input.time1)}`,
+    };
+  }
+  if (input.preset === "twice_daily") {
+    if (!isClockValue(input.time2)) return null;
+    const [hour1, minute1] = input.time1.split(":");
+    const [hour2, minute2] = input.time2.split(":");
+    return {
+      payload: {
+        schedule_kind: "cron",
+        interval: `${Number(minute1)},${Number(minute2)} ${Number(hour1)},${Number(hour2)} * * *`,
+      },
+      summary: `Twice daily at ${formatClockLabel(input.time1)} and ${formatClockLabel(input.time2)}`,
+    };
+  }
+  if (input.preset === "weekly") {
+    const weekday = Number(input.weekday);
+    if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) return null;
+    return {
+      payload: {
+        schedule_kind: "weekly",
+        schedule_time: input.time1,
+        schedule_weekday: weekday,
+      },
+      summary: `Every ${WEEKDAY_OPTIONS.find((option) => option.value === String(weekday))?.label || "week"} at ${formatClockLabel(input.time1)}`,
+    };
+  }
+  const intervalDays = Math.max(1, Number.parseInt(input.intervalDays, 10) || 1);
+  return {
+    payload: {
+      schedule_kind: "every_n_days",
+      schedule_time: input.time1,
+      schedule_interval_days: intervalDays,
+    },
+    summary: `Every ${intervalDays} ${intervalDays === 1 ? "day" : "days"} at ${formatClockLabel(input.time1)}`,
+  };
 }
 
 function toApiTimestamp(dt: Date): string {
@@ -96,80 +284,277 @@ function downloadCsvRows(filename: string, headers: string[], rows: Array<Array<
   URL.revokeObjectURL(url);
 }
 
+function collectorState(login: {
+  private_session_exists?: boolean;
+  has_password?: boolean;
+  has_totp_seed?: boolean;
+  session_marked_stale?: boolean;
+  last_error?: string | null;
+}) {
+  if (login.private_session_exists && !login.session_marked_stale) {
+    return { label: "Active session", tone: "good", detail: "ready for collection" };
+  }
+  if (login.private_session_exists && login.session_marked_stale) {
+    return { label: "Stale session", tone: "info", detail: "refresh before heavy use" };
+  }
+  if (login.has_password) {
+    return { label: "Needs refresh", tone: "neutral", detail: login.last_error || "password available" };
+  }
+  return { label: "Needs repair", tone: "bad", detail: login.last_error || "missing password or session" };
+}
+
+function scheduleSummary(schedule: {
+  schedule_label?: string;
+  mode?: string;
+  target_username?: string;
+  next_run?: string | null;
+}) {
+  const label = schedule.schedule_label || "Custom";
+  const mode = schedule.mode === "count_watch" ? "count watch" : "full run";
+  const nextRun = formatTime(schedule.next_run || undefined);
+  return `${label} · ${mode} · next ${nextRun}`;
+}
+
+function sectionSummary(section: string, keys: string[]): string {
+  switch (section) {
+    case "Run":
+      return "Collector backend, pacing, and timeout controls.";
+    case "Proxy":
+      return "Proxy reachability and credential handling.";
+    case "Schedule":
+      return "Default cadence and timezone behavior.";
+    case "Monitor":
+      return "Health checks and watcher behavior.";
+    case "Unfollow":
+      return "Safety rails for unfollow batches.";
+    default:
+      return `${keys.length} additional runtime setting${keys.length === 1 ? "" : "s"}.`;
+  }
+}
+
 function AppShell({ children }: { children: React.ReactNode }) {
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    if (typeof window === "undefined") return "dark";
+    return (window.localStorage.getItem("instalab-theme") as "dark" | "light") ?? "dark";
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.setAttribute("data-theme", theme);
+    window.localStorage.setItem("instalab-theme", theme);
+  }, [theme]);
+
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">InstaLab</div>
-        <nav>
-          <NavLink to="/" end>
-            Command Center
+      <header className="shell-header">
+        <div className="shell-brand-block">
+          <div className="brand">InstaLab</div>
+        </div>
+        <nav className="shell-nav">
+          <NavLink to="/">
+            Home
           </NavLink>
           <NavLink to="/targets">Targets</NavLink>
-          <NavLink to="/explorer">Explorer</NavLink>
+          <NavLink to="/activity">Activity</NavLink>
           <NavLink to="/operations">Operations</NavLink>
-          <NavLink to="/unfollow">Unfollow</NavLink>
-          <NavLink to="/accounts">Accounts</NavLink>
           <NavLink to="/settings">Settings</NavLink>
         </nav>
-      </aside>
+      </header>
 
       <main className="content">{children}</main>
 
       <nav className="mobile-nav">
-        <NavLink to="/" end>
+        <NavLink to="/">
           Home
         </NavLink>
         <NavLink to="/targets">Targets</NavLink>
-        <NavLink to="/explorer">Explore</NavLink>
-        <NavLink to="/operations">Ops</NavLink>
-        <NavLink to="/unfollow">Unfollow</NavLink>
-        <NavLink to="/accounts">Acct</NavLink>
-        <NavLink to="/settings">Prefs</NavLink>
+        <NavLink to="/activity" aria-label="Activity">
+          Changes
+        </NavLink>
+        <NavLink to="/operations" aria-label="Operations">
+          Queue
+        </NavLink>
+        <NavLink to="/settings" aria-label="Settings">
+          Prefs
+        </NavLink>
       </nav>
+      <button
+        className="theme-toggle"
+        type="button"
+        onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+        aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+      >
+        <span aria-hidden="true">{theme === "dark" ? "☀" : "🌙"}</span>
+        <span className="sr-only">
+          {theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+        </span>
+      </button>
     </div>
   );
 }
 
 function CommandCenterPage() {
   const statusQ = useQuery({ queryKey: ["status"], queryFn: getAppStatus, refetchInterval: 10000 });
-  const targetsQ = useQuery({ queryKey: ["targets-summary"], queryFn: getTargetsSummary, refetchInterval: 30000 });
-  const schedulesQ = useQuery({ queryKey: ["schedules"], queryFn: getSchedules, refetchInterval: 20000 });
-  const loginsQ = useQuery({ queryKey: ["logins"], queryFn: getLogins, refetchInterval: 20000 });
+  const briefQ = useQuery({ queryKey: ["ui-brief"], queryFn: getUiBrief, refetchInterval: 12000 });
 
-  const upcomingSchedules = (schedulesQ.data ?? []).filter((s) => Boolean(s.next_run)).length;
-  const readyLogins = (loginsQ.data ?? []).filter((l) => l.private_session_exists).length;
+  const targetRows = (briefQ.data?.targets ?? []).slice(0, 6);
+  const nextChecks = (briefQ.data?.next_checks ?? []).slice(0, 6);
+  const attentionCollectors = (briefQ.data?.attention_collectors ?? []).slice(0, 6);
+  const totalCollectors = targetRows.length || (briefQ.data?.attention_collectors?.length ?? 0);
+  const healthyCollectors = Math.max(totalCollectors - attentionCollectors.length, 0);
 
   return (
     <section>
       <header className="page-header">
-        <h1>Command Center</h1>
-        <p>Target-account intelligence snapshot: relationship-change timelines, run status, and monitoring health. This workspace is not a social-growth tool.</p>
+        <h1>Home</h1>
+        <p>The product is target-first again. Use this page to orient quickly, then step into the active workspace.</p>
       </header>
 
-      <div className="card-grid">
-        <article className="card explorer-panel">
-          <h3>API</h3>
-          <p className={`pill ${tone(statusQ.data?.status)}`}>{statusQ.data?.status || "loading"}</p>
+      <div className="dossier-strip">
+        <article className="dossier-cell">
+          <span>Status</span>
+          <strong>{statusQ.data?.status || statusQ.data?.state || "loading"}</strong>
         </article>
-        <article className="card">
-          <h3>Target Coverage</h3>
-          <p className="stat">{targetsQ.data?.length ?? 0}</p>
-          <p className="hint">{upcomingSchedules}/{schedulesQ.data?.length ?? 0} schedules with next run</p>
+        <article className="dossier-cell">
+          <span>Ready accounts</span>
+          <strong>
+            {healthyCollectors}/{totalCollectors}
+          </strong>
         </article>
-        <article className="card">
-          <h3>Account Readiness</h3>
-          <p className="stat">{readyLogins}/{loginsQ.data?.length ?? 0}</p>
-          <p className="hint">session-ready</p>
+        <article className="dossier-cell">
+          <span>Jobs</span>
+          <strong>
+            {(briefQ.data?.active_jobs?.length ?? 0) + (briefQ.data?.queued_jobs?.length ?? 0)}
+          </strong>
         </article>
+        <article className="dossier-cell">
+          <span>Open actions</span>
+          <strong>{briefQ.data?.attention_collectors?.length ?? 0}</strong>
+        </article>
+      </div>
+
+      <div className="action-strip">
+        <NavLink to="/targets" className="action-link">
+          <span>Main workspace</span>
+          <strong>Open targets</strong>
+          <em>Launch runs, adjust schedules, and inspect the active watchlist.</em>
+        </NavLink>
+        <NavLink to="/accounts" className="action-link">
+          <span>Collector readiness</span>
+          <strong>Open accounts</strong>
+          <em>Repair sessions, add logins, or start account creation.</em>
+        </NavLink>
+        <NavLink to="/operations" className="action-link">
+          <span>Recovery queue</span>
+          <strong>Open operations</strong>
+          <em>Resolve manual actions, watch live jobs, and prune schedules.</em>
+        </NavLink>
+      </div>
+
+      <div className="brief-grid">
+        <article className="card panel-flat">
+            <div className="panel-head">
+              <h3>Targets</h3>
+            <NavLink to="/targets" className="text-link">
+              Open targets
+            </NavLink>
+          </div>
+          <div className="ledger-list">
+            {targetRows.map((target, idx) => (
+              <div className="ledger-row" key={`${target.target_username || "target"}-${idx}`}>
+                <div>
+                  <div className="ledger-title">@{target.target_username || "-"}</div>
+                  <div className="ledger-meta">last change {formatTime(target.last_change_at || undefined)}</div>
+                </div>
+                <div className="ledger-side">
+                  {target.followers_count ?? "-"} / {target.following_count ?? "-"}
+                </div>
+              </div>
+            ))}
+            {!targetRows.length ? <p className="hint">No tracked targets.</p> : null}
+          </div>
+        </article>
+
+        <div className="brief-side-stack">
+          <article className="card panel-flat">
+            <div className="panel-head">
+              <h3>Needs review</h3>
+              <NavLink to="/accounts" className="text-link">
+                Open accounts
+              </NavLink>
+            </div>
+            <div className="stack-list">
+              {attentionCollectors.map((item, idx) => (
+                <div className="stack-row" key={`${String(item.login_username || "manual")}-${idx}`}>
+                  <div>
+                    <div className="ledger-title">@{String(item.login_username || "-")}</div>
+                    <div className="ledger-meta">{String(item.last_error || item.auth_last_event || "-")}</div>
+                  </div>
+                  <span>{String(item.status || "attention")}</span>
+                </div>
+              ))}
+              {!attentionCollectors.length ? (
+                <div className="stack-row">
+                  <div>
+                    <div className="ledger-title">No open actions</div>
+                    <div className="ledger-meta">nothing needs attention</div>
+                  </div>
+                  <span>{briefQ.data?.state || "idle"}</span>
+                </div>
+              ) : null}
+            </div>
+          </article>
+
+          <article className="card panel-flat">
+            <div className="panel-head">
+              <h3>Upcoming checks</h3>
+              <NavLink to="/targets" className="text-link">
+                Open targets
+              </NavLink>
+            </div>
+            <div className="stack-list">
+              {nextChecks.map((item, idx) => (
+                <div className="stack-row" key={`${item.target_username || "schedule"}-${idx}`}>
+                  <div>
+                    <div className="ledger-title">@{item.target_username || "-"}</div>
+                    <div className="ledger-meta">last full read {formatTime(item.last_full_run_at || undefined)}</div>
+                  </div>
+                  <span>{formatTime(item.next_check_at || undefined)}</span>
+                </div>
+              ))}
+              {!nextChecks.length ? <p className="hint">No checks scheduled.</p> : null}
+            </div>
+          </article>
+        </div>
       </div>
     </section>
   );
 }
 
-function TargetsPage() {
-  const targetsQ = useQuery({ queryKey: ["targets-summary"], queryFn: getTargetsSummary, refetchInterval: 30000 });
+function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | "people" }) {
+  const qc = useQueryClient();
+  const targetsQ = useQuery({ queryKey: ["ui-targets"], queryFn: getUiTargets, refetchInterval: 30000 });
+  const loginsQ = useQuery({ queryKey: ["logins"], queryFn: getLogins, refetchInterval: 20000 });
+  const schedulesQ = useQuery({ queryKey: ["schedules"], queryFn: getSchedules, refetchInterval: 20000 });
+  const runStatusQ = useQuery({ queryKey: ["run-status"], queryFn: getRunStatus, refetchInterval: 6000 });
   const [selectedTarget, setSelectedTarget] = useState("");
+  const [viewMode, setViewMode] = useState<"overview" | "people">(initialView);
+  const [stateFilter, setStateFilter] = useState<"" | "mutual" | "they_follow" | "subject_follows" | "disconnected">(
+    ""
+  );
+  const [search, setSearch] = useState("");
+  const [selectedUsername, setSelectedUsername] = useState("");
+  const [launchLogin, setLaunchLogin] = useState("");
+  const [launchJobId, setLaunchJobId] = useState("");
+  const [launchSchedulePreset, setLaunchSchedulePreset] = useState<LaunchSchedulePreset>("once_daily");
+  const [launchScheduleTime1, setLaunchScheduleTime1] = useState("09:00");
+  const [launchScheduleTime2, setLaunchScheduleTime2] = useState("21:00");
+  const [launchScheduleWeekday, setLaunchScheduleWeekday] = useState("1");
+  const [launchScheduleIntervalDays, setLaunchScheduleIntervalDays] = useState("2");
+  const [verificationCode, setVerificationCode] = useState("");
+  const [showCodeModal, setShowCodeModal] = useState(false);
+  const [showAddTargetModal, setShowAddTargetModal] = useState(false);
+  const [draftTargetUsername, setDraftTargetUsername] = useState("");
 
   useEffect(() => {
     if (!selectedTarget && (targetsQ.data?.length || 0) > 0) {
@@ -177,141 +562,1073 @@ function TargetsPage() {
     }
   }, [selectedTarget, targetsQ.data]);
 
-  const eventsQ = useQuery({
-    queryKey: ["relationship-events", selectedTarget],
-    queryFn: () => getRelationshipEvents(selectedTarget),
+  useEffect(() => {
+    setViewMode(initialView);
+  }, [initialView]);
+
+  const timelineQ = useQuery({
+    queryKey: ["ui-target-timeline", selectedTarget, 10],
+    queryFn: () => getUiTargetTimeline(selectedTarget, 10),
     enabled: Boolean(selectedTarget),
-    refetchInterval: 15000,
-  });
-  const followersHistoryQ = useQuery({
-    queryKey: ["relationship-history", selectedTarget, "followers"],
-    queryFn: () => getRelationshipHistory(selectedTarget, "followers"),
-    enabled: Boolean(selectedTarget),
-    refetchInterval: 20000,
-  });
-  const followingHistoryQ = useQuery({
-    queryKey: ["relationship-history", selectedTarget, "following"],
-    queryFn: () => getRelationshipHistory(selectedTarget, "following"),
-    enabled: Boolean(selectedTarget),
-    refetchInterval: 20000,
+    refetchInterval: 30000,
   });
 
-  const eventStats = useMemo(() => {
-    const events = eventsQ.data ?? [];
-    return {
-      followersAdded: events.filter((e) => e.relation_type === "followers" && e.event_type === "added").length,
-      followersRemoved: events.filter((e) => e.relation_type === "followers" && e.event_type === "removed").length,
-      followingAdded: events.filter((e) => e.relation_type === "following" && e.event_type === "added").length,
-      followingRemoved: events.filter((e) => e.relation_type === "following" && e.event_type === "removed").length,
-    };
-  }, [eventsQ.data]);
+  const selectedSummary =
+    (targetsQ.data ?? []).find((target) => usernameKey(target.target_username) === usernameKey(selectedTarget)) || null;
+  const timeline = timelineQ.data ?? [];
+  const latestBatch = timeline[0] ?? null;
+  const matchingSchedules = (schedulesQ.data ?? []).filter(
+    (schedule) => usernameKey(schedule.target_username) === usernameKey(selectedTarget)
+  );
+  const preferredLogin = useMemo(() => {
+    return (
+      matchingSchedules[0]?.login_username ||
+      latestBatch?.login_username ||
+      loginsQ.data?.[0]?.login_username ||
+      ""
+    );
+  }, [latestBatch?.login_username, loginsQ.data, matchingSchedules]);
 
-  const followerRows = followersHistoryQ.data ?? [];
-  const followingRows = followingHistoryQ.data ?? [];
-  const followerActive = followerRows.filter((x) => x.active === 1);
-  const followerRemoved = followerRows.filter((x) => x.active !== 1);
-  const followingActive = followingRows.filter((x) => x.active === 1);
-  const followingRemoved = followingRows.filter((x) => x.active !== 1);
-  return (
-    <section>
-      <header className="page-header">
-        <h1>Targets</h1>
-        <p>Track what changed on selected targets: who they followed/unfollowed and who followed/unfollowed them, with clear dates and history state.</p>
-      </header>
-      <section className="target-section">
-        <h3>Target Focus</h3>
-        <label>
-          Selected target
-          <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)}>
-            {(targetsQ.data ?? []).map((t, idx) => (
-              <option key={`${t.target_username || "target"}-${idx}`} value={t.target_username || ""}>
-                {t.target_username || "-"}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="metric-inline">
-          <span>New Followers: <strong>{eventStats.followersAdded}</strong></span>
-          <span>Unfollowers: <strong>{eventStats.followersRemoved}</strong></span>
-          <span>Target Followed: <strong>{eventStats.followingAdded}</strong></span>
-          <span>Target Unfollowed: <strong>{eventStats.followingRemoved}</strong></span>
-        </div>
-      </section>
+  useEffect(() => {
+    const validLogins = (loginsQ.data ?? []).map((login) => String(login.login_username || ""));
+    if (!validLogins.length) {
+      setLaunchLogin("");
+      return;
+    }
+    if (!launchLogin || !validLogins.includes(launchLogin)) {
+      setLaunchLogin(String(preferredLogin || validLogins[0] || ""));
+    }
+  }, [launchLogin, loginsQ.data, preferredLogin, selectedTarget]);
+
+  const primarySchedule = matchingSchedules[0] ?? null;
+
+  useEffect(() => {
+    const nextDefaults = scheduleDefaultsFromItem(primarySchedule);
+    setLaunchSchedulePreset(nextDefaults.preset);
+    setLaunchScheduleTime1(nextDefaults.time1);
+    setLaunchScheduleTime2(nextDefaults.time2);
+    setLaunchScheduleWeekday(nextDefaults.weekday);
+    setLaunchScheduleIntervalDays(nextDefaults.intervalDays);
+  }, [
+    selectedTarget,
+    primarySchedule?.id,
+    primarySchedule?.interval,
+    primarySchedule?.schedule_kind,
+    primarySchedule?.schedule_time,
+    primarySchedule?.schedule_weekday,
+    primarySchedule?.schedule_interval_days,
+  ]);
+
+  const changesQ = useQuery({
+    queryKey: ["ui-target-changes", selectedTarget, 20],
+    queryFn: () => getUiTargetChanges(selectedTarget, 20),
+    enabled: Boolean(selectedTarget),
+    refetchInterval: 30000,
+  });
+  const peopleQ = useQuery({
+    queryKey: ["ui-network", selectedTarget, stateFilter, search],
+    queryFn: () =>
+      getUiNetwork({
+        target: selectedTarget,
+        state: stateFilter,
+        q: search.trim() || undefined,
+        limit: 300,
+      }),
+    enabled: Boolean(selectedTarget),
+    refetchInterval: 30000,
+  });
+
+  useEffect(() => {
+    const firstUsername = peopleQ.data?.[0]?.username;
+    if (!selectedUsername && firstUsername) {
+      setSelectedUsername(String(firstUsername));
+    }
+    if (selectedUsername && !(peopleQ.data ?? []).some((item) => item.username === selectedUsername)) {
+      setSelectedUsername(String(firstUsername || ""));
+    }
+  }, [peopleQ.data, selectedUsername]);
+
+  const actorEventsQ = useQuery({
+    queryKey: ["relationship-events", selectedTarget, selectedUsername, "targets-people"],
+    queryFn: () =>
+      getRelationshipEvents(selectedTarget, {
+        username: selectedUsername,
+        limit: 30,
+      }),
+    enabled: Boolean(selectedTarget && selectedUsername && viewMode === "people"),
+    refetchInterval: 30000,
+  });
+  const runNowMutation = useMutation({
+    mutationFn: startRun,
+    onSuccess: async (data) => {
+      setLaunchJobId(data.job_id);
+      setVerificationCode("");
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["run-status"] }),
+        qc.invalidateQueries({ queryKey: ["ui-targets"] }),
+        qc.invalidateQueries({ queryKey: ["ui-target-timeline", selectedTarget] }),
+        qc.invalidateQueries({ queryKey: ["ui-target-changes", selectedTarget] }),
+      ]);
+    },
+  });
+  const createScheduleMutation = useMutation({
+    mutationFn: createSchedule,
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["schedules"] }),
+        qc.invalidateQueries({ queryKey: ["ui-targets"] }),
+      ]);
+    },
+  });
+  const cancelRunMutation = useMutation({
+    mutationFn: cancelRun,
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["run-status"] });
+    },
+  });
+  const submitChallengeMutation = useMutation({
+    mutationFn: ({ login, code }: { login: string; code: string }) => submitChallengeCode(login, code),
+    onSuccess: () => {
+      setVerificationCode("");
+    },
+  });
+  const runJobQ = useQuery({
+    queryKey: ["run-job-status", launchJobId],
+    queryFn: () => getRunJobStatus(launchJobId),
+    enabled: Boolean(launchJobId),
+    refetchInterval: 3000,
+  });
+  const runJobDetailQ = useQuery({
+    queryKey: ["run-job-detail", launchJobId],
+    queryFn: () => getRunJobDetail(launchJobId),
+    enabled: Boolean(launchJobId),
+    refetchInterval: 4000,
+  });
+
+  const peopleRows = peopleQ.data ?? [];
+  const selectedActor = peopleRows.find((item) => item.username === selectedUsername) ?? peopleRows[0] ?? null;
+  const launchSchedulePlan = useMemo(
+    () =>
+      buildLaunchSchedulePlan({
+        preset: launchSchedulePreset,
+        time1: launchScheduleTime1,
+        time2: launchScheduleTime2,
+        weekday: launchScheduleWeekday,
+        intervalDays: launchScheduleIntervalDays,
+      }),
+    [launchScheduleIntervalDays, launchSchedulePreset, launchScheduleTime1, launchScheduleTime2, launchScheduleWeekday]
+  );
+  const peopleCounts = peopleRows.reduce(
+    (acc, row) => {
+      const key = row.relationship_state || "disconnected";
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>
+  );
+  const stateTone = (state?: string) => {
+    if (state === "mutual") return "good";
+    if (state === "they_follow") return "info";
+    if (state === "subject_follows") return "neutral";
+    return "bad";
+  };
+  const eventSentence = (event?: {
+    relation_type?: string;
+    event_type?: string;
+    username?: string;
+    target_username?: string;
+    observed_at?: string;
+  }) => {
+    if (!event?.username) return "No recorded activity yet.";
+    const actor = `@${event.username}`;
+    const subject = `@${event.target_username || selectedTarget || "-"}`;
+    if (event.relation_type === "followers" && event.event_type === "added") return `${actor} started following ${subject}`;
+    if (event.relation_type === "followers" && event.event_type === "removed") return `${actor} unfollowed ${subject}`;
+    if (event.relation_type === "following" && event.event_type === "added") return `${subject} started following ${actor}`;
+    if (event.relation_type === "following" && event.event_type === "removed") return `${subject} unfollowed ${actor}`;
+    return `${actor} had a recorded change`;
+  };
+  const describeConnectionSpan = (item?: { first_seen_at?: string | null; departed_at?: string | null; observed_at?: string | null }) => {
+    if (!item?.first_seen_at) return "";
+    if (item.departed_at) return `Connection span ${formatDateSpan(item.first_seen_at, item.departed_at)}`;
+    return `Connected ${formatDateSpan(item.first_seen_at, undefined)}`;
+  };
+  const activeTargetJobs = [...(runStatusQ.data?.active_jobs ?? []), ...(runStatusQ.data?.queued_jobs ?? [])].filter((job) => {
+    const record = job as Record<string, unknown>;
+    const meta =
+      typeof record.meta === "object" && record.meta ? (record.meta as Record<string, unknown>) : ({} as Record<string, unknown>);
+    return usernameKey(String(record.target_username || meta.target_username || "")) === usernameKey(selectedTarget);
+  });
+  const launchCooldown = (runStatusQ.data?.cooldowns ?? []).find(
+    (cooldown) => usernameKey(String(cooldown.login_username || "")) === usernameKey(launchLogin)
+  );
+  const runPayload = runJobQ.data?.payload;
+  const runMeta = runJobQ.data?.meta;
+  const runDone = Boolean(runJobQ.data?.done);
+  const runErrorCode = String(runPayload?.error_code || "").toLowerCase();
+  const promptHint = (runJobDetailQ.data?.worker_out_tail || "").toLowerCase().includes("waiting for code");
+  const interactiveChallenge =
+    runErrorCode === "two_factor_required" ||
+    runErrorCode === "challenge_required" ||
+    (String(runMeta?.state || "").toLowerCase() === "running" && promptHint);
+  const runNeedsCode = !runDone && interactiveChallenge;
+
+  useEffect(() => {
+    setShowCodeModal(runNeedsCode);
+    if (!runNeedsCode) setVerificationCode("");
+  }, [runNeedsCode]);
+
+  const summaryMetrics = (
+    <div className="summary-lineup targets-kpis">
+      <div className="summary-pill">
+        <span>Current counts</span>
+        <strong>
+          {selectedSummary?.followers_count ?? "-"} / {selectedSummary?.following_count ?? "-"}
+        </strong>
+      </div>
+      <div className="summary-pill">
+        <span>Last full run</span>
+        <strong>{formatTime(selectedSummary?.last_full_run_at || undefined)}</strong>
+      </div>
+      <div className="summary-pill">
+        <span>Last change</span>
+        <strong>{formatTime(selectedSummary?.last_change_at || undefined)}</strong>
+      </div>
+      <div className="summary-pill">
+        <span>People tracked</span>
+        <strong>{peopleRows.length}</strong>
+      </div>
+    </div>
+  );
+
+  const overviewBlocks = (
+    <>
       <div className="split-grid">
-        <section className="target-section">
-          <h3>Timeline</h3>
-          <p className="hint">Latest observed changes for this target. Each row is one follow/unfollow event with timestamp.</p>
-          <div className="entity-list">
-            {(eventsQ.data ?? []).slice(0, 20).map((ev, idx) => (
-              <div className="list-row" key={`me-${ev.id || idx}`}>
-                <div className="list-title">{ev.username || "-"}</div>
-                <div className="list-meta">{formatTime(ev.observed_at)}</div>
-                <div className="row gap">
-                  <span className="pill neutral">{ev.relation_type === "followers" ? "target followers" : "target following"}</span>
-                  <span className={`pill ${ev.event_type === "added" ? "good" : "bad"}`}>{ev.event_type || "-"}</span>
+        <section className="card panel-flat">
+          <div className="panel-head">
+            <h3>Current counts</h3>
+          </div>
+          <div className="targets-history-summary">
+            <div className="targets-history-row">
+              <span>Followers</span>
+              <strong>{selectedSummary?.followers_count ?? "-"}</strong>
+            </div>
+            <div className="targets-history-row">
+              <span>Following</span>
+              <strong>{selectedSummary?.following_count ?? "-"}</strong>
+            </div>
+            <div className="targets-history-row">
+              <span>Last follower change</span>
+              <strong>
+                {latestBatch ? `${latestBatch.followers_added_count || 0} in / ${latestBatch.followers_removed_count || 0} out` : "-"}
+              </strong>
+            </div>
+            <div className="targets-history-row">
+              <span>Last following change</span>
+              <strong>
+                {latestBatch ? `${latestBatch.following_added_count || 0} in / ${latestBatch.following_removed_count || 0} out` : "-"}
+              </strong>
+            </div>
+          </div>
+        </section>
+        <section className="card panel-flat">
+          <div className="panel-head">
+            <h3>What changed</h3>
+            <NavLink to="/operations" className="text-link">
+              Queue details
+            </NavLink>
+          </div>
+          <div className="targets-attention-box">
+            <strong>
+              {latestBatch?.event_count
+                ? `${latestBatch.event_count} recorded changes in the latest update`
+                : "Quiet right now"}
+            </strong>
+            <span>
+              {selectedSummary?.latest_event?.sentence
+                ? `Latest recorded change: ${selectedSummary.latest_event.sentence}`
+                : "No recorded activity yet for this target."}
+            </span>
+          </div>
+        </section>
+      </div>
+      <div className="split-grid">
+        <section className="card panel-flat">
+          <div className="panel-head">
+            <h3>History</h3>
+            <span className="count-chip">{timeline.length}</span>
+          </div>
+          <div className="sample-ledger">
+            {timeline.slice(0, 6).map((sample, idx) => (
+              <div className="sample-ledger-row" key={`${sample.run_id || "sample"}-${idx}`}>
+                <div>
+                  <div className="ledger-title">{formatTime(sample.observed_at || undefined)}</div>
+                  <div className="ledger-meta">
+                    {sample.event_count ?? 0} change{sample.event_count === 1 ? "" : "s"}
+                  </div>
+                </div>
+                <div className="ledger-side">
+                  {formatTime(sample.observed_at || undefined)}
                 </div>
               </div>
             ))}
-            {!(eventsQ.data ?? []).length ? <p className="hint">No relationship events for this target yet.</p> : null}
+            {!timeline.length ? <p className="hint">No history recorded yet.</p> : null}
           </div>
         </section>
-        <section className="target-section">
-          <h3>Followers State</h3>
-          <p className="hint">Accounts that follow the target now, and accounts that unfollowed since tracking began.</p>
-          <h4>Active Followers</h4>
-          <div className="entity-list">
-            {followerActive.slice(0, 10).map((row, idx) => (
-              <div className="list-row" key={`mfa-${row.username || idx}`}>
-                <div className="list-title">{row.username || "-"}</div>
-                <div className="list-meta">first seen {formatTime(row.first_seen || undefined)}</div>
-                <div className="list-meta">last seen {formatTime(row.last_seen || undefined)}</div>
+        <section className="card panel-flat">
+          <div className="panel-head">
+            <h3>Latest changes</h3>
+            <NavLink to="/activity" className="text-link">
+              Open activity
+            </NavLink>
+          </div>
+          <div className="ledger-list">
+            {(changesQ.data ?? []).slice(0, 6).map((event, idx) => (
+              <div className="ledger-row" key={`${event.id || "event"}-${idx}`}>
+                <div>
+                  <div className="ledger-title">{event.sentence || "Recorded change"}</div>
+                  <div className="ledger-meta">{formatTime(event.observed_at || undefined)}</div>
+                  {describeConnectionSpan(event) ? (
+                    <div className="ledger-meta">{describeConnectionSpan(event)}</div>
+                  ) : null}
+                </div>
+                <span className={`pill ${event.event_type === "removed" ? "bad" : "good"}`}>
+                  {event.event_type || "change"}
+                </span>
               </div>
             ))}
-            {!followerActive.length ? <p className="hint">No active followers in history.</p> : null}
+            {!changesQ.data?.length ? <p className="hint">No recent changes for this target.</p> : null}
           </div>
-          <h4>Removed Followers</h4>
-          <div className="entity-list">
-            {followerRemoved.slice(0, 8).map((row, idx) => (
-              <div className="list-row" key={`mfr-${row.username || idx}`}>
-                <div className="list-title">{row.username || "-"}</div>
-                <div className="list-meta">first seen {formatTime(row.first_seen || undefined)}</div>
-                <div className="list-meta">last seen {formatTime(row.last_seen || undefined)}</div>
-              </div>
-            ))}
-            {!followerRemoved.length ? <p className="hint">No removed followers in history.</p> : null}
-          </div>
-          <p className="hint">Active: {followerActive.length} • Removed: {followerRemoved.length}</p>
         </section>
       </div>
-      <section className="target-section">
-        <h3>Following State</h3>
-        <p className="hint">Accounts the target currently follows, and accounts the target has unfollowed since tracking began.</p>
-        <h4>Currently Followed By Target</h4>
-        <div className="entity-list">
-          {followingActive.slice(0, 10).map((row, idx) => (
-            <div className="list-row" key={`mga-${row.username || idx}`}>
-              <div className="list-title">{row.username || "-"}</div>
-              <div className="list-meta">first seen {formatTime(row.first_seen || undefined)}</div>
-              <div className="list-meta">last seen {formatTime(row.last_seen || undefined)}</div>
+    </>
+  );
+
+  const onCreateTargetDraft = () => {
+    const nextTarget = normalizeUsername(draftTargetUsername);
+    if (!nextTarget) return;
+    setSelectedTarget(nextTarget);
+    setViewMode("overview");
+    setDraftTargetUsername("");
+    setShowAddTargetModal(false);
+  };
+
+  const onStartTargetRun = () => {
+    const nextTarget = normalizeUsername(selectedTarget);
+    if (!launchLogin.trim() || !nextTarget) return;
+    setSelectedTarget(nextTarget);
+    runNowMutation.mutate({
+      login_username: launchLogin.trim(),
+      target_username: nextTarget,
+    });
+  };
+
+  const onCreateTargetSchedule = () => {
+    const nextTarget = normalizeUsername(selectedTarget);
+    if (!launchLogin.trim() || !nextTarget || !launchSchedulePlan) return;
+    setSelectedTarget(nextTarget);
+    createScheduleMutation.mutate({
+      login_username: launchLogin.trim(),
+      target_username: nextTarget,
+      ...launchSchedulePlan.payload,
+    });
+  };
+
+  return (
+    <section className="targets-shell">
+      <header className="page-header">
+        <h1>Targets</h1>
+      </header>
+
+      <div className="targets-layout">
+        <aside className="card targets-sidebar">
+          <div className="targets-sidebar-head">
+            <div>
+              <h3>Watchlist</h3>
+              <p className="hint">Tracked targets and draft launch contexts.</p>
             </div>
-          ))}
-          {!followingActive.length ? <p className="hint">No active following accounts in history.</p> : null}
-        </div>
-        <h4>Unfollowed By Target</h4>
-        <div className="entity-list">
-          {followingRemoved.slice(0, 8).map((row, idx) => (
-            <div className="list-row" key={`mgr-${row.username || idx}`}>
-              <div className="list-title">{row.username || "-"}</div>
-              <div className="list-meta">first seen {formatTime(row.first_seen || undefined)}</div>
-              <div className="list-meta">last seen {formatTime(row.last_seen || undefined)}</div>
+            <div className="targets-sidebar-actions">
+              <span className="count-chip">{targetsQ.data?.length ?? 0}</span>
+              <button className="btn-secondary targets-add-button" onClick={() => setShowAddTargetModal(true)}>
+                Add target
+              </button>
             </div>
-          ))}
-          {!followingRemoved.length ? <p className="hint">No removed following accounts in history.</p> : null}
+          </div>
+          <div className="targets-sidebar-list">
+            {(targetsQ.data ?? []).map((target, idx) => (
+              <button
+                key={`${target.target_username || "target"}-${idx}`}
+                className={`targets-sidebar-row ${usernameKey(selectedTarget) === usernameKey(target.target_username) ? "active" : ""}`}
+                onClick={() => setSelectedTarget(String(target.target_username || ""))}
+              >
+                <div className="ledger-title">@{target.target_username || "-"}</div>
+                <div className="ledger-meta">
+                  {target.followers_count ?? "-"} followers · {target.following_count ?? "-"} following
+                </div>
+              </button>
+            ))}
+            {selectedTarget && !selectedSummary ? (
+              <button className="targets-sidebar-row active targets-sidebar-row--draft" onClick={() => setViewMode("overview")}>
+                <div className="ledger-title">@{selectedTarget}</div>
+                <div className="ledger-meta">Draft target · launch or schedule first run</div>
+              </button>
+            ) : null}
+          </div>
+        </aside>
+
+        <div className="targets-main">
+          <article className="card targets-summary-card">
+            <div className="targets-hero-grid">
+              <div className="targets-summary-hero">
+                <div className="targets-summary-head">
+                  <div>
+                    <div className="dossier-headline">
+                      <div>
+                        <h2>@{selectedTarget || "-"}</h2>
+                      </div>
+                      {selectedTarget ? (
+                        <a
+                          href={instagramProfileUrl(selectedTarget)}
+                          className="text-link"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Open profile
+                        </a>
+                      ) : null}
+                    </div>
+                    <p className="hint targets-summary-subtitle">
+                      {selectedSummary
+                        ? "Inspect the target, then launch or adjust collection from the same surface."
+                        : "This target is not on the watchlist yet. Start a run or add a schedule to begin tracking it."}
+                    </p>
+                  </div>
+                  <div className="targets-summary-note">
+                    <strong>{matchingSchedules.length ? `${matchingSchedules.length} schedule${matchingSchedules.length === 1 ? "" : "s"}` : "No schedules yet"}</strong>
+                    <span>
+                      {matchingSchedules[0]?.next_run
+                        ? `Next check ${formatTime(matchingSchedules[0].next_run || undefined)}`
+                        : "Use the launch panel below to start one-off runs or create recurring checks."}
+                    </span>
+                  </div>
+                </div>
+                <div className="desktop-only">{summaryMetrics}</div>
+                <details className="mobile-collapsible mobile-only" open>
+                  <summary>Key metrics</summary>
+                  {summaryMetrics}
+                </details>
+              </div>
+              <section className="card panel-flat target-launch-card">
+                <div className="panel-head">
+                  <div>
+                    <h3>Launch</h3>
+                  <p className="hint">
+                    Existing targets run from the watchlist context. New targets start here too, using the same flow.
+                  </p>
+                </div>
+                <NavLink to="/operations" className="text-link">
+                  Advanced queue
+                </NavLink>
+              </div>
+              <div className="target-launch-grid">
+                <label>
+                  Target username
+                  <input
+                    value={selectedTarget}
+                    onChange={(e) => setSelectedTarget(normalizeUsername(e.target.value))}
+                    placeholder="e.g. davidjones.tv"
+                  />
+                </label>
+                <label>
+                  Collector login
+                  <select value={launchLogin} onChange={(e) => setLaunchLogin(e.target.value)}>
+                    <option value="">Select login</option>
+                    {(loginsQ.data ?? []).map((login, idx) => (
+                      <option key={`${login.login_username || "login"}-${idx}`} value={login.login_username || ""}>
+                        {login.login_username || "-"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Schedule
+                  <select value={launchSchedulePreset} onChange={(e) => setLaunchSchedulePreset(e.target.value as LaunchSchedulePreset)}>
+                    <option value="once_daily">Once daily</option>
+                    <option value="twice_daily">Twice daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="every_n_days">Every few days</option>
+                  </select>
+                </label>
+                <label>
+                  {launchSchedulePreset === "twice_daily" ? "First run" : "Run time"}
+                  <input
+                    type="time"
+                    value={launchScheduleTime1}
+                    onChange={(e) => setLaunchScheduleTime1(e.target.value)}
+                  />
+                </label>
+                {launchSchedulePreset === "twice_daily" ? (
+                  <label>
+                    Second run
+                    <input type="time" value={launchScheduleTime2} onChange={(e) => setLaunchScheduleTime2(e.target.value)} />
+                  </label>
+                ) : null}
+                {launchSchedulePreset === "weekly" ? (
+                  <label>
+                    Day
+                    <select value={launchScheduleWeekday} onChange={(e) => setLaunchScheduleWeekday(e.target.value)}>
+                      {WEEKDAY_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {launchSchedulePreset === "every_n_days" ? (
+                  <label>
+                    Repeat every
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={launchScheduleIntervalDays}
+                      onChange={(e) => setLaunchScheduleIntervalDays(e.target.value)}
+                    />
+                  </label>
+                ) : null}
+              </div>
+              <p className="hint target-launch-plan">{launchSchedulePlan?.summary || "Choose a valid time to create a schedule."}</p>
+              {!loginsQ.data?.length ? (
+                <div className="target-launch-help">
+                  <p className="hint">Add or refresh a collector account before starting runs from this target.</p>
+                  <NavLink to="/accounts" className="text-link">
+                    Open accounts
+                  </NavLink>
+                </div>
+              ) : null}
+              <div className="target-launch-strip">
+                <div className="target-launch-stat">
+                  <span>Schedules</span>
+                  <strong>{matchingSchedules.length}</strong>
+                </div>
+                <div className="target-launch-stat">
+                  <span>Queue state</span>
+                  <strong>{activeTargetJobs.length ? `${activeTargetJobs.length} active` : "Idle"}</strong>
+                </div>
+                <div className="target-launch-stat">
+                  <span>Collector</span>
+                  <strong>{launchLogin ? `@${launchLogin}` : "Select login"}</strong>
+                </div>
+                <div className="target-launch-stat">
+                  <span>Cooldown</span>
+                  <strong>{launchCooldown?.cooldown_seconds ? `${launchCooldown.cooldown_seconds}s` : "Ready"}</strong>
+                </div>
+              </div>
+              <div className="row gap">
+                <button onClick={onStartTargetRun} disabled={runNowMutation.isPending || !selectedTarget || !launchLogin}>
+                  {runNowMutation.isPending ? "Queueing..." : selectedSummary ? "Start run" : "Start first run"}
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={onCreateTargetSchedule}
+                  disabled={createScheduleMutation.isPending || !selectedTarget || !launchLogin || !launchSchedulePlan}
+                >
+                  {createScheduleMutation.isPending ? "Saving..." : matchingSchedules.length ? "Add schedule" : "Create schedule"}
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={() => cancelRunMutation.mutate({ job_id: launchJobId })}
+                  disabled={cancelRunMutation.isPending || !launchJobId}
+                >
+                  {cancelRunMutation.isPending ? "Cancelling..." : "Cancel job"}
+                </button>
+              </div>
+              {runNowMutation.error ? <p className="error">{(runNowMutation.error as Error).message}</p> : null}
+              {createScheduleMutation.error ? <p className="error">{(createScheduleMutation.error as Error).message}</p> : null}
+              {cancelRunMutation.error ? <p className="error">{(cancelRunMutation.error as Error).message}</p> : null}
+              {launchJobId ? (
+                <div className="target-launch-live">
+                  <p className="hint">
+                    Job {launchJobId} · {runDone ? (runPayload?.status || runMeta?.state || "done") : (runMeta?.state || "running")}
+                    {runPayload?.error ? ` · ${runPayload.error}` : ""}
+                  </p>
+                  {runPayload?.result ? (
+                    <p className="hint">
+                      Result: followers {String(runPayload.result.followers_count ?? "-")} · following {String(runPayload.result.followees_count ?? "-")} · run_id {String(runPayload.result.run_id ?? "-")}
+                    </p>
+                  ) : null}
+                  {submitChallengeMutation.error ? <p className="error">{(submitChallengeMutation.error as Error).message}</p> : null}
+                  <div className="table-wrap">
+                    <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                      {(runJobDetailQ.data?.worker_out_tail || runJobDetailQ.data?.worker_err_tail || "").trim() || "(waiting for run logs)"}
+                    </pre>
+                  </div>
+                </div>
+              ) : null}
+            {matchingSchedules.length ? (
+                <div className="target-schedule-list">
+                  {matchingSchedules.map((schedule, idx) => (
+                    <div className="ledger-row" key={`${schedule.id || "schedule"}-${idx}`}>
+                      <div>
+                        <div className="ledger-title">@{schedule.login_username || "-"}</div>
+                        <div className="ledger-meta">{schedule.schedule_label || schedule.interval || "-"}</div>
+                      </div>
+                      <div className="ledger-side">{formatTime(schedule.next_run || undefined)}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+
+            </div>
+
+            <div className="system-tabs">
+              <button className={`system-tab ${viewMode === "overview" ? "active" : ""}`} onClick={() => setViewMode("overview")}>
+                Overview
+              </button>
+              <button className={`system-tab ${viewMode === "people" ? "active" : ""}`} onClick={() => setViewMode("people")}>
+                People
+              </button>
+            </div>
+
+            {viewMode === "overview" ? (
+              <>
+                <div className="desktop-only">{overviewBlocks}</div>
+                <details className="mobile-collapsible mobile-only" open>
+                  <summary>Activity & history</summary>
+                  {overviewBlocks}
+                </details>
+              </>
+            ) : (
+              <>
+                <div className="dossier-strip">
+                  <article className="dossier-cell">
+                    <span>Mutual</span>
+                    <strong>{peopleCounts.mutual || 0}</strong>
+                  </article>
+                  <article className="dossier-cell">
+                    <span>They follow</span>
+                    <strong>{peopleCounts.they_follow || 0}</strong>
+                  </article>
+                  <article className="dossier-cell">
+                    <span>Target follows</span>
+                    <strong>{peopleCounts.subject_follows || 0}</strong>
+                  </article>
+                  <article className="dossier-cell">
+                    <span>Disconnected</span>
+                    <strong>{peopleCounts.disconnected || 0}</strong>
+                  </article>
+                </div>
+
+                <div className="split-grid split-grid-wide">
+                  <section className="card panel-flat">
+                    <div className="panel-head">
+                      <h3>People</h3>
+                      <span className="count-chip">{peopleRows.length}</span>
+                    </div>
+                    <div className="form-grid" style={{ marginBottom: "0.9rem" }}>
+                      <label>
+                        Relationship
+                        <select value={stateFilter} onChange={(e) => setStateFilter(e.target.value as typeof stateFilter)}>
+                          <option value="">All people</option>
+                          <option value="mutual">Mutual</option>
+                          <option value="they_follow">They follow</option>
+                          <option value="subject_follows">Target follows</option>
+                          <option value="disconnected">Disconnected</option>
+                        </select>
+                      </label>
+                      <label>
+                        Search
+                        <input
+                          type="search"
+                          value={search}
+                          onChange={(e) => setSearch(e.target.value)}
+                          placeholder="Find a username"
+                        />
+                      </label>
+                    </div>
+                    <div className="targets-sidebar-list">
+                      {peopleQ.error ? <p className="error">{(peopleQ.error as Error).message}</p> : null}
+                      {peopleRows.map((item, idx) => (
+                        <button
+                          key={`${item.target_username || "target"}-${item.username || "actor"}-${idx}`}
+                          className={`targets-sidebar-row ${selectedUsername === item.username ? "active" : ""}`}
+                          onClick={() => setSelectedUsername(String(item.username || ""))}
+                        >
+                          <div className="ledger-title">@{item.username || "-"}</div>
+                          <div className="ledger-meta">
+                            {item.relationship_label || "-"} · {formatTime(item.latest_interaction_at || undefined)}
+                          </div>
+                        </button>
+                      ))}
+                      {!peopleRows.length ? <p className="hint">No matching people.</p> : null}
+                    </div>
+                  </section>
+
+                  <section className="card panel-flat">
+                    <div className="panel-head">
+                      <h3>{selectedActor?.username ? `@${selectedActor.username}` : "Details"}</h3>
+                      {selectedActor?.username ? (
+                        <a
+                          href={instagramProfileUrl(selectedActor.username)}
+                          className="text-link"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Open profile
+                        </a>
+                      ) : null}
+                    </div>
+                    <div className="summary-lineup targets-kpis">
+                      <div className="summary-pill">
+                        <span>Relationship</span>
+                        <strong>{selectedActor?.relationship_label || "-"}</strong>
+                      </div>
+                      <div className="summary-pill">
+                        <span>First seen</span>
+                        <strong>{formatTime(selectedActor?.first_seen_at || undefined)}</strong>
+                      </div>
+                      <div className="summary-pill">
+                        <span>Latest interaction</span>
+                        <strong>{formatTime(selectedActor?.latest_interaction_at || undefined)}</strong>
+                      </div>
+                    </div>
+
+                    <div className="split-grid">
+                      <section className="card panel-flat">
+                        <div className="panel-head">
+                          <h3>Current relationship</h3>
+                          <span className={`pill ${stateTone(selectedActor?.relationship_state)}`}>
+                            {selectedActor?.relationship_label || "Unknown"}
+                          </span>
+                        </div>
+                        <div className="targets-history-summary">
+                          <div className="targets-history-row">
+                            <span>They follow the target</span>
+                            <strong>{selectedActor?.actor_follows_subject ? "Yes" : "No"}</strong>
+                          </div>
+                          <div className="targets-history-row">
+                            <span>Target follows them</span>
+                            <strong>{selectedActor?.subject_follows_actor ? "Yes" : "No"}</strong>
+                          </div>
+                          <div className="targets-history-row">
+                            <span>First seen</span>
+                            <strong>{formatTime(selectedActor?.first_seen_at || undefined)}</strong>
+                          </div>
+                          <div className="targets-history-row">
+                            <span>Connection span</span>
+                            <strong>{formatDateSpan(selectedActor?.first_seen_at, selectedActor?.departed_at)}</strong>
+                          </div>
+                          <div className="targets-history-row">
+                            <span>Departed</span>
+                            <strong>{formatTime(selectedActor?.departed_at || undefined)}</strong>
+                          </div>
+                        </div>
+                      </section>
+
+                      <section className="card panel-flat">
+                        <div className="panel-head">
+                          <h3>Latest activity</h3>
+                          <NavLink to="/activity" className="text-link">
+                            Open activity
+                          </NavLink>
+                        </div>
+                        <div className="targets-attention-box">
+                          <strong>{eventSentence(selectedActor?.latest_event || undefined)}</strong>
+                          <span>{formatTime(selectedActor?.latest_event?.observed_at || undefined)}</span>
+                        </div>
+                      </section>
+                    </div>
+
+                    <section className="card panel-flat">
+                      <div className="panel-head">
+                        <h3>History</h3>
+                        <span className="count-chip">{actorEventsQ.data?.length ?? 0}</span>
+                      </div>
+                      <div className="ledger-list">
+                        {(actorEventsQ.data ?? []).map((event, idx) => (
+                          <div className="ledger-row" key={`${event.id || "event"}-${idx}`}>
+                            <div>
+                              <div className="ledger-title">{eventSentence(event)}</div>
+                              <div className="ledger-meta">{formatTime(event.observed_at || undefined)}</div>
+                            </div>
+                            <span className={`pill ${event.event_type === "removed" ? "bad" : "good"}`}>
+                              {event.event_type || "change"}
+                            </span>
+                          </div>
+                        ))}
+                        {!actorEventsQ.data?.length ? <p className="hint">No recorded history for this person yet.</p> : null}
+                      </div>
+                    </section>
+                  </section>
+                </div>
+              </>
+            )}
+          </article>
         </div>
-        <p className="hint">Active: {followingActive.length} • Removed: {followingRemoved.length}</p>
-      </section>
+      </div>
+      {showAddTargetModal ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setShowAddTargetModal(false)}>
+          <div className="modal-card" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <h3>Add Target</h3>
+            <p className="hint">Create a target context first, then launch its first run or schedule from the target panel.</p>
+            <input
+              value={draftTargetUsername}
+              onChange={(e) => setDraftTargetUsername(e.target.value)}
+              placeholder="e.g. davidjones.tv"
+              autoFocus
+            />
+            <div className="row gap">
+              <button disabled={!normalizeUsername(draftTargetUsername)} onClick={onCreateTargetDraft}>
+                Open target
+              </button>
+              <button className="btn-secondary" onClick={() => setShowAddTargetModal(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {runNeedsCode && showCodeModal ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setShowCodeModal(false)}>
+          <div className="modal-card" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <h3>Verification Code Required</h3>
+            <p className="hint">Run {launchJobId} is waiting for a 2FA or challenge code for @{launchLogin}.</p>
+            <input
+              placeholder="enter 6-digit code"
+              value={verificationCode}
+              onChange={(e) => setVerificationCode(e.target.value)}
+              autoFocus
+            />
+            <div className="row gap">
+              <button
+                disabled={submitChallengeMutation.isPending || !launchLogin || !verificationCode.trim()}
+                onClick={() => submitChallengeMutation.mutate({ login: launchLogin, code: verificationCode.trim() })}
+              >
+                {submitChallengeMutation.isPending ? "Submitting..." : "Submit code"}
+              </button>
+              <button className="btn-secondary" onClick={() => setShowCodeModal(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
+}
+
+function SystemPage() {
+  const [tab, setTab] = useState<"collectors" | "queue" | "preferences">("collectors");
+  const systemQ = useQuery({ queryKey: ["ui-system-health"], queryFn: getUiSystemHealth, refetchInterval: 10000 });
+  const cfgQ = useQuery({ queryKey: ["config"], queryFn: getConfig, refetchInterval: 30000 });
+
+  const collectors = systemQ.data?.collectors ?? [];
+  const schedules = systemQ.data?.schedules ?? [];
+  const manualActions = systemQ.data?.manual_actions ?? [];
+  const config = cfgQ.data?.config;
+
+  return (
+    <section>
+      <header className="page-header">
+        <h1>Settings</h1>
+      </header>
+
+      <div className="dossier-strip">
+        <article className="dossier-cell">
+          <span>Accounts</span>
+          <strong>{collectors.length}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Ready sessions</span>
+          <strong>{collectors.filter((login) => login.private_session_exists).length}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Jobs</span>
+          <strong>{(systemQ.data?.active_jobs?.length ?? 0) + (systemQ.data?.queued_jobs?.length ?? 0)}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Schedules</span>
+          <strong>{schedules.length}</strong>
+        </article>
+      </div>
+
+      <div className="system-tabs">
+        <button className={`system-tab ${tab === "collectors" ? "active" : ""}`} onClick={() => setTab("collectors")}>
+          Accounts
+        </button>
+        <button className={`system-tab ${tab === "queue" ? "active" : ""}`} onClick={() => setTab("queue")}>
+          Jobs
+        </button>
+        <button className={`system-tab ${tab === "preferences" ? "active" : ""}`} onClick={() => setTab("preferences")}>
+          Defaults
+        </button>
+      </div>
+
+      <div className="system-workspace">
+        {tab === "collectors" ? (
+          <article className="card">
+            <div className="panel-head">
+              <h3>Accounts</h3>
+              <NavLink to="/accounts" className="text-link">
+                Open accounts
+              </NavLink>
+            </div>
+            <div className="collector-list">
+              {collectors.map((login, idx) => {
+                const state = collectorState(login);
+                return (
+                  <div className="collector-row" key={`${login.login_username || "collector"}-${idx}`}>
+                    <div className="collector-main">
+                      <div className="account-card-head">
+                        <div className="ledger-title">@{login.login_username || "-"}</div>
+                        <span className={`pill ${state.tone}`}>{state.label}</span>
+                      </div>
+                      <div className="collector-meta">
+                        <span>{state.detail}</span>
+                        <span>{login.has_totp_seed ? "TOTP stored" : "No TOTP seed"}</span>
+                        <span>{login.two_factor_method ? `2FA ${login.two_factor_method}` : "2FA method unknown"}</span>
+                        <span>Last auth {formatTime(login.auth_last_event_at || undefined)}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {!collectors.length ? <p className="hint">No collectors stored.</p> : null}
+            </div>
+          </article>
+        ) : null}
+
+        {tab === "queue" ? (
+          <div className="settings-stack">
+            <article className="card">
+              <div className="panel-head">
+                <h3>Queue state</h3>
+                <NavLink to="/operations" className="text-link">
+                  Open jobs
+                </NavLink>
+              </div>
+              <div className="summary-lineup">
+                <div className="summary-pill">
+                  <span>Active</span>
+                  <strong>{systemQ.data?.active_jobs?.length ?? 0}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span>Waiting</span>
+                  <strong>{systemQ.data?.queued_jobs?.length ?? 0}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span>Open actions</span>
+                  <strong>{manualActions.length}</strong>
+                </div>
+              </div>
+            </article>
+
+            <article className="card">
+              <div className="panel-head">
+                <h3>Open actions</h3>
+                <span className="count-chip">{manualActions.length}</span>
+              </div>
+              <div className="ledger-list">
+                {manualActions.slice(0, 8).map((item, idx) => (
+                  <div className="ledger-row" key={`${String(item.action_id || "manual")}-${idx}`}>
+                    <div>
+                      <div className="ledger-title">
+                        @{String(item.login_username || "-")} → @{String(item.target_username || "-")}
+                      </div>
+                      <div className="ledger-meta">{formatTime(String(item.updated_at || item.created_at || ""))}</div>
+                    </div>
+                    <div className="ledger-side">{String(item.error_code || item.reason || item.action_type || "action")}</div>
+                  </div>
+                ))}
+                {!manualActions.length ? <p className="hint">No open actions.</p> : null}
+              </div>
+            </article>
+
+            <article className="card">
+              <div className="panel-head">
+                <h3>Schedules</h3>
+                <span className="count-chip">{schedules.length}</span>
+              </div>
+              <div className="ledger-list">
+                {schedules.slice(0, 8).map((schedule, idx) => (
+                  <div className="ledger-row" key={`${schedule.id || "schedule"}-${idx}`}>
+                    <div>
+                      <div className="ledger-title">@{schedule.target_username || "-"}</div>
+                      <div className="ledger-meta">@{schedule.login_username || "-"}</div>
+                    </div>
+                    <div className="ledger-side">{scheduleSummary(schedule)}</div>
+                  </div>
+                ))}
+                {!schedules.length ? <p className="hint">No schedules configured.</p> : null}
+              </div>
+            </article>
+          </div>
+        ) : null}
+
+        {tab === "preferences" ? (
+          <div className="settings-stack">
+            <article className="card">
+              <div className="panel-head">
+                <h3>Collection defaults</h3>
+                <NavLink to="/settings" className="text-link">
+                  Open preferences
+                </NavLink>
+              </div>
+              <div className="summary-lineup">
+                <div className="summary-pill">
+                  <span>Backend</span>
+                  <strong>{config?.run_scraper_backend || "-"}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span>Login mode</span>
+                  <strong>{config?.run_login_mode || "-"}</strong>
+                </div>
+                <div className="summary-pill">
+                  <span>Proxy</span>
+                  <strong>{config?.proxy_enabled ? "enabled" : "off"}</strong>
+                </div>
+              </div>
+            </article>
+            <article className="card">
+              <div className="panel-head">
+                <h3>Proxy</h3>
+              </div>
+              {config?.proxy_enabled ? (
+                <div className="ledger-list">
+                  <div className="ledger-row">
+                    <div>
+                      <div className="ledger-title">{config.proxy_host || "-"}</div>
+                      <div className="ledger-meta">host</div>
+                    </div>
+                    <div className="ledger-side">{config.proxy_port ?? "-"}</div>
+                  </div>
+                  <div className="ledger-row">
+                    <div>
+                      <div className="ledger-title">{config.proxy_username || "-"}</div>
+                      <div className="ledger-meta">username</div>
+                    </div>
+                    <div className="ledger-side">
+                      <span className={`pill ${config.proxy_password_set ? "good" : "neutral"}`}>
+                        {config.proxy_password_set ? "password stored" : "no password"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <p className="hint">Proxy is disabled. Proxy settings stay hidden until enabled.</p>
+              )}
+            </article>
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function NetworkPage() {
+  return <TargetsPage initialView="people" />;
 }
 
 function ExplorerPage() {
@@ -416,26 +1733,25 @@ function ExplorerPage() {
   return (
     <section className="explorer-shell">
       <header className="page-header">
-        <h1>Explorer</h1>
-        <p>Run history and run-level relationship deltas for each tracked target account.</p>
+        <h1>Activity</h1>
       </header>
       <div className="explorer-kpis">
         <article className="explorer-kpi">
-          <span>Selected Target</span>
+          <span>Target</span>
           <strong>@{selectedTarget || "-"}</strong>
         </article>
         <article className="explorer-kpi">
-          <span>Total Runs Loaded</span>
+          <span>Snapshots</span>
           <strong>{runsQ.data?.length ?? 0}</strong>
         </article>
         <article className="explorer-kpi">
-          <span>Events In View</span>
+          <span>Log rows</span>
           <strong>{eventsQ.data?.length ?? 0}</strong>
         </article>
       </div>
       <div className="explorer-main-grid">
         <article className="card">
-          <h3>Run Selector</h3>
+          <h3>Snapshots</h3>
           <div className="form-grid">
             <label>
               Target
@@ -448,11 +1764,11 @@ function ExplorerPage() {
               </select>
             </label>
           </div>
-          <p className="hint">Pick a run. Details render on the right.</p>
+          <p className="hint">Choose a snapshot.</p>
           {runs.length ? (
             <>
               <label>
-                Run
+                Snapshot
                 <select
                   value={selectedRunId ?? ""}
                   onChange={(e) => setSelectedRunId(e.target.value ? Number(e.target.value) : null)}
@@ -501,19 +1817,19 @@ function ExplorerPage() {
             </>
           ) : (
             <div className="explorer-empty">
-              <h4>No runs yet</h4>
-              <p>Create your first run from Operations, then return to Explorer for diff insights.</p>
+              <h4>No snapshots yet</h4>
+              <p>Run a collection first.</p>
             </div>
           )}
           {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
           {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}
         </article>
         <article className="card explorer-panel">
-          <h3>Run Detail {selectedRunId ? `#${selectedRunId}` : ""}</h3>
+          <h3>Snapshot {selectedRunId ? `#${selectedRunId}` : ""}</h3>
           {!detail ? (
             <div className="explorer-empty detail-empty">
-              <h4>Select a run</h4>
-              <p>Pick a run from the selector to inspect follower/following deltas and exportable lists.</p>
+              <h4>Select a snapshot</h4>
+              <p>Pick a snapshot to inspect exact adds and removals.</p>
             </div>
           ) : null}
           {detail ? (
@@ -603,7 +1919,7 @@ function ExplorerPage() {
         </article>
       </div>
       <article className="card explorer-panel">
-        <h3>Relationship Events</h3>
+        <h3>Event log</h3>
         <div className="form-grid">
           <label>
             Scope
@@ -855,78 +2171,43 @@ function OperationsPage() {
     if (!runNeedsCode) setVerificationCode("");
   }, [runNeedsCode]);
 
+  const activeJobs = runStatusQ.data?.active_jobs?.length ?? 0;
+  const queuedJobs = runStatusQ.data?.queued_jobs?.length ?? 0;
+  const manualActionCount = manualActionsQ.data?.actions?.length ?? 0;
+  const totalSchedules = schedulesQ.data?.length ?? 0;
+
   return (
     <section>
       <header className="page-header">
         <h1>Operations</h1>
-        <p>Schedules and run controls for target-account monitoring jobs and relationship-change collection.</p>
+        <p>Queue state, recovery work, and operator-only controls. Primary launch lives in Targets.</p>
       </header>
-      <article className="card">
-        <h3>Run Now</h3>
-        <div className="form-grid">
-          <label>
-            Collector login
-            <select value={manualLogin} onChange={(e) => setManualLogin(e.target.value)}>
-              <option value="">Select login</option>
-              {(loginsQ.data ?? []).map((l, idx) => (
-                <option key={`manual-${l.login_username || "login"}-${idx}`} value={l.login_username || ""}>
-                  {l.login_username || "-"}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Target username
-            <input
-              placeholder="e.g. davidjones.tv"
-              value={manualTarget}
-              onChange={(e) => setManualTarget(e.target.value)}
-            />
-          </label>
+      <div className="dossier-strip operations-kpis">
+        <article className="dossier-cell">
+          <span>Active jobs</span>
+          <strong>{activeJobs}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Queued</span>
+          <strong>{queuedJobs}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Manual actions</span>
+          <strong>{manualActionCount}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Schedules</span>
+          <strong>{totalSchedules}</strong>
+        </article>
+      </div>
+      <article className="card panel-flat operations-callout">
+        <div>
+          <h3>Operator view</h3>
+          <p className="hint">Use this page when a run is already in motion, blocked on verification, or needs manual cleanup.</p>
         </div>
-        <div className="row gap">
-          <button onClick={onRunNow} disabled={runNowMutation.isPending}>
-            {runNowMutation.isPending ? "Queueing..." : "Start run"}
-          </button>
-          <button
-            className="btn-secondary"
-            onClick={() => cancelRunMutation.mutate({ job_id: manualJobId })}
-            disabled={cancelRunMutation.isPending || !manualJobId}
-          >
-            {cancelRunMutation.isPending ? "Cancelling..." : "Cancel job"}
-          </button>
-          <span className="hint">State: {runStatusQ.data?.state || "idle"}</span>
-          {manualJobId ? <span className="hint">Job: {manualJobId}</span> : null}
-        </div>
-        {runNowMutation.error ? <p className="error">{(runNowMutation.error as Error).message}</p> : null}
-        {cancelRunMutation.error ? <p className="error">{(cancelRunMutation.error as Error).message}</p> : null}
-        <p className="hint">
-          Active {runStatusQ.data?.active_jobs?.length ?? 0} · Queued {runStatusQ.data?.queued_jobs?.length ?? 0}
-        </p>
-        {runStatusQ.data?.cooldowns?.length ? (
-          <p className="hint">
-            Cooldowns: {(runStatusQ.data.cooldowns ?? []).map((c) => `@${c.login_username} (${c.cooldown_seconds}s)`).join(" · ")}
-          </p>
-        ) : null}
-        {manualJobId ? (
-          <>
-            <p className="hint">
-              Live: {runDone ? (runPayload?.status || runMeta?.state || "done") : (runMeta?.state || "running")}
-              {runPayload?.error ? ` · ${runPayload.error}` : ""}
-            </p>
-            {runPayload?.result ? (
-              <p className="hint">
-                Result: followers {String(runPayload.result.followers_count ?? "-")} · following {String(runPayload.result.followees_count ?? "-")} · run_id {String(runPayload.result.run_id ?? "-")}
-              </p>
-            ) : null}
-            {submitChallengeMutation.error ? <p className="error">{(submitChallengeMutation.error as Error).message}</p> : null}
-            <div className="table-wrap">
-              <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
-                {(runJobDetailQ.data?.worker_out_tail || runJobDetailQ.data?.worker_err_tail || "").trim() || "(waiting for run logs)"}
-              </pre>
-            </div>
-          </>
-        ) : null}
+        <NavLink to="/targets" className="text-link">
+          Return to targets
+        </NavLink>
       </article>
       <article className="card">
         <h3>Manual Action Queue</h3>
@@ -975,42 +2256,45 @@ function OperationsPage() {
       </article>
       <article className="card">
         <h3>Schedule Setup</h3>
-        <div className="form-grid">
-          <label>
-            Collector login
-            <select value={scheduleLogin} onChange={(e) => setScheduleLogin(e.target.value)}>
-              <option value="">Select login</option>
-              {(loginsQ.data ?? []).map((l, idx) => (
-                <option key={`${l.login_username || "login"}-${idx}`} value={l.login_username || ""}>
-                  {l.login_username || "-"}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Target username
-            <input
-              placeholder="e.g. davidjones.tv"
-              value={scheduleTarget}
-              onChange={(e) => setScheduleTarget(e.target.value)}
-            />
-          </label>
-          <label>
-            Cron interval
-            <input
-              placeholder="0 11,23 * * *"
-              value={scheduleCron}
-              onChange={(e) => setScheduleCron(e.target.value)}
-            />
-          </label>
-        </div>
-        <div className="row gap">
-          <button onClick={onCreateSchedule} disabled={createScheduleMutation.isPending}>
-            {createScheduleMutation.isPending ? "Saving..." : "Add schedule"}
-          </button>
-          <span className="hint">Example twice daily: `0 11,23 * * *`</span>
-        </div>
-        {createScheduleMutation.error ? <p className="error">{(createScheduleMutation.error as Error).message}</p> : null}
+        <details className="settings-detail">
+          <summary>Override from operations</summary>
+          <div className="form-grid">
+            <label>
+              Collector login
+              <select value={scheduleLogin} onChange={(e) => setScheduleLogin(e.target.value)}>
+                <option value="">Select login</option>
+                {(loginsQ.data ?? []).map((l, idx) => (
+                  <option key={`${l.login_username || "login"}-${idx}`} value={l.login_username || ""}>
+                    {l.login_username || "-"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Target username
+              <input
+                placeholder="e.g. davidjones.tv"
+                value={scheduleTarget}
+                onChange={(e) => setScheduleTarget(e.target.value)}
+              />
+            </label>
+            <label>
+              Cron interval
+              <input
+                placeholder="0 11,23 * * *"
+                value={scheduleCron}
+                onChange={(e) => setScheduleCron(e.target.value)}
+              />
+            </label>
+          </div>
+          <div className="row gap">
+            <button onClick={onCreateSchedule} disabled={createScheduleMutation.isPending}>
+              {createScheduleMutation.isPending ? "Saving..." : "Add schedule"}
+            </button>
+            <span className="hint">Example twice daily: `0 11,23 * * *`</span>
+          </div>
+          {createScheduleMutation.error ? <p className="error">{(createScheduleMutation.error as Error).message}</p> : null}
+        </details>
       </article>
       <article className="card">
         <h3>Schedules</h3>
@@ -1022,7 +2306,7 @@ function OperationsPage() {
                 <th>ID</th>
                 <th>Login</th>
                 <th>Target</th>
-                <th>Cron</th>
+                <th>Schedule</th>
                 <th>Next Run</th>
                 <th>Actions</th>
               </tr>
@@ -1033,7 +2317,7 @@ function OperationsPage() {
                   <td>{sch.id ?? "-"}</td>
                   <td>{sch.login_username || "-"}</td>
                   <td>{sch.target_username || "-"}</td>
-                  <td>{sch.interval || "-"}</td>
+                  <td>{sch.schedule_label || sch.interval || "-"}</td>
                   <td>{formatTime(sch.next_run || undefined)}</td>
                   <td>
                     <button
@@ -1052,6 +2336,76 @@ function OperationsPage() {
             </tbody>
           </table>
         </div>
+      </article>
+      <article className="card">
+        <h3>Emergency Run Control</h3>
+        <details className="settings-detail">
+          <summary>Open manual launch controls</summary>
+          <div className="form-grid">
+            <label>
+              Collector login
+              <select value={manualLogin} onChange={(e) => setManualLogin(e.target.value)}>
+                <option value="">Select login</option>
+                {(loginsQ.data ?? []).map((l, idx) => (
+                  <option key={`manual-${l.login_username || "login"}-${idx}`} value={l.login_username || ""}>
+                    {l.login_username || "-"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Target username
+              <input
+                placeholder="e.g. davidjones.tv"
+                value={manualTarget}
+                onChange={(e) => setManualTarget(e.target.value)}
+              />
+            </label>
+          </div>
+          <div className="row gap">
+            <button onClick={onRunNow} disabled={runNowMutation.isPending}>
+              {runNowMutation.isPending ? "Queueing..." : "Start run"}
+            </button>
+            <button
+              className="btn-secondary"
+              onClick={() => cancelRunMutation.mutate({ job_id: manualJobId })}
+              disabled={cancelRunMutation.isPending || !manualJobId}
+            >
+              {cancelRunMutation.isPending ? "Cancelling..." : "Cancel job"}
+            </button>
+            <span className="hint">State: {runStatusQ.data?.state || "idle"}</span>
+            {manualJobId ? <span className="hint">Job: {manualJobId}</span> : null}
+          </div>
+          {runNowMutation.error ? <p className="error">{(runNowMutation.error as Error).message}</p> : null}
+          {cancelRunMutation.error ? <p className="error">{(cancelRunMutation.error as Error).message}</p> : null}
+          <p className="hint">
+            Active {activeJobs} · Queued {queuedJobs}
+          </p>
+          {runStatusQ.data?.cooldowns?.length ? (
+            <p className="hint">
+              Cooldowns: {(runStatusQ.data.cooldowns ?? []).map((c) => `@${c.login_username} (${c.cooldown_seconds}s)`).join(" · ")}
+            </p>
+          ) : null}
+          {manualJobId ? (
+            <>
+              <p className="hint">
+                Live: {runDone ? (runPayload?.status || runMeta?.state || "done") : (runMeta?.state || "running")}
+                {runPayload?.error ? ` · ${runPayload.error}` : ""}
+              </p>
+              {runPayload?.result ? (
+                <p className="hint">
+                  Result: followers {String(runPayload.result.followers_count ?? "-")} · following {String(runPayload.result.followees_count ?? "-")} · run_id {String(runPayload.result.run_id ?? "-")}
+                </p>
+              ) : null}
+              {submitChallengeMutation.error ? <p className="error">{(submitChallengeMutation.error as Error).message}</p> : null}
+              <div className="table-wrap">
+                <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+                  {(runJobDetailQ.data?.worker_out_tail || runJobDetailQ.data?.worker_err_tail || "").trim() || "(waiting for run logs)"}
+                </pre>
+              </div>
+            </>
+          ) : null}
+        </details>
       </article>
       {runNeedsCode && showCodeModal ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setShowCodeModal(false)}>
@@ -1256,6 +2610,7 @@ function AccountsPage() {
   const [queueWarmupRun, setQueueWarmupRun] = useState(false);
   const [scheduleInterval, setScheduleInterval] = useState("");
   const [selectedAuthLogin, setSelectedAuthLogin] = useState("");
+  const [activePanel, setActivePanel] = useState<"setup" | "factory" | "maintenance" | "diagnostics">("setup");
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [passwordModalLogin, setPasswordModalLogin] = useState("");
   const [passwordModalValue, setPasswordModalValue] = useState("");
@@ -1377,6 +2732,39 @@ function AccountsPage() {
         <h1>Accounts</h1>
         <p>Tracking account readiness and session state for target monitoring and timeline collection runs.</p>
       </header>
+      <div className="dossier-strip accounts-kpis">
+        <article className="dossier-cell">
+          <span>Ready sessions</span>
+          <strong>{readyCount}/{loginsQ.data?.length ?? 0}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Factory state</span>
+          <strong>{accountCreateQ.data?.job?.state || "idle"}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Runner mode</span>
+          <strong>{String(cfgQ.data?.config?.run_login_mode || "auto")}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Diagnostics</span>
+          <strong>{selectedAuthLogin ? `@${selectedAuthLogin}` : "-"}</strong>
+        </article>
+      </div>
+      <div className="section-switcher">
+        <button className={`system-tab ${activePanel === "setup" ? "active" : ""}`} onClick={() => setActivePanel("setup")}>
+          Setup
+        </button>
+        <button className={`system-tab ${activePanel === "factory" ? "active" : ""}`} onClick={() => setActivePanel("factory")}>
+          Factory
+        </button>
+        <button className={`system-tab ${activePanel === "maintenance" ? "active" : ""}`} onClick={() => setActivePanel("maintenance")}>
+          Maintenance
+        </button>
+        <button className={`system-tab ${activePanel === "diagnostics" ? "active" : ""}`} onClick={() => setActivePanel("diagnostics")}>
+          Diagnostics
+        </button>
+      </div>
+      {activePanel === "setup" ? (
       <article className="card">
         <h3>Account Setup Wizard</h3>
         <div className="wizard-steps">
@@ -1386,7 +2774,7 @@ function AccountsPage() {
           </div>
           <div className="wizard-step">
             <strong>2. Run first capture</strong>
-            <span>Use Operations to create a schedule for your target account.</span>
+            <span>Use Targets to launch the first run or create a schedule for your target account.</span>
           </div>
           <div className="wizard-step">
             <strong>3. Review relationship timeline</strong>
@@ -1426,6 +2814,8 @@ function AccountsPage() {
         {addLoginMutation.error ? <p className="error">{(addLoginMutation.error as Error).message}</p> : null}
         <p className="hint">Current default login mode: {cfgQ.data?.config?.run_login_mode || "auto"}</p>
       </article>
+      ) : null}
+      {activePanel === "factory" ? (
       <article className="card">
         <h3>Account Factory (automated signup)</h3>
         <div className="form-grid">
@@ -1517,6 +2907,8 @@ function AccountsPage() {
           </pre>
         </div>
       </article>
+      ) : null}
+      {activePanel === "maintenance" ? (
       <article className="card">
         <p className="hint">Ready sessions {readyCount} / {loginsQ.data?.length ?? 0}</p>
         <div className="table-wrap desktop-only">
@@ -1626,6 +3018,8 @@ function AccountsPage() {
           {!(loginsQ.data ?? []).length ? <p className="hint">No login accounts returned.</p> : null}
         </div>
       </article>
+      ) : null}
+      {activePanel === "diagnostics" ? (
       <article className="card">
         <h3>Auth Diagnostics</h3>
         {requestResetMutation.data ? (
@@ -1696,6 +3090,7 @@ function AccountsPage() {
           </pre>
         </div>
       </article>
+      ) : null}
       {passwordModalOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setPasswordModalOpen(false)}>
           <div className="modal-card" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
@@ -1837,6 +3232,8 @@ function SettingsPage() {
       .map((section) => ({ section, keys: (grouped.get(section) || []).sort() }))
       .filter((x) => x.keys.length > 0);
   }, [draft]);
+  const booleanCount = Object.values(draft).filter((value) => typeof value === "boolean").length;
+  const numericCount = Object.values(draft).filter((value) => typeof value === "number").length;
 
   return (
     <section>
@@ -1844,90 +3241,111 @@ function SettingsPage() {
         <h1>Settings</h1>
         <p>Runtime settings that affect target-account tracking cadence and operations behavior.</p>
       </header>
+      <div className="dossier-strip settings-kpi-strip">
+        <article className="dossier-cell">
+          <span>Sections</span>
+          <strong>{sections.length}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Booleans</span>
+          <strong>{booleanCount}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Numeric controls</span>
+          <strong>{numericCount}</strong>
+        </article>
+        <article className="dossier-cell">
+          <span>Backend</span>
+          <strong>{String(draft.run_scraper_backend || "-")}</strong>
+        </article>
+      </div>
       {!cfgQ.data?.config ? (
         <article className="card"><p className="hint">Loading settings…</p></article>
       ) : null}
       {sections.map(({ section, keys }) => (
         <article className="card settings-group" key={section}>
-          <h3>{section} Settings</h3>
-          <div className="settings-grid">
-            {keys.map((key) => {
-              const value = draft[key];
-              if (typeof value === "undefined") return null;
-              if (key === "run_login_mode") {
-                return (
-                  <label key={key}>
-                    {labelForKey(key)}
-                    <select value={String(value)} onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}>
-                      <option value="auto">auto</option>
-                      <option value="session_only">session_only</option>
-                      <option value="password">password</option>
-                      <option value="anonymous">anonymous</option>
-                    </select>
-                  </label>
-                );
-              }
-              if (key === "run_scraper_backend") {
-                return (
-                  <label key={key}>
-                    {labelForKey(key)}
-                    <select
-                      value={String(value)}
-                      onChange={(e) =>
-                        setDraft((prev) => {
-                          const nextBackend = e.target.value === "private" ? "private" : "browser";
-                          const profile = backendProfiles[nextBackend] || {};
-                          return { ...prev, run_scraper_backend: nextBackend, ...profile };
-                        })
-                      }
-                    >
-                      <option value="browser">browser (web session)</option>
-                      <option value="private">instagrapi (private API)</option>
-                    </select>
-                    <span className="hint">Switching backend auto-loads the tuned delay/rate profile.</span>
-                  </label>
-                );
-              }
-              if (typeof value === "boolean") {
-                return (
-                  <label key={key}>
-                    {labelForKey(key)}
-                    <select
-                      value={value ? "true" : "false"}
-                      onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value === "true" }))}
-                    >
-                      <option value="true">true</option>
-                      <option value="false">false</option>
-                    </select>
-                  </label>
-                );
-              }
-              if (typeof value === "number") {
+          <details className="settings-detail" open={section === "Run"}>
+            <summary>{section} Settings</summary>
+            <p className="hint settings-summary">{sectionSummary(section, keys)}</p>
+            <div className="settings-grid">
+              {keys.map((key) => {
+                const value = draft[key];
+                if (typeof value === "undefined") return null;
+                if (key === "run_login_mode") {
+                  return (
+                    <label key={key}>
+                      {labelForKey(key)}
+                      <select value={String(value)} onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}>
+                        <option value="auto">auto</option>
+                        <option value="session_only">session_only</option>
+                        <option value="password">password</option>
+                        <option value="anonymous">anonymous</option>
+                      </select>
+                    </label>
+                  );
+                }
+                if (key === "run_scraper_backend") {
+                  return (
+                    <label key={key}>
+                      {labelForKey(key)}
+                      <select
+                        value={String(value)}
+                        onChange={(e) =>
+                          setDraft((prev) => {
+                            const nextBackend = e.target.value === "private" ? "private" : "browser";
+                            const profile = backendProfiles[nextBackend] || {};
+                            return { ...prev, run_scraper_backend: nextBackend, ...profile };
+                          })
+                        }
+                      >
+                        <option value="browser">browser (web session)</option>
+                        <option value="private">instagrapi (private API)</option>
+                      </select>
+                      <span className="hint">Switching backend auto-loads the tuned delay/rate profile.</span>
+                    </label>
+                  );
+                }
+                if (typeof value === "boolean") {
+                  return (
+                    <label key={key}>
+                      {labelForKey(key)}
+                      <select
+                        value={value ? "true" : "false"}
+                        onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value === "true" }))}
+                      >
+                        <option value="true">true</option>
+                        <option value="false">false</option>
+                      </select>
+                    </label>
+                  );
+                }
+                if (typeof value === "number") {
+                  return (
+                    <label key={key}>
+                      {labelForKey(key)}
+                      <input
+                        type="number"
+                        value={String(value)}
+                        onChange={(e) => {
+                          const num = e.target.value === "" ? 0 : Number(e.target.value);
+                          setDraft((prev) => ({ ...prev, [key]: Number.isFinite(num) ? num : value }));
+                        }}
+                      />
+                    </label>
+                  );
+                }
                 return (
                   <label key={key}>
                     {labelForKey(key)}
                     <input
-                      type="number"
                       value={String(value)}
-                      onChange={(e) => {
-                        const num = e.target.value === "" ? 0 : Number(e.target.value);
-                        setDraft((prev) => ({ ...prev, [key]: Number.isFinite(num) ? num : value }));
-                      }}
+                      onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
                     />
                   </label>
                 );
-              }
-              return (
-                <label key={key}>
-                  {labelForKey(key)}
-                  <input
-                    value={String(value)}
-                    onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
-                  />
-                </label>
-              );
-            })}
-          </div>
+              })}
+            </div>
+          </details>
         </article>
       ))}
       <article className="card">
@@ -1974,8 +3392,17 @@ export default function App() {
     <AppShell>
       <Routes>
         <Route path="/" element={<CommandCenterPage />} />
+        <Route path="/home" element={<CommandCenterPage />} />
+        <Route path="/brief" element={<CommandCenterPage />} />
+        <Route path="/digest" element={<CommandCenterPage />} />
         <Route path="/targets" element={<TargetsPage />} />
+        <Route path="/subjects" element={<TargetsPage />} />
+        <Route path="/network" element={<NetworkPage />} />
+        <Route path="/people" element={<NetworkPage />} />
+        <Route path="/activity" element={<ExplorerPage />} />
         <Route path="/explorer" element={<ExplorerPage />} />
+        <Route path="/system" element={<SystemPage />} />
+        <Route path="/machinery" element={<SystemPage />} />
         <Route path="/operations" element={<OperationsPage />} />
         <Route path="/unfollow" element={<UnfollowPage />} />
         <Route path="/accounts" element={<AccountsPage />} />

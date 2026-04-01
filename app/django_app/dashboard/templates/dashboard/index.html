@@ -1002,34 +1002,6 @@
             </div>
           </div>
           <div class="config-card">
-            <h4>Monitoring</h4>
-            <div class="config-grid">
-              <div>
-                <label for="cfg-monitor-enabled">Auto monitor</label>
-                <select id="cfg-monitor-enabled">
-                  <option value="true">Enabled</option>
-                  <option value="false">Disabled</option>
-                </select>
-              </div>
-              <div>
-                <label for="cfg-monitor-interval">Check interval (min)</label>
-                <input id="cfg-monitor-interval" type="number" min="30" max="720">
-              </div>
-              <div>
-                <label for="cfg-monitor-threshold">Trigger threshold (accounts)</label>
-                <input id="cfg-monitor-threshold" type="number" min="1" max="200">
-              </div>
-              <div>
-                <label for="cfg-monitor-gap">Min gap between full runs (min)</label>
-                <input id="cfg-monitor-gap" type="number" min="60" max="1440">
-              </div>
-              <div>
-                <label for="cfg-monitor-login">Monitor login</label>
-                <select id="cfg-monitor-login"></select>
-              </div>
-            </div>
-          </div>
-          <div class="config-card">
             <h4>Schedule defaults</h4>
             <div class="config-grid">
               <div>
@@ -1783,15 +1755,6 @@
       document.getElementById('cfg-sch-time2').value = src.schedule_default_time2 ?? '21:00';
       document.getElementById('cfg-sch-weekday').value = String(src.schedule_default_weekday ?? 1);
       document.getElementById('cfg-ui-timezone').value = src.ui_timezone ?? 'America/New_York';
-      const monEnabled = (src.monitor_enabled ?? true) ? 'true' : 'false';
-      document.getElementById('cfg-monitor-enabled').value = monEnabled;
-      document.getElementById('cfg-monitor-interval').value = src.monitor_interval_minutes ?? 120;
-      document.getElementById('cfg-monitor-threshold').value = src.monitor_threshold_delta ?? 4;
-      document.getElementById('cfg-monitor-gap').value = src.monitor_min_gap_minutes ?? 180;
-      if (src.monitor_login_username) {
-        const monSel = document.getElementById('cfg-monitor-login');
-        if (monSel) monSel.value = src.monitor_login_username;
-      }
       document.getElementById('cfg-proxy-enabled').value = (src.proxy_enabled ?? false) ? 'true' : 'false';
       document.getElementById('cfg-proxy-provider').value = src.proxy_provider ?? 'decodo';
       document.getElementById('cfg-proxy-access').value = src.proxy_access_mode ?? 'native';
@@ -1860,11 +1823,6 @@
         schedule_default_time2: document.getElementById('cfg-sch-time2').value,
         schedule_default_weekday: Number(document.getElementById('cfg-sch-weekday').value || 0),
         ui_timezone: document.getElementById('cfg-ui-timezone').value.trim() || 'America/New_York',
-        monitor_enabled: document.getElementById('cfg-monitor-enabled').value === 'true',
-        monitor_interval_minutes: Number(document.getElementById('cfg-monitor-interval').value || 0),
-        monitor_threshold_delta: Number(document.getElementById('cfg-monitor-threshold').value || 0),
-        monitor_min_gap_minutes: Number(document.getElementById('cfg-monitor-gap').value || 0),
-        monitor_login_username: document.getElementById('cfg-monitor-login').value || '',
         proxy_enabled: document.getElementById('cfg-proxy-enabled').value === 'true',
         proxy_provider: document.getElementById('cfg-proxy-provider').value,
         proxy_access_mode: document.getElementById('cfg-proxy-access').value,
