@@ -9,6 +9,8 @@
 /job_runs/
 /cookies/
 /.playwright/
+/.playwright-cli/
+app/.playwright-cli/
 *.db
 *.sqlite
 *.sqlite3

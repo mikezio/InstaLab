@@ -43,7 +43,7 @@ If you already have Postgres running, set the `INSTALAB_DB_*` values in `.env` a
 - Default DB name/user: `instalab` (see `docker-compose.local-postgres.yml`).
 
 ## Authentication flow
-- Browser backend (default): run `/api/unfollow/init` once to create Playwright storage state at `INSTALAB_BROWSER_STORAGE_PATH`, then runs reuse that signed-in browser session.
+- Browser backend (default): initialize collector auth via `POST /api/collector/auth/init` for a specific `login_username`, then confirm readiness with `GET /api/collector/auth/status?login_username=<login>`. Browser auth state is stored per login under `INSTALAB_BROWSER_STORAGE_DIR` (default `/data/instalab/browser/<login>.json`).
 - Private backend (`instagrapi`): logins are stored in Postgres `login_accounts` and encrypted at rest.
 - For private backend, a first successful login caches session settings; subsequent runs reuse the session.
 - 2FA is supported via TOTP or SMS/email challenge codes.
