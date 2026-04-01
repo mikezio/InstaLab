@@ -10,6 +10,7 @@ services:
     environment:
       INSTALAB_ENV: /srv/secrets/instalab.env
       INSTALAB_DB_HOST: apps-postgres
+      INSTALAB_BROWSER_STORAGE_DIR: /data/instalab/browser
       HOME: /data/instalab/home
       DISPLAY: :99
       # UI redirect configuration - set INSTALAB_UI_BASE_URL for external access
@@ -64,6 +65,7 @@ services:
     environment:
       INSTALAB_ENV: /srv/secrets/instalab.env
       INSTALAB_API_BASE: http://instalab-api:5000/
+      INSTALAB_BROWSER_STORAGE_DIR: /data/instalab/browser
       INSTALAB_UI_VARIANT: modern
       INSTALAB_DB_HOST: apps-postgres
       DD_SERVICE: instalab-ui

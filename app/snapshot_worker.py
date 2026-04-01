@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+from pathlib import Path
 import time
 import ssl
 import urllib.request
@@ -10,7 +11,7 @@ from contextlib import contextmanager
 
 
 def _select_backend():
-    name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
+    name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "browser").strip().lower()
     if name in {"private", "private_api", "private-api", "osintgram"}:
         from private_api_tracker import has_session, snapshot_profile  # type: ignore
         return has_session, snapshot_profile
@@ -81,7 +82,7 @@ def main():
         print("Warning: --request-timeout is deprecated; use --http-timeout", flush=True)
     http_timeout_seconds = float(args.http_timeout if args.http_timeout is not None else (args.request_timeout if args.request_timeout is not None else 600.0))
     request_sleep_seconds = float(args.request_sleep if args.request_sleep is not None else (os.environ.get("RUN_PRIVATE_REQUEST_SLEEP_SECONDS") or 0))
-    backend_name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
+    backend_name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "browser").strip().lower()
     proxy_set = bool(os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"))
     proxy_enabled_flag = str(os.environ.get("INSTALAB_PROXY_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
     proxy_session_id = (os.environ.get("RUN_PROXY_SESSION_ID") or "").strip()
@@ -191,6 +192,7 @@ def main():
                     device_settings_json=device_settings_json,
                     user_agent=user_agent,
                     progress=_progress_writer(args.progress),
+                    artifact_dir=str(Path(args.result).resolve().parent),
                 )
             slim = {
                 "timestamp": res.get("timestamp"),

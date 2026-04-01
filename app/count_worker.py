@@ -6,7 +6,7 @@ from contextlib import contextmanager
 
 
 def _select_backend():
-    name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
+    name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "browser").strip().lower()
     if name in {"private", "private_api", "private-api", "osintgram"}:
         from private_api_tracker import fetch_counts, has_session  # type: ignore
         return fetch_counts, has_session
@@ -72,7 +72,7 @@ def main():
     if not anonymous_mode and not password and not has_session(args.login):
         with _trace_span(
             "instalab.count_check",
-            backend=(os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower(),
+            backend=(os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "browser").strip().lower(),
             proxy_enabled=bool(os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")),
             login_mode=login_mode,
         ) as span:
@@ -83,7 +83,7 @@ def main():
         return 2
     password = password or ""
 
-    backend_name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "private").strip().lower()
+    backend_name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "browser").strip().lower()
     proxy_enabled = bool(os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY"))
     with _trace_span(
         "instalab.count_check",

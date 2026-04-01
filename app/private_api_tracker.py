@@ -151,6 +151,21 @@ class PrivateAPIError(RuntimeError):
         self.code = code
 
 
+def _visibility_limited_message(payload: dict | None, kind: str) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    special = payload.get("special_empty_state")
+    if not isinstance(special, dict):
+        return None
+    users = payload.get("users")
+    if users not in (None, [], ()):
+        return None
+    body = str(special.get("body") or "").strip()
+    title = str(special.get("title") or "").strip()
+    detail = body or title or "instagram limited list visibility for this target"
+    return f"instagram visibility limited while fetching {kind}: {detail}"
+
+
 def _normalize_login_mode(login_mode: str | None) -> str:
     mode = (login_mode or "auto").strip().lower()
     if mode in {"session", "session-only"}:
@@ -1801,7 +1816,13 @@ def snapshot_profile(
                     target_username=target_username,
                     target_id=target_id,
                 ):
-                    followers_map = client.user_followers(target_id, amount=0)
+                    try:
+                        followers_map = client.user_followers(target_id, amount=0)
+                    except Exception as exc:
+                        _raise_login_error(exc, getattr(client, "last_json", None))
+                    message = _visibility_limited_message(getattr(client, "last_json", None), "followers")
+                    if message:
+                        raise PrivateAPIError("visibility_limited", message)
                 vals = [u.username for u in followers_map.values() if getattr(u, "username", None)]
             secs = int(time.time() - t0)
             if progress:
@@ -1834,7 +1855,13 @@ def snapshot_profile(
                     target_username=target_username,
                     target_id=target_id,
                 ):
-                    followees_map = client.user_following(target_id, amount=0)
+                    try:
+                        followees_map = client.user_following(target_id, amount=0)
+                    except Exception as exc:
+                        _raise_login_error(exc, getattr(client, "last_json", None))
+                    message = _visibility_limited_message(getattr(client, "last_json", None), "following")
+                    if message:
+                        raise PrivateAPIError("visibility_limited", message)
                 vals = [u.username for u in followees_map.values() if getattr(u, "username", None)]
             secs = int(time.time() - t0)
             if progress:
@@ -1844,20 +1871,23 @@ def snapshot_profile(
                     pass
             return vals, secs
 
-        if order == "following_first":
-            followees, followees_fetch_seconds = _fetch_following()
-            _sleep_jitter(item_delay_min, item_delay_max)
-            _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
-            if cancel_check and cancel_check():
-                raise RuntimeError("cancelled")
-            followers, followers_fetch_seconds = _fetch_followers()
-        else:
-            followers, followers_fetch_seconds = _fetch_followers()
-            _sleep_jitter(item_delay_min, item_delay_max)
-            _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
-            if cancel_check and cancel_check():
-                raise RuntimeError("cancelled")
-            followees, followees_fetch_seconds = _fetch_following()
+        try:
+            if order == "following_first":
+                followees, followees_fetch_seconds = _fetch_following()
+                _sleep_jitter(item_delay_min, item_delay_max)
+                _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
+                if cancel_check and cancel_check():
+                    raise RuntimeError("cancelled")
+                followers, followers_fetch_seconds = _fetch_followers()
+            else:
+                followers, followers_fetch_seconds = _fetch_followers()
+                _sleep_jitter(item_delay_min, item_delay_max)
+                _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
+                if cancel_check and cancel_check():
+                    raise RuntimeError("cancelled")
+                followees, followees_fetch_seconds = _fetch_following()
+        except PrivateAPIError:
+            raise
 
         non_followbacks = sorted(set(followees) - set(followers))
         followers_rate = round(len(followers) / followers_fetch_seconds, 3) if followers_fetch_seconds else None

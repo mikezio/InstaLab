@@ -98,9 +98,32 @@ def _init_db(conn):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS count_watch_samples (
+            id SERIAL PRIMARY KEY,
+            target_username TEXT NOT NULL,
+            login_username TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            followers_count INTEGER NOT NULL,
+            followees_count INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            triggered_full_run INTEGER NOT NULL DEFAULT 0,
+            triggered_run_id INTEGER,
+            schedule_id INTEGER,
+            trigger_delta INTEGER
+        )
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_target_time ON runs(target_username, timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_run_followers_run ON run_followers(run_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_run_followees_run ON run_followees(run_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_count_watch_target_time ON count_watch_samples(target_username, timestamp)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_count_watch_schedule_time ON count_watch_samples(schedule_id, timestamp)"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_followers_hist_target_active ON followers_history(target_username, active)"
     )
@@ -685,6 +708,114 @@ def write_run_profile_counts(
         },
         run_id,
     )
+
+
+def get_latest_count_watch_sample(*, target_username):
+    samples = get_recent_count_watch_samples(target_username=target_username, limit=1)
+    return samples[0] if samples else None
+
+
+def get_recent_count_watch_samples(*, target_username, limit=3):
+    conn = get_db()
+    try:
+        if not is_postgres():
+            conn.execute("PRAGMA busy_timeout=30000")
+        _init_db(conn)
+        rows = conn.execute(
+            """
+            SELECT id, timestamp, followers_count, followees_count,
+                   triggered_full_run, triggered_run_id, schedule_id, trigger_delta
+            FROM count_watch_samples
+            WHERE target_username = ?
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            """,
+            (target_username, max(1, int(limit or 1))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_recent_complete_run_totals(*, target_username, limit=5):
+    conn = get_db()
+    try:
+        if not is_postgres():
+            conn.execute("PRAGMA busy_timeout=30000")
+        _init_db(conn)
+        rows = conn.execute(
+            """
+            SELECT id, timestamp, followers_count, followees_count,
+                   followers_collected_count, followees_collected_count,
+                   snapshot_complete, snapshot_note
+            FROM runs
+            WHERE target_username = ?
+              AND COALESCE(snapshot_complete, 1) = 1
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            """,
+            (target_username, max(1, int(limit or 1))),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def write_count_watch_sample(
+    *,
+    login_username,
+    target_username,
+    timestamp,
+    followers_count,
+    followees_count,
+    triggered_full_run=False,
+    triggered_run_id=None,
+    schedule_id=None,
+    trigger_delta=None,
+):
+    tz = ZoneInfo("America/New_York")
+    conn = get_db()
+    try:
+        if not is_postgres():
+            conn.execute("PRAGMA busy_timeout=30000")
+        _init_db(conn)
+        created_at = datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S %Z")
+        insert_sql = """
+            INSERT INTO count_watch_samples (
+                target_username,
+                login_username,
+                timestamp,
+                followers_count,
+                followees_count,
+                created_at,
+                triggered_full_run,
+                triggered_run_id,
+                schedule_id,
+                trigger_delta
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        params = (
+            target_username,
+            login_username,
+            timestamp,
+            int(followers_count),
+            int(followees_count),
+            created_at,
+            1 if triggered_full_run else 0,
+            triggered_run_id,
+            schedule_id,
+            int(trigger_delta) if trigger_delta is not None else None,
+        )
+        if is_postgres():
+            cur = conn.execute(insert_sql + " RETURNING id", params)
+            sample_id = cur.fetchone()[0]
+        else:
+            conn.execute(insert_sql, params)
+            sample_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+        return int(sample_id)
+    finally:
+        conn.close()
 
 
 def update_run_duration(db_path, run_id, duration_seconds):

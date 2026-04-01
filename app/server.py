@@ -32,16 +32,28 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from flask import Flask, Response, jsonify, request, send_from_directory, redirect
 import requests
 
 from tracker_db import (
     backfill_relationship_events,
+    get_latest_count_watch_sample,
+    get_recent_count_watch_samples,
     update_run_duration,
+    write_count_watch_sample,
     write_run_metadata,
     _init_db as _init_run_db,
 )
-from account_browser_flow import AuthRequiredError, create_account_guided, ensure_auth_state, init_login
+from account_browser_flow import (
+    AuthRequiredError,
+    browser_profile_dir_for_login,
+    browser_profile_has_state,
+    create_account_guided,
+    ensure_auth_state,
+    init_login,
+    storage_state_has_session,
+)
 from unfollow_bot import unfollow_users
 from db import get_db, get_columns, ddl, is_postgres
 from login_store import (
@@ -291,6 +303,38 @@ SCRAPER_BACKEND_ALIASES = {
     "playwright": "browser",
 }
 
+SCHEDULE_MODE_ALLOWED = {"full_run", "count_watch"}
+SCHEDULE_MODE_ALIASES = {
+    "full": "full_run",
+    "run": "full_run",
+    "count": "count_watch",
+    "count_only": "count_watch",
+    "count-only": "count_watch",
+    "counts": "count_watch",
+    "watch": "count_watch",
+}
+
+SCHEDULE_KIND_ALLOWED = {"cron", "daily", "weekly", "every_n_days"}
+SCHEDULE_KIND_ALIASES = {
+    "every_day": "daily",
+    "every-day": "daily",
+    "daily_at": "daily",
+    "every_week": "weekly",
+    "every-week": "weekly",
+    "every_n_day": "every_n_days",
+    "every-n-days": "every_n_days",
+    "interval_days": "every_n_days",
+}
+WEEKDAY_LABELS = {
+    0: "Sunday",
+    1: "Monday",
+    2: "Tuesday",
+    3: "Wednesday",
+    4: "Thursday",
+    5: "Friday",
+    6: "Saturday",
+}
+
 RUN_BACKEND_TUNING_PROFILES = {
     # Safer cadence for instagrapi/private API to reduce throttling risk.
     "private": {
@@ -308,16 +352,16 @@ RUN_BACKEND_TUNING_PROFILES = {
     },
     # Browser collector can run faster while keeping basic jitter.
     "browser": {
-        "run_http_timeout_seconds": 60.0,
-        "run_request_timeout": 60.0,
+        "run_http_timeout_seconds": 90.0,
+        "run_request_timeout": 90.0,
         "run_private_request_sleep_seconds": 0.0,
-        "run_item_delay_min": 0.25,
-        "run_item_delay_max": 0.75,
-        "run_initial_fetch_delay_seconds": 1.0,
-        "run_pause_every_min": 0,
-        "run_pause_every_max": 0,
-        "run_pause_seconds_min": 0.0,
-        "run_pause_seconds_max": 0.0,
+        "run_item_delay_min": 0.2,
+        "run_item_delay_max": 0.6,
+        "run_initial_fetch_delay_seconds": 1.5,
+        "run_pause_every_min": 175,
+        "run_pause_every_max": 275,
+        "run_pause_seconds_min": 4.0,
+        "run_pause_seconds_max": 9.0,
         "run_rate_limit_cooldown_seconds": 1800,
     },
 }
@@ -357,10 +401,140 @@ def _is_private_backend_name(value: str | None) -> bool:
     return _normalize_scraper_backend(value) == "private"
 
 
+def _normalize_schedule_mode(value: str | None) -> str:
+    mode = str(value or "full_run").strip().lower()
+    mode = SCHEDULE_MODE_ALIASES.get(mode, mode)
+    if mode not in SCHEDULE_MODE_ALLOWED:
+        return "full_run"
+    return mode
+
+
+def _normalize_schedule_kind(value: str | None) -> str:
+    kind = str(value or "cron").strip().lower()
+    kind = SCHEDULE_KIND_ALIASES.get(kind, kind)
+    if kind not in SCHEDULE_KIND_ALLOWED:
+        return "cron"
+    return kind
+
+
+def _normalize_schedule_time(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.strptime(raw, "%H:%M")
+    except ValueError:
+        return None
+    return parsed.strftime("%H:%M")
+
+
+def _normalize_schedule_weekday(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        weekday = int(value)
+    except Exception:
+        return None
+    if weekday < 0 or weekday > 6:
+        return None
+    return weekday
+
+
+def _normalize_schedule_interval_days(value) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        days = int(value)
+    except Exception:
+        return None
+    return max(1, days)
+
+
+def _normalize_schedule_start_date(value: str | None) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.strptime(raw, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return parsed.strftime("%Y-%m-%d")
+
+
+def _schedule_label(*, kind: str, interval: str | None = None, schedule_time: str | None = None, weekday: int | None = None, interval_days: int | None = None, start_date: str | None = None) -> str:
+    normalized = _normalize_schedule_kind(kind)
+    if normalized == "daily":
+        return f"Every day at {schedule_time or '--:--'}"
+    if normalized == "weekly":
+        day_name = WEEKDAY_LABELS.get(int(weekday or 0), "Unknown day")
+        return f"Every {day_name} at {schedule_time or '--:--'}"
+    if normalized == "every_n_days":
+        days = max(1, int(interval_days or 1))
+        anchor = start_date or "today"
+        unit = "day" if days == 1 else "days"
+        return f"Every {days} {unit} at {schedule_time or '--:--'} starting {anchor}"
+    return str(interval or "").strip() or "Custom schedule"
+
+
+def _build_schedule_trigger(*, kind: str, interval: str | None = None, schedule_time: str | None = None, weekday: int | None = None, interval_days: int | None = None, start_date: str | None = None):
+    normalized = _normalize_schedule_kind(kind)
+    if normalized == "daily":
+        parsed_time = _normalize_schedule_time(schedule_time)
+        if not parsed_time:
+            raise ValueError("schedule_time must be a valid HH:MM value for daily schedules")
+        hour, minute = [int(part) for part in parsed_time.split(":", 1)]
+        return CronTrigger(hour=hour, minute=minute, timezone=LOCAL_TZ)
+    if normalized == "weekly":
+        parsed_time = _normalize_schedule_time(schedule_time)
+        parsed_weekday = _normalize_schedule_weekday(weekday)
+        if not parsed_time:
+            raise ValueError("schedule_time must be a valid HH:MM value for weekly schedules")
+        if parsed_weekday is None:
+            raise ValueError("schedule_weekday must be 0-6 for weekly schedules")
+        hour, minute = [int(part) for part in parsed_time.split(":", 1)]
+        return CronTrigger(day_of_week=str(parsed_weekday), hour=hour, minute=minute, timezone=LOCAL_TZ)
+    if normalized == "every_n_days":
+        parsed_time = _normalize_schedule_time(schedule_time)
+        parsed_days = _normalize_schedule_interval_days(interval_days)
+        parsed_start_date = _normalize_schedule_start_date(start_date) or datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
+        if not parsed_time:
+            raise ValueError("schedule_time must be a valid HH:MM value for every-N-days schedules")
+        if parsed_days is None:
+            raise ValueError("schedule_interval_days must be an integer >= 1 for every-N-days schedules")
+        start_dt = datetime.fromisoformat(f"{parsed_start_date}T{parsed_time}:00").replace(tzinfo=LOCAL_TZ)
+        now = datetime.now(LOCAL_TZ)
+        while start_dt <= now:
+            start_dt += timedelta(days=parsed_days)
+        return IntervalTrigger(days=parsed_days, start_date=start_dt, timezone=LOCAL_TZ)
+    cron_expr = str(interval or "").strip()
+    if not cron_expr:
+        raise ValueError("interval is required for cron schedules")
+    return CronTrigger.from_crontab(cron_expr, timezone=LOCAL_TZ)
+
+
 def _backend_tuning_profile(value: str | None) -> dict:
     backend = _normalize_scraper_backend(value)
     profile = RUN_BACKEND_TUNING_PROFILES.get(backend, {})
     return dict(profile)
+
+
+def _count_watch_run_overrides() -> dict:
+    overrides = _backend_tuning_profile("browser")
+    overrides.update(
+        {
+            "run_scraper_backend": "browser",
+            "run_login_mode": "session_only",
+            "run_profile_only": True,
+            "run_pre_login_flow": False,
+            "run_post_login_flow": False,
+        }
+    )
+    return overrides
+
+
+COUNT_WATCH_AUTO_TRIGGER_MIN_CHANGE = 5
+COUNT_WATCH_AUTO_TRIGGER_CONFIRMATIONS = 2
+COUNT_WATCH_AUTO_TRIGGER_FULL_RUN_COOLDOWN_HOURS = 48
 
 CONFIG_DEFAULTS = {
     "run_stall_seconds": int(os.getenv("RUN_STALL_SECONDS", "1200")),
@@ -382,6 +556,8 @@ CONFIG_DEFAULTS = {
     "run_pre_login_flow": os.getenv("RUN_PRE_LOGIN_FLOW", "false").lower() in {"1", "true", "yes", "on"},
     "run_post_login_flow": os.getenv("RUN_POST_LOGIN_FLOW", "false").lower() in {"1", "true", "yes", "on"},
     "run_rate_limit_cooldown_seconds": int(os.getenv("RUN_RATE_LIMIT_COOLDOWN_SECONDS", "900")),
+    "run_post_checkpoint_cooldown_seconds": int(os.getenv("RUN_POST_CHECKPOINT_COOLDOWN_SECONDS", "1800")),
+    "run_min_gap_seconds": int(os.getenv("RUN_MIN_GAP_SECONDS", "900")),
     "run_trace_enabled": os.getenv("RUN_TRACE_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
     "run_profile_only": os.getenv("RUN_PROFILE_ONLY", "false").lower() in {"1", "true", "yes", "on"},
     "run_login_mode": _normalize_run_login_mode(os.getenv("RUN_LOGIN_MODE", "auto")),
@@ -405,11 +581,6 @@ CONFIG_DEFAULTS = {
     "schedule_default_time1": "09:00",
     "schedule_default_time2": "21:00",
     "schedule_default_weekday": 1,
-    "monitor_enabled": True,
-    "monitor_interval_minutes": int(os.getenv("MONITOR_INTERVAL_MINUTES", "120")),
-    "monitor_threshold_delta": int(os.getenv("MONITOR_THRESHOLD_DELTA", "4")),
-    "monitor_min_gap_minutes": int(os.getenv("MONITOR_MIN_GAP_MINUTES", "180")),
-    "monitor_login_username": os.getenv("MONITOR_LOGIN_USERNAME", ""),
     "recon_enabled": os.getenv("RECON_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
     "recon_max_concurrency": int(os.getenv("RECON_MAX_CONCURRENCY", "2")),
     "recon_queue_limit": int(os.getenv("RECON_QUEUE_LIMIT", "20")),
@@ -448,6 +619,8 @@ CONFIG_SCHEMA = {
     "run_pre_login_flow": {"type": "bool"},
     "run_post_login_flow": {"type": "bool"},
     "run_rate_limit_cooldown_seconds": {"type": "int", "min": 60, "max": 86400},
+    "run_post_checkpoint_cooldown_seconds": {"type": "int", "min": 60, "max": 86400},
+    "run_min_gap_seconds": {"type": "int", "min": 0, "max": 86400},
     "run_trace_enabled": {"type": "bool"},
     "run_profile_only": {"type": "bool"},
     "run_login_mode": {"type": "str", "allowed": RUN_LOGIN_MODE_ALLOWED},
@@ -474,11 +647,6 @@ CONFIG_SCHEMA = {
     "schedule_default_time1": {"type": "time"},
     "schedule_default_time2": {"type": "time"},
     "schedule_default_weekday": {"type": "int", "min": 0, "max": 6},
-    "monitor_enabled": {"type": "bool"},
-    "monitor_interval_minutes": {"type": "int", "min": 30, "max": 720},
-    "monitor_threshold_delta": {"type": "int", "min": 1, "max": 200},
-    "monitor_min_gap_minutes": {"type": "int", "min": 60, "max": 1440},
-    "monitor_login_username": {"type": "str"},
     "recon_enabled": {"type": "bool"},
     "recon_max_concurrency": {"type": "int", "min": 1, "max": 8},
     "recon_queue_limit": {"type": "int", "min": 1, "max": 500},
@@ -501,7 +669,7 @@ CONFIG_SCHEMA = {
     "whatsapp_notify_to": {"type": "str"},
 }
 SENSITIVE_CONFIG_KEYS = {"proxy_password", "whatsapp_access_token", "whatsapp_verify_token"}
-CONFIG_CACHE = {"data": {}, "ts": 0.0}
+CONFIG_CACHE = {"data": {}, "meta": {}, "ts": 0.0}
 CONFIG_CACHE_TTL = 5.0
 
 # Map login usernames to env prefixes (base accounts)
@@ -708,17 +876,6 @@ def _clear_login_cache():
     LOGIN_CACHE["ts"] = 0.0
 
 
-def _get_monitor_login():
-    pref = _get_config_value("monitor_login_username", None)
-    lookup = _get_login_lookup()
-    if pref and pref in lookup:
-        return pref
-    profiles = _get_login_profiles()
-    if profiles:
-        return profiles[0]["login_username"]
-    return None
-
-
 def _resolve_cookie_file(cookie_file):
     if not cookie_file:
         return None
@@ -881,53 +1038,6 @@ def _health_check_scheduler():
             "jobs": [j.id for j in jobs],
         },
     }
-
-
-def _health_check_monitor():
-    enabled = _parse_bool(_get_config_value("monitor_enabled", True))
-    interval = int(_get_config_value("monitor_interval_minutes", 120) or 120)
-    job = scheduler.get_job("monitor_counts") if enabled else None
-    last_check = None
-    last_target = None
-    age_minutes = None
-    conn = None
-    try:
-        conn = _get_db()
-        cur = conn.execute(
-            "SELECT target_username, timestamp FROM count_checks ORDER BY id DESC LIMIT 1"
-        )
-        row = cur.fetchone()
-        if row:
-            last_target = row[0]
-            last_check = row[1]
-            try:
-                ts = datetime.fromisoformat(last_check)
-                age_minutes = int((datetime.now(LOCAL_TZ) - ts).total_seconds() / 60)
-            except Exception:
-                age_minutes = None
-    except Exception:
-        pass
-    finally:
-        if conn:
-            conn.close()
-    status = "ok"
-    if enabled and not job:
-        status = "degraded"
-    if enabled and age_minutes is not None and age_minutes > max(interval * 2, interval + 30):
-        status = "degraded"
-    return {
-        "status": status,
-        "details": {
-            "enabled": enabled,
-            "interval_minutes": interval,
-            "job_scheduled": bool(job),
-            "next_run": job.next_run_time.isoformat() if job and job.next_run_time else None,
-            "last_check_target": last_target,
-            "last_check_timestamp": last_check,
-            "last_check_age_minutes": age_minutes,
-        },
-    }
-
 
 def _health_check_sessions():
     profiles = _get_login_profiles()
@@ -1119,6 +1229,11 @@ def _init_config_table():
             )
             """
         )
+        cols = get_columns(conn, "config")
+        if "source" not in cols:
+            conn.execute("ALTER TABLE config ADD COLUMN source TEXT")
+        if "updated_by" not in cols:
+            conn.execute("ALTER TABLE config ADD COLUMN updated_by TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -1199,8 +1314,17 @@ def _serialize_config_value(key, value) -> str:
 
 
 def _load_config_rows(conn):
-    rows = conn.execute("SELECT key, value FROM config").fetchall()
-    return {row[0]: row[1] for row in rows}
+    rows = conn.execute("SELECT key, value, updated_at, source, updated_by FROM config").fetchall()
+    data = {}
+    meta = {}
+    for row in rows:
+        data[row[0]] = row[1]
+        meta[row[0]] = {
+            "updated_at": row[2],
+            "source": row[3] or "db_override",
+            "updated_by": row[4] or "unknown",
+        }
+    return data, meta
 
 
 def _get_config(force=False):
@@ -1209,13 +1333,22 @@ def _get_config(force=False):
         return CONFIG_CACHE["data"]
     conn = _get_db()
     try:
-        raw = _load_config_rows(conn)
+        raw, raw_meta = _load_config_rows(conn)
     finally:
         conn.close()
     merged = dict(CONFIG_DEFAULTS)
+    meta = {
+        key: {
+            "source": "default",
+            "updated_at": None,
+            "updated_by": None,
+        }
+        for key in CONFIG_DEFAULTS
+    }
     for key, val in raw.items():
         if key in CONFIG_DEFAULTS:
             merged[key] = _coerce_config_value(key, val, strict=False)
+            meta[key] = dict(raw_meta.get(key) or {"source": "db_override", "updated_at": None, "updated_by": None})
     # Back-compat: old installs only have run_request_timeout stored. Treat it as the HTTP timeout
     # unless the new key is explicitly present.
     if "run_request_timeout" in raw and "run_http_timeout_seconds" not in raw:
@@ -1229,7 +1362,16 @@ def _get_config(force=False):
             # Best-effort legacy conversion; on any error keep the default
             # value for run_http_timeout_seconds from CONFIG_DEFAULTS.
             pass
+    for key in SENSITIVE_CONFIG_KEYS:
+        if key in merged:
+            safe_key = f"{key}_set"
+            meta[safe_key] = {
+                "source": meta.get(key, {}).get("source", "default"),
+                "updated_at": meta.get(key, {}).get("updated_at"),
+                "updated_by": meta.get(key, {}).get("updated_by"),
+            }
     CONFIG_CACHE["data"] = merged
+    CONFIG_CACHE["meta"] = meta
     CONFIG_CACHE["ts"] = now
     return merged
 
@@ -1243,6 +1385,12 @@ def _mask_config_for_api(cfg: dict) -> dict:
     return safe
 
 
+def _config_meta_for_api() -> dict:
+    _get_config(force=True)
+    meta = dict(CONFIG_CACHE.get("meta") or {})
+    return meta
+
+
 def _get_config_value(key, fallback=None):
     cfg = _get_config()
     if key in cfg:
@@ -1252,7 +1400,7 @@ def _get_config_value(key, fallback=None):
     return CONFIG_DEFAULTS.get(key)
 
 
-def _set_config_values(updates: dict):
+def _set_config_values(updates: dict, *, source="api", updated_by="codex"):
     cleaned = {}
     for key, value in updates.items():
         if key not in CONFIG_SCHEMA:
@@ -1266,11 +1414,15 @@ def _set_config_values(updates: dict):
         for key, value in cleaned.items():
             conn.execute(
                 """
-                INSERT INTO config (key, value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                INSERT INTO config (key, value, updated_at, source, updated_by)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at,
+                    source = excluded.source,
+                    updated_by = excluded.updated_by
                 """,
-                (key, _serialize_config_value(key, value), now),
+                (key, _serialize_config_value(key, value), now, str(source or "api"), str(updated_by or "codex")),
             )
         conn.commit()
     finally:
@@ -1948,13 +2100,11 @@ def _account_create_retry_policy(error_code: str, error_message: str) -> tuple[s
 def _account_create_post_setup(
     *,
     login_username: str,
-    auto_set_runner: bool,
     warmup_target_username: str | None,
     queue_warmup_run: bool,
     schedule_interval: str | None,
 ) -> dict:
     result: dict[str, object] = {
-        "runner_set": False,
         "warmup_job_id": None,
         "schedule_id": None,
         "warnings": [],
@@ -1962,14 +2112,6 @@ def _account_create_post_setup(
     warnings: list[str] = []
     target = str(warmup_target_username or "").strip().lstrip("@")
     cron_expr = str(schedule_interval or "").strip()
-
-    if auto_set_runner:
-        try:
-            _set_config_values({"monitor_login_username": login_username})
-            result["runner_set"] = True
-            _log_account_create(f"set @{login_username} as monitor runner login")
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(f"failed to set monitor runner login: {exc}")
 
     if target and queue_warmup_run:
         try:
@@ -2021,7 +2163,6 @@ def _account_create_worker(
     birth_month: int | None,
     birth_day: int | None,
     max_wait_seconds: int,
-    auto_set_runner: bool,
     warmup_target_username: str | None,
     queue_warmup_run: bool,
     schedule_interval: str | None,
@@ -2042,7 +2183,6 @@ def _account_create_worker(
             "message": None,
             "last_url": None,
             "saved_login": False,
-            "auto_set_runner": bool(auto_set_runner),
             "warmup_target_username": str(warmup_target_username or "").strip().lstrip("@") or None,
             "queue_warmup_run": bool(queue_warmup_run),
             "warmup_job_id": None,
@@ -2173,13 +2313,11 @@ def _account_create_worker(
         _clear_login_cache()
         post_setup = _account_create_post_setup(
             login_username=login_username,
-            auto_set_runner=bool(auto_set_runner),
             warmup_target_username=warmup_target_username,
             queue_warmup_run=bool(queue_warmup_run),
             schedule_interval=schedule_interval,
         )
         warnings = list(post_setup.get("warnings") or [])
-        ACCOUNT_CREATE_JOB["auto_set_runner"] = bool(auto_set_runner)
         ACCOUNT_CREATE_JOB["warmup_target_username"] = str(warmup_target_username or "").strip().lstrip("@") or None
         ACCOUNT_CREATE_JOB["queue_warmup_run"] = bool(queue_warmup_run)
         ACCOUNT_CREATE_JOB["warmup_job_id"] = post_setup.get("warmup_job_id")
@@ -2333,7 +2471,14 @@ def _init_schedule_table():
                     target_username TEXT NOT NULL,
                     interval_minutes INTEGER,
                     interval TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    mode TEXT NOT NULL DEFAULT 'full_run',
+                    trigger_delta INTEGER NOT NULL DEFAULT 1,
+                    schedule_kind TEXT NOT NULL DEFAULT 'cron',
+                    schedule_time TEXT,
+                    schedule_weekday INTEGER,
+                    schedule_interval_days INTEGER,
+                    schedule_start_date TEXT
                 )
                 """
             )
@@ -2344,51 +2489,80 @@ def _init_schedule_table():
         SCHEMA_HAS_INTERVAL_MINUTES = "interval_minutes" in cols
         if "interval" not in cols and SCHEMA_HAS_INTERVAL_MINUTES:
             conn.execute("ALTER TABLE schedules ADD COLUMN interval TEXT")
+        if "mode" not in cols:
+            conn.execute("ALTER TABLE schedules ADD COLUMN mode TEXT NOT NULL DEFAULT 'full_run'")
+        if "trigger_delta" not in cols:
+            conn.execute("ALTER TABLE schedules ADD COLUMN trigger_delta INTEGER NOT NULL DEFAULT 1")
+        if "schedule_kind" not in cols:
+            conn.execute("ALTER TABLE schedules ADD COLUMN schedule_kind TEXT NOT NULL DEFAULT 'cron'")
+        if "schedule_time" not in cols:
+            conn.execute("ALTER TABLE schedules ADD COLUMN schedule_time TEXT")
+        if "schedule_weekday" not in cols:
+            conn.execute("ALTER TABLE schedules ADD COLUMN schedule_weekday INTEGER")
+        if "schedule_interval_days" not in cols:
+            conn.execute("ALTER TABLE schedules ADD COLUMN schedule_interval_days INTEGER")
+        if "schedule_start_date" not in cols:
+            conn.execute("ALTER TABLE schedules ADD COLUMN schedule_start_date TEXT")
         # If old rows exist with interval_minutes but null interval, backfill to daily at 09:00
         conn.execute(
             "UPDATE schedules SET interval = COALESCE(interval, '0 9 * * *') WHERE interval IS NULL"
         )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _init_monitor_table():
-    conn = _get_db()
-    try:
         conn.execute(
-            ddl(
-                """
-                CREATE TABLE IF NOT EXISTS count_checks (
-                    id SERIAL PRIMARY KEY,
-                    target_username TEXT NOT NULL,
-                    login_username TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    followers_count INTEGER,
-                    followees_count INTEGER,
-                    run_requested INTEGER NOT NULL DEFAULT 0,
-                    triggered_run_id TEXT,
-                    trigger_reason TEXT
-                )
-                """
-            )
+            "UPDATE schedules SET mode = COALESCE(NULLIF(mode, ''), 'full_run')"
         )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_count_checks_target ON count_checks(target_username)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_count_checks_time ON count_checks(timestamp)")
+        conn.execute(
+            "UPDATE schedules SET trigger_delta = 1 WHERE trigger_delta IS NULL OR trigger_delta < 1"
+        )
+        conn.execute(
+            "UPDATE schedules SET schedule_kind = COALESCE(NULLIF(schedule_kind, ''), 'cron')"
+        )
         conn.commit()
     finally:
         conn.close()
-
-
-
 
 def _load_schedules_from_db():
     conn = _get_db()
     try:
         cur = conn.execute(
-            "SELECT id, login_username, target_username, interval as interval_expr FROM schedules"
+            """
+            SELECT
+                id,
+                login_username,
+                target_username,
+                interval as interval_expr,
+                mode,
+                trigger_delta,
+                schedule_kind,
+                schedule_time,
+                schedule_weekday,
+                schedule_interval_days,
+                schedule_start_date
+            FROM schedules
+            """
         )
-        return [dict(row) for row in cur.fetchall()]
+        rows = []
+        for row in cur.fetchall():
+            item = dict(row)
+            item["mode"] = _normalize_schedule_mode(item.get("mode"))
+            item["schedule_kind"] = _normalize_schedule_kind(item.get("schedule_kind"))
+            item["schedule_time"] = _normalize_schedule_time(item.get("schedule_time"))
+            item["schedule_weekday"] = _normalize_schedule_weekday(item.get("schedule_weekday"))
+            item["schedule_interval_days"] = _normalize_schedule_interval_days(item.get("schedule_interval_days"))
+            item["schedule_start_date"] = _normalize_schedule_start_date(item.get("schedule_start_date"))
+            try:
+                item["trigger_delta"] = max(1, int(item.get("trigger_delta") or 1))
+            except Exception:
+                item["trigger_delta"] = 1
+            item["schedule_label"] = _schedule_label(
+                kind=item.get("schedule_kind"),
+                interval=item.get("interval_expr"),
+                schedule_time=item.get("schedule_time"),
+                weekday=item.get("schedule_weekday"),
+                interval_days=item.get("schedule_interval_days"),
+                start_date=item.get("schedule_start_date"),
+            )
+            rows.append(item)
+        return rows
     finally:
         conn.close()
 
@@ -2424,22 +2598,90 @@ def _get_non_followbacks_for(conn, target_username):
     return run, non_followbacks
 
 
-def _persist_schedule(login_username, target_username, cron_expr):
+def _persist_schedule(
+    login_username,
+    target_username,
+    cron_expr,
+    *,
+    mode="full_run",
+    trigger_delta=1,
+    schedule_kind="cron",
+    schedule_time=None,
+    schedule_weekday=None,
+    schedule_interval_days=None,
+    schedule_start_date=None,
+):
     conn = _get_db()
     try:
         created_at = datetime.now(LOCAL_TZ).isoformat()
+        schedule_mode = _normalize_schedule_mode(mode)
+        threshold = max(1, int(trigger_delta or 1))
+        normalized_kind = _normalize_schedule_kind(schedule_kind)
+        normalized_time = _normalize_schedule_time(schedule_time)
+        normalized_weekday = _normalize_schedule_weekday(schedule_weekday)
+        normalized_interval_days = _normalize_schedule_interval_days(schedule_interval_days)
+        normalized_start_date = _normalize_schedule_start_date(schedule_start_date)
         if SCHEMA_HAS_INTERVAL_MINUTES:
             sql = """
-                INSERT INTO schedules (login_username, target_username, interval_minutes, interval, created_at)
-                VALUES (?, ?, 0, ?, ?)
+                INSERT INTO schedules (
+                    login_username,
+                    target_username,
+                    interval_minutes,
+                    interval,
+                    created_at,
+                    mode,
+                    trigger_delta,
+                    schedule_kind,
+                    schedule_time,
+                    schedule_weekday,
+                    schedule_interval_days,
+                    schedule_start_date
+                )
+                VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
-            params = (login_username, target_username, cron_expr, created_at)
+            params = (
+                login_username,
+                target_username,
+                cron_expr,
+                created_at,
+                schedule_mode,
+                threshold,
+                normalized_kind,
+                normalized_time,
+                normalized_weekday,
+                normalized_interval_days,
+                normalized_start_date,
+            )
         else:
             sql = """
-                INSERT INTO schedules (login_username, target_username, interval, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO schedules (
+                    login_username,
+                    target_username,
+                    interval,
+                    created_at,
+                    mode,
+                    trigger_delta,
+                    schedule_kind,
+                    schedule_time,
+                    schedule_weekday,
+                    schedule_interval_days,
+                    schedule_start_date
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
-            params = (login_username, target_username, cron_expr, created_at)
+            params = (
+                login_username,
+                target_username,
+                cron_expr,
+                created_at,
+                schedule_mode,
+                threshold,
+                normalized_kind,
+                normalized_time,
+                normalized_weekday,
+                normalized_interval_days,
+                normalized_start_date,
+            )
         cur = conn.execute(sql + " RETURNING id", params)
         schedule_id = cur.fetchone()[0]
         conn.commit()
@@ -2457,87 +2699,87 @@ def _delete_schedule(schedule_id):
         conn.close()
 
 
-def _schedule_job(schedule_id, login_username, target_username, cron_expr):
-    def _scheduled_wrapper():
-        try:
-            started = datetime.now(LOCAL_TZ).isoformat()
-            res = guarded_run(login_username, target_username, source=f"schedule:{schedule_id}")
-            finished = datetime.now(LOCAL_TZ).isoformat()
-            try:
-                elapsed = int((datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds())
-                if isinstance(res, dict) and res.get("run_id"):
-                    update_run_duration(DB_PATH_DEFAULT, res["run_id"], elapsed)
-                    conn = _get_db()
-                    try:
-                        _update_run_quality(conn, res["run_id"], login_username, target_username)
-                    finally:
-                        conn.close()
-            except Exception:
-                pass
-        except RuntimeError:
-            # Skip if busy; next tick will run
-            return
-    scheduler.add_job(
-        _scheduled_wrapper,
-        CronTrigger.from_crontab(cron_expr),
-        id=str(schedule_id),
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-    )
+def _count_watch_triggered(prev_followers, prev_followees, new_followers, new_followees, *, trigger_delta: int) -> bool:
+    if prev_followers is None or prev_followees is None:
+        return False
+    try:
+        threshold = max(COUNT_WATCH_AUTO_TRIGGER_MIN_CHANGE, int(trigger_delta or 1))
+    except Exception:
+        threshold = COUNT_WATCH_AUTO_TRIGGER_MIN_CHANGE
+    follower_delta = abs(int(new_followers or 0) - int(prev_followers or 0))
+    followee_delta = abs(int(new_followees or 0) - int(prev_followees or 0))
+    return max(follower_delta, followee_delta) >= threshold
 
 
-def _restore_schedules():
-    for row in _load_schedules_from_db():
-        if not row.get("interval_expr"):
-            continue
-        _schedule_job(row["id"], row["login_username"], row["target_username"], row["interval_expr"])
+def _count_watch_direction(previous_value, new_value) -> int:
+    if previous_value is None or new_value is None:
+        return 0
+    delta = int(new_value or 0) - int(previous_value or 0)
+    if delta > 0:
+        return 1
+    if delta < 0:
+        return -1
+    return 0
 
 
-def _record_count_check(
-    conn,
-    *,
-    target_username,
-    login_username,
-    timestamp,
-    followers_count,
-    followees_count,
-    run_requested=0,
-    triggered_run_id=None,
-    trigger_reason=None,
-):
-    conn.execute(
-        """
-        INSERT INTO count_checks (
-            target_username,
-            login_username,
-            timestamp,
-            followers_count,
-            followees_count,
-            run_requested,
-            triggered_run_id,
-            trigger_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            target_username,
-            login_username,
-            timestamp,
-            followers_count,
-            followees_count,
-            int(bool(run_requested)),
-            triggered_run_id,
-            trigger_reason,
-        ),
-    )
+def _count_watch_recent_full_run_blocked(target_username: str, *, cooldown_hours: int) -> bool:
+    conn = _get_db()
+    try:
+        latest_run = _get_latest_run(conn, target_username)
+    finally:
+        conn.close()
+    if not latest_run:
+        return False
+    run_dt = _parse_run_ts(latest_run.get("timestamp"))
+    if run_dt is None:
+        return False
+    return (datetime.now(LOCAL_TZ) - run_dt) < timedelta(hours=max(1, int(cooldown_hours or 1)))
 
 
-def _run_count_check(login_username, target_username):
-    scraper_backend = _normalize_scraper_backend(_get_config_value("run_scraper_backend", "browser"))
-    login_mode = _normalize_run_login_mode(_get_config_value("run_login_mode", "auto"))
+def _count_watch_should_trigger(target_username: str, *, recent_samples: list[dict], new_sample: dict, trigger_delta: int) -> tuple[bool, str]:
+    if _count_watch_recent_full_run_blocked(
+        target_username,
+        cooldown_hours=COUNT_WATCH_AUTO_TRIGGER_FULL_RUN_COOLDOWN_HOURS,
+    ):
+        return False, "recent_full_run"
+    if not recent_samples:
+        return False, "first_sample"
+    latest_sample = recent_samples[0]
+    if not _count_watch_triggered(
+        latest_sample.get("followers_count"),
+        latest_sample.get("followees_count"),
+        new_sample.get("followers_count"),
+        new_sample.get("followees_count"),
+        trigger_delta=trigger_delta,
+    ):
+        return False, "below_threshold"
+    if len(recent_samples) < COUNT_WATCH_AUTO_TRIGGER_CONFIRMATIONS:
+        return False, "awaiting_confirmation"
+    prior_sample = recent_samples[1]
+    follower_direction_now = _count_watch_direction(latest_sample.get("followers_count"), new_sample.get("followers_count"))
+    follower_direction_prev = _count_watch_direction(prior_sample.get("followers_count"), latest_sample.get("followers_count"))
+    followee_direction_now = _count_watch_direction(latest_sample.get("followees_count"), new_sample.get("followees_count"))
+    followee_direction_prev = _count_watch_direction(prior_sample.get("followees_count"), latest_sample.get("followees_count"))
+    follower_confirmed = follower_direction_now != 0 and follower_direction_now == follower_direction_prev
+    followee_confirmed = followee_direction_now != 0 and followee_direction_now == followee_direction_prev
+    if follower_confirmed or followee_confirmed:
+        return True, "confirmed_consecutive_change"
+    return False, "direction_not_confirmed"
+
+
+def _fetch_count_watch_sample(login_username, target_username, *, config_overrides=None):
+    overrides = dict(config_overrides or {})
+
+    def _cfg(key, default=None):
+        if key in overrides:
+            return overrides[key]
+        return _get_config_value(key, default)
+
+    scraper_backend = _normalize_scraper_backend(_cfg("run_scraper_backend", "browser"))
+    login_mode = _normalize_run_login_mode(_cfg("run_login_mode", "auto"))
     require_private_auth = not _is_anonymous_run_login_mode(login_mode) and _is_private_backend_name(scraper_backend)
     creds = _get_credentials(login_username, require_auth=require_private_auth)
-    job_dir = JOB_TMP_DIR / f"count_{uuid4().hex}"
+    job_dir = JOB_TMP_DIR / f"count_watch_{uuid4().hex}"
     job_dir.mkdir(parents=True, exist_ok=True)
     result_path = job_dir / "result.json"
     out_path = job_dir / "worker.out"
@@ -2555,25 +2797,25 @@ def _run_count_check(login_username, target_username):
         env["RUN_TOTP_SEED"] = str(creds["totp_seed"]).strip()
     else:
         env.pop("RUN_TOTP_SEED", None)
-    device_settings_json = str(_get_config_value("private_device_settings_json", "") or "").strip()
+    device_settings_json = str(_cfg("private_device_settings_json", "") or "").strip()
     if device_settings_json:
         env["RUN_DEVICE_SETTINGS_JSON"] = device_settings_json
     else:
         env.pop("RUN_DEVICE_SETTINGS_JSON", None)
-    user_agent = str(_get_config_value("private_user_agent", "") or "").strip()
+    user_agent = str(_cfg("private_user_agent", "") or "").strip()
     if user_agent:
         env["RUN_USER_AGENT"] = user_agent
     else:
         env.pop("RUN_USER_AGENT", None)
-    session_id = _generate_proxy_session_id(login_username=creds["login_username"])
-    _apply_proxy_env(env, session_id=session_id, login_username=creds["login_username"])
+    session_id = _generate_proxy_session_id(login_username=login_username)
+    _apply_proxy_env(env, session_id=session_id, login_username=login_username)
     env["RUN_PROXY_SESSION_ID"] = session_id
-    env["RUN_PRE_LOGIN_FLOW"] = "true" if _parse_bool(_get_config_value("run_pre_login_flow", False)) else "false"
-    env["RUN_POST_LOGIN_FLOW"] = "true" if _parse_bool(_get_config_value("run_post_login_flow", False)) else "false"
-    http_timeout_seconds = float(
-        _get_config_value("run_http_timeout_seconds", _get_config_value("run_request_timeout", 120))
-    )
-    request_sleep_seconds = float(_get_config_value("run_private_request_sleep_seconds", 0))
+    env["RUN_PRE_LOGIN_FLOW"] = "true" if _parse_bool(_cfg("run_pre_login_flow", False)) else "false"
+    env["RUN_POST_LOGIN_FLOW"] = "true" if _parse_bool(_cfg("run_post_login_flow", False)) else "false"
+    env["RUN_ITEM_DELAY_MIN"] = str(float(_cfg("run_item_delay_min", 0.0) or 0.0))
+    env["RUN_ITEM_DELAY_MAX"] = str(float(_cfg("run_item_delay_max", 0.0) or 0.0))
+    http_timeout_seconds = float(_cfg("run_http_timeout_seconds", _cfg("run_request_timeout", 120)))
+    request_sleep_seconds = float(_cfg("run_private_request_sleep_seconds", 0))
 
     cmd = [
         sys.executable,
@@ -2600,19 +2842,12 @@ def _run_count_check(login_username, target_username):
         text=True,
         bufsize=1,
     )
-    out_fh, err_fh, out_thread, err_thread = _stream_worker_output(
-        proc, out_path, err_path, f"count:{login_username}"
-    )
+    out_fh, err_fh, out_thread, err_thread = _stream_worker_output(proc, out_path, err_path, f"count_watch:{login_username}")
     try:
-        proc.wait(timeout=180)
+        proc.wait(timeout=max(180, int(http_timeout_seconds * 2)))
     except Exception:
         _terminate_proc(proc)
-        # Clean up temp directory on failure
-        try:
-            shutil.rmtree(job_dir, ignore_errors=True)
-        except Exception:
-            pass
-        return None
+        raise WorkerRunError("count watch sample timed out", code="timeout")
     finally:
         try:
             out_thread.join(timeout=2)
@@ -2626,152 +2861,150 @@ def _run_count_check(login_username, target_username):
             pass
 
     payload = _read_json_file(result_path) or {}
-    
-    # Clean up temp directory after reading results
     try:
         shutil.rmtree(job_dir, ignore_errors=True)
     except Exception:
         pass
-    
     if payload.get("status") != "success":
-        return None
-    return payload.get("result") or None
+        raise WorkerRunError(
+            str(payload.get("error") or "count watch sample failed"),
+            code=str(payload.get("error_code") or "") or None,
+        )
+    result = payload.get("result") or {}
+    return {
+        "timestamp": result.get("timestamp"),
+        "followers_count": int(result.get("followers_count") or 0),
+        "followees_count": int(result.get("followees_count") or 0),
+    }
 
 
-def _monitor_check_target(target_username, *, login_username, threshold, min_gap_minutes):
-    if not login_username:
-        return
-    if _get_run_lock(login_username).locked():
-        return
-    if _is_target_busy(target_username):
-        return
-    if UNFOLLOW_LOCK.locked():
-        unfollow_login = UNFOLLOW_JOB.get("login_username")
-        if unfollow_login and login_username == unfollow_login:
-            return
-
-    result = _run_count_check(login_username, target_username)
-    if not result:
-        return
-
-    ts = result.get("timestamp")
-    followers_count = result.get("followers_count")
-    followees_count = result.get("followees_count")
-
-    conn = _get_db()
+def _run_count_watch(login_username, target_username, *, schedule_id: int, trigger_delta: int):
+    _acquire_run_slot(f"count_watch:{schedule_id}", login_username, target_username)
     try:
-        last_row = conn.execute(
-            """
-            SELECT followers_count, followees_count, timestamp
-            FROM count_checks
-            WHERE target_username = ?
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (target_username,),
-        ).fetchone()
+        recent_samples = get_recent_count_watch_samples(target_username=target_username, limit=2)
 
-        run_requested = 0
-        triggered_run_id = None
-        trigger_reason = None
+        sample = _fetch_count_watch_sample(
+            login_username,
+            target_username,
+            config_overrides=_count_watch_run_overrides(),
+        )
+        triggered, trigger_reason = _count_watch_should_trigger(
+            target_username,
+            recent_samples=recent_samples,
+            new_sample=sample,
+            trigger_delta=trigger_delta,
+        )
+        full_run_id = None
 
-        if last_row:
-            last_followers = last_row[0]
-            last_followees = last_row[1]
-            delta_f = abs((followers_count or 0) - (last_followers or 0))
-            delta_fe = abs((followees_count or 0) - (last_followees or 0))
-            delta = max(delta_f, delta_fe)
-            if delta >= threshold:
-                last_run = _get_latest_run(conn, target_username)
-                can_trigger = True
-                if last_run and last_run.get("timestamp"):
-                    last_run_dt = _parse_run_ts(last_run.get("timestamp"))
-                    if last_run_dt:
-                        gap = (datetime.now(LOCAL_TZ) - last_run_dt).total_seconds()
-                        if gap < (min_gap_minutes * 60):
-                            can_trigger = False
-                            trigger_reason = "min_gap"
-                if can_trigger and not _is_target_busy(target_username):
-                    triggered_run_id = _queue_run(
-                        login_username,
-                        target_username,
-                        source="monitor",
-                        rebuild=True,
-                    )
-                    run_requested = 1
-                    trigger_reason = f"delta>={threshold}"
+        if triggered:
+            active_job = ACTIVE_JOBS.get(login_username)
+            if active_job is not None:
+                active_job["source"] = f"count_watch_trigger:{schedule_id}"
+                active_job["phase"] = "triggering_full_run"
+                active_job["followers_total"] = sample.get("followers_count")
+                active_job["following_total"] = sample.get("followees_count")
+            full_run = run_snapshot(login_username, target_username)
+            if isinstance(full_run, dict):
+                full_run_id = full_run.get("run_id")
+                sample["triggered_run_id"] = full_run_id
+                sample["triggered_full_run"] = True
 
-        _record_count_check(
-            conn,
+        sample_id = write_count_watch_sample(
+            login_username=login_username,
             target_username=target_username,
-            login_username=login_username,
-            timestamp=ts,
-            followers_count=followers_count,
-            followees_count=followees_count,
-            run_requested=run_requested,
-            triggered_run_id=triggered_run_id,
-            trigger_reason=trigger_reason,
+            timestamp=str(sample.get("timestamp") or datetime.now(LOCAL_TZ).strftime("%Y-%m-%d_%H-%M-%S")),
+            followers_count=int(sample.get("followers_count") or 0),
+            followees_count=int(sample.get("followees_count") or 0),
+            triggered_full_run=triggered,
+            triggered_run_id=full_run_id,
+            schedule_id=schedule_id,
+            trigger_delta=trigger_delta,
         )
-        conn.commit()
+        sample["count_watch_sample_id"] = sample_id
+        sample["triggered_full_run"] = triggered
+        sample["trigger_reason"] = trigger_reason
+        return sample
     finally:
-        conn.close()
+        CANCEL_REQUESTS.discard((login_username, target_username))
+        _release_run_slot(login_username)
 
 
-def _monitor_check_all():
-    enabled = _parse_bool(_get_config_value("monitor_enabled", True))
-    if not enabled:
-        return
-    login_username = _get_monitor_login()
-    if not login_username:
-        return
-    try:
-        threshold = int(_get_config_value("monitor_threshold_delta", 4))
-    except Exception:
-        threshold = 4
-    try:
-        min_gap_minutes = int(_get_config_value("monitor_min_gap_minutes", 180))
-    except Exception:
-        min_gap_minutes = 180
-
-    conn = _get_db()
-    try:
-        targets = _get_targets(conn)
-    finally:
-        conn.close()
-    if not targets:
-        return
-    for target in targets:
-        _monitor_check_target(
-            target,
-            login_username=login_username,
-            threshold=threshold,
-            min_gap_minutes=min_gap_minutes,
-        )
-
-
-def _schedule_monitor_job():
-    try:
-        scheduler.remove_job("monitor_counts")
-    except Exception:
-        pass
-    enabled = _parse_bool(_get_config_value("monitor_enabled", True))
-    if not enabled:
-        return
-    try:
-        interval = int(_get_config_value("monitor_interval_minutes", 120))
-    except Exception:
-        interval = 120
-    if interval < 30:
-        interval = 30
+def _schedule_job(
+    schedule_id,
+    login_username,
+    target_username,
+    cron_expr,
+    *,
+    mode="full_run",
+    trigger_delta=1,
+    schedule_kind="cron",
+    schedule_time=None,
+    schedule_weekday=None,
+    schedule_interval_days=None,
+    schedule_start_date=None,
+):
+    def _scheduled_wrapper():
+        try:
+            started = datetime.now(LOCAL_TZ).isoformat()
+            schedule_mode = _normalize_schedule_mode(mode)
+            if schedule_mode == "count_watch":
+                res = _run_count_watch(
+                    login_username,
+                    target_username,
+                    schedule_id=schedule_id,
+                    trigger_delta=trigger_delta,
+                )
+            else:
+                res = guarded_run(login_username, target_username, source=f"schedule:{schedule_id}")
+            finished = datetime.now(LOCAL_TZ).isoformat()
+            try:
+                elapsed = int((datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds())
+                if isinstance(res, dict) and res.get("run_id"):
+                    update_run_duration(DB_PATH_DEFAULT, res["run_id"], elapsed)
+                    conn = _get_db()
+                    try:
+                        _update_run_quality(conn, res["run_id"], login_username, target_username)
+                    finally:
+                        conn.close()
+            except Exception:
+                pass
+        except RuntimeError:
+            # Skip if busy; next tick will run
+            return
     scheduler.add_job(
-        _monitor_check_all,
-        "interval",
-        minutes=interval,
-        id="monitor_counts",
+        _scheduled_wrapper,
+        _build_schedule_trigger(
+            kind=schedule_kind,
+            interval=cron_expr,
+            schedule_time=schedule_time,
+            weekday=schedule_weekday,
+            interval_days=schedule_interval_days,
+            start_date=schedule_start_date,
+        ),
+        id=str(schedule_id),
         replace_existing=True,
-        coalesce=True,
         max_instances=1,
+        coalesce=True,
     )
+
+
+def _restore_schedules():
+    for row in _load_schedules_from_db():
+        if not row.get("interval_expr"):
+            continue
+        _schedule_job(
+            row["id"],
+            row["login_username"],
+            row["target_username"],
+            row["interval_expr"],
+            mode=row.get("mode"),
+            trigger_delta=row.get("trigger_delta", 1),
+            schedule_kind=row.get("schedule_kind"),
+            schedule_time=row.get("schedule_time"),
+            schedule_weekday=row.get("schedule_weekday"),
+            schedule_interval_days=row.get("schedule_interval_days"),
+            schedule_start_date=row.get("schedule_start_date"),
+        )
 
 
 def _schedule_recon_maintenance_job():
@@ -2982,10 +3215,24 @@ def _stream_worker_output(proc: subprocess.Popen, out_path: Path, err_path: Path
         pass
 
 
-def run_snapshot(login_username, target_username, job_id=None, two_factor_code=None, challenge_code=None):
+def run_snapshot(
+    login_username,
+    target_username,
+    job_id=None,
+    two_factor_code=None,
+    challenge_code=None,
+    config_overrides=None,
+):
     _ensure_job_tmp_dir()
-    scraper_backend = _normalize_scraper_backend(_get_config_value("run_scraper_backend", "browser"))
-    login_mode = _normalize_run_login_mode(_get_config_value("run_login_mode", "auto"))
+    overrides = dict(config_overrides or {})
+
+    def _cfg(key, default=None):
+        if key in overrides:
+            return overrides[key]
+        return _get_config_value(key, default)
+
+    scraper_backend = _normalize_scraper_backend(_cfg("run_scraper_backend", "browser"))
+    login_mode = _normalize_run_login_mode(_cfg("run_login_mode", "auto"))
     require_private_auth = not _is_anonymous_run_login_mode(login_mode) and _is_private_backend_name(scraper_backend)
     creds = _get_credentials(login_username, require_auth=require_private_auth)
     job = ACTIVE_JOBS.get(login_username)
@@ -3025,35 +3272,35 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
         env["RUN_TOTP_SEED"] = str(creds["totp_seed"]).strip()
     else:
         env.pop("RUN_TOTP_SEED", None)
-    device_settings_json = str(_get_config_value("private_device_settings_json", "") or "").strip()
+    device_settings_json = str(_cfg("private_device_settings_json", "") or "").strip()
     if device_settings_json:
         env["RUN_DEVICE_SETTINGS_JSON"] = device_settings_json
     else:
         env.pop("RUN_DEVICE_SETTINGS_JSON", None)
-    user_agent = str(_get_config_value("private_user_agent", "") or "").strip()
+    user_agent = str(_cfg("private_user_agent", "") or "").strip()
     if user_agent:
         env["RUN_USER_AGENT"] = user_agent
     else:
         env.pop("RUN_USER_AGENT", None)
 
     http_timeout_seconds = float(
-        _get_config_value("run_http_timeout_seconds", _get_config_value("run_request_timeout", 600))
+        _cfg("run_http_timeout_seconds", _cfg("run_request_timeout", 600))
     )
-    request_sleep_seconds = float(_get_config_value("run_private_request_sleep_seconds", 0))
-    item_delay_min = float(_get_config_value("run_item_delay_min", 0.25))
-    item_delay_max = float(_get_config_value("run_item_delay_max", 0.75))
-    fetch_order = str(_get_config_value("run_fetch_order", "followers_first") or "followers_first").strip().lower()
-    initial_fetch_delay_seconds = float(_get_config_value("run_initial_fetch_delay_seconds", 8.0))
-    pause_every_min = int(_get_config_value("run_pause_every_min", 0) or 0)
-    pause_every_max = int(_get_config_value("run_pause_every_max", 0) or 0)
-    pause_seconds_min = float(_get_config_value("run_pause_seconds_min", 0) or 0)
-    pause_seconds_max = float(_get_config_value("run_pause_seconds_max", 0) or 0)
-    trace_enabled = _parse_bool(_get_config_value("run_trace_enabled", False))
-    profile_only = _parse_bool(_get_config_value("run_profile_only", False))
-    pre_login_flow = _parse_bool(_get_config_value("run_pre_login_flow", False))
-    post_login_flow = _parse_bool(_get_config_value("run_post_login_flow", False))
-    stall_seconds = int(_get_config_value("run_stall_seconds", 1200))
-    max_seconds = int(_get_config_value("run_max_seconds", 10800))
+    request_sleep_seconds = float(_cfg("run_private_request_sleep_seconds", 0))
+    item_delay_min = float(_cfg("run_item_delay_min", 0.25))
+    item_delay_max = float(_cfg("run_item_delay_max", 0.75))
+    fetch_order = str(_cfg("run_fetch_order", "followers_first") or "followers_first").strip().lower()
+    initial_fetch_delay_seconds = float(_cfg("run_initial_fetch_delay_seconds", 8.0))
+    pause_every_min = int(_cfg("run_pause_every_min", 0) or 0)
+    pause_every_max = int(_cfg("run_pause_every_max", 0) or 0)
+    pause_seconds_min = float(_cfg("run_pause_seconds_min", 0) or 0)
+    pause_seconds_max = float(_cfg("run_pause_seconds_max", 0) or 0)
+    trace_enabled = _parse_bool(_cfg("run_trace_enabled", False))
+    profile_only = _parse_bool(_cfg("run_profile_only", False))
+    pre_login_flow = _parse_bool(_cfg("run_pre_login_flow", False))
+    post_login_flow = _parse_bool(_cfg("run_post_login_flow", False))
+    stall_seconds = int(_cfg("run_stall_seconds", 1200))
+    max_seconds = int(_cfg("run_max_seconds", 10800))
     env["RUN_ITEM_DELAY_MIN"] = str(item_delay_min)
     env["RUN_ITEM_DELAY_MAX"] = str(item_delay_max)
     env["RUN_FETCH_ORDER"] = fetch_order
@@ -3178,6 +3425,8 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
 
     result_payload = _read_json_file(result_path)
     if not result_payload:
+        if (login_username, target_username) in CANCEL_REQUESTS or (job and job.get("cancelled")):
+            raise WorkerRunError("cancelled by user", code="cancelled")
         tail = _tail_file(err_path)
         error_msg = f"worker exited without result"
         if tail:
@@ -3197,7 +3446,15 @@ def run_snapshot(login_username, target_username, job_id=None, two_factor_code=N
     return result
 
 
-def guarded_run(login_username, target_username, source="api", job_id=None, two_factor_code=None, challenge_code=None):
+def guarded_run(
+    login_username,
+    target_username,
+    source="api",
+    job_id=None,
+    two_factor_code=None,
+    challenge_code=None,
+    config_overrides=None,
+):
     """Serialise runs per login across API + scheduler."""
     _acquire_run_slot(source, login_username, target_username, job_id=job_id)
     try:
@@ -3212,6 +3469,7 @@ def guarded_run(login_username, target_username, source="api", job_id=None, two_
             job_id=job_id,
             two_factor_code=two_factor_code,
             challenge_code=challenge_code,
+            config_overrides=config_overrides,
         )
     finally:
         CANCEL_REQUESTS.discard((login_username, target_username))
@@ -3285,7 +3543,6 @@ ACCOUNT_CREATE_JOB = {
     "message": None,
     "last_url": None,
     "saved_login": False,
-    "auto_set_runner": True,
     "warmup_target_username": None,
     "queue_warmup_run": False,
     "warmup_job_id": None,
@@ -3547,6 +3804,25 @@ def _latest_run_job_for_login(login_username: str) -> dict | None:
         conn.close()
 
 
+def _latest_finished_run_job_for_login(login_username: str) -> dict | None:
+    conn = _get_db()
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM run_jobs
+            WHERE login_username = ?
+              AND finished_at IS NOT NULL
+            ORDER BY finished_at DESC, submitted_at DESC, job_id DESC
+            LIMIT 1
+            """,
+            (login_username,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def _run_record_meta(record: dict | None) -> dict | None:
     if not record:
         return None
@@ -3639,6 +3915,8 @@ def _open_manual_actions() -> list[dict]:
 def _classify_terminal_run_state(error_code: str | None, error_message: str | None, cooldown_seconds: int) -> str:
     code = str(error_code or "").strip().lower()
     message = str(error_message or "").strip().lower()
+    if code == "cancelled" or "cancelled" in message:
+        return "cancelled"
     if cooldown_seconds > 0 or code in {"rate_limited", "feedback_required"}:
         return "cooling_down"
     if code == "challenge_required":
@@ -3683,6 +3961,19 @@ def _set_run_cooldown(login_username: str, error_code: str | None, error_message
     if not login_username:
         return 0
     base = int(_get_config_value("run_rate_limit_cooldown_seconds", 900) or 900)
+    code = str(error_code or "").strip().lower()
+    message = str(error_message or "").strip().lower()
+    if code == "auth_required" and any(
+        token in message
+        for token in (
+            "checkpoint_required",
+            "checkpoint required",
+            "challenge_required",
+            "challenge required",
+            "please wait a few minutes",
+        )
+    ):
+        base = max(base, int(_get_config_value("run_post_checkpoint_cooldown_seconds", 1800) or 1800))
     retry_after = _extract_retry_after_seconds(error_message)
     wait_seconds = max(base, int(retry_after or 0))
     until_ts = time.time() + wait_seconds
@@ -3693,6 +3984,26 @@ def _set_run_cooldown(login_username: str, error_code: str | None, error_message
             "error_message": str(error_message or ""),
         }
     return wait_seconds
+
+
+def _should_cooldown_run_error(error_code: str | None, error_message: str | None) -> bool:
+    code = str(error_code or "").strip().lower()
+    message = str(error_message or "").strip().lower()
+    if code in {"rate_limited", "feedback_required"}:
+        return True
+    if code == "auth_required" and any(
+        token in message
+        for token in (
+            "please wait a few minutes",
+            "checkpoint_required",
+            "checkpoint required",
+            "challenge_required",
+            "challenge required",
+            "429",
+        )
+    ):
+        return True
+    return False
 
 
 def _get_run_cooldown_remaining(login_username: str) -> int:
@@ -3708,6 +4019,26 @@ def _get_run_cooldown_remaining(login_username: str) -> int:
             RUN_COOLDOWN_UNTIL.pop(login_username, None)
             return 0
         return remaining
+
+
+def _get_run_min_gap_remaining(login_username: str) -> int:
+    if not login_username:
+        return 0
+    min_gap = int(_get_config_value("run_min_gap_seconds", 0) or 0)
+    if min_gap <= 0:
+        return 0
+    latest = _latest_finished_run_job_for_login(login_username)
+    if not latest:
+        return 0
+    finished_at = str(latest.get("finished_at") or "").strip()
+    if not finished_at:
+        return 0
+    try:
+        finished_dt = datetime.fromisoformat(finished_at)
+    except Exception:
+        return 0
+    remaining = int(round(min_gap - (datetime.now(LOCAL_TZ) - finished_dt).total_seconds()))
+    return max(0, remaining)
 
 
 def _watchdog_loop():
@@ -4024,9 +4355,7 @@ _init_unfollow_table()
 _init_run_tables()
 _init_recon_tables()
 _init_login_tables()
-_init_monitor_table()
 _restore_schedules()
-_schedule_monitor_job()
 _schedule_recon_maintenance_job()
 threading.Thread(target=_watchdog_loop, daemon=True).start()
 
@@ -4182,7 +4511,6 @@ def api_logins_create_start():
     login_password = (data.get("login_password") or "").strip()
     phone_number = (data.get("phone_number") or "").strip()
     strategy = (data.get("strategy") or "private_api").strip().lower()
-    auto_set_runner = _parse_bool(data.get("auto_set_runner", True))
     queue_warmup_run = _parse_bool(data.get("queue_warmup_run", False))
     warmup_target_username = _sanitize_target_username(data.get("warmup_target_username") or "")
     schedule_interval = str(data.get("schedule_interval") or "").strip()
@@ -4274,7 +4602,6 @@ def api_logins_create_start():
         birth_month=birth_month,
         birth_day=birth_day,
         max_wait_seconds=max_wait_seconds,
-        auto_set_runner=auto_set_runner,
         warmup_target_username=warmup_target_username or None,
         queue_warmup_run=queue_warmup_run,
         schedule_interval=schedule_interval or None,
@@ -4285,7 +4612,6 @@ def api_logins_create_start():
             "strategy": strategy,
             "login_username": login_username,
             "max_wait_seconds": max_wait_seconds,
-            "auto_set_runner": auto_set_runner,
             "queue_warmup_run": queue_warmup_run,
             "warmup_target_username": warmup_target_username or None,
             "schedule_interval": schedule_interval or None,
@@ -4593,6 +4919,31 @@ def api_runs():
                    non_followbacks_count, login_username, duration_seconds, confidence_score, confidence_flag,
                    followers_collected_count, followees_collected_count, snapshot_complete, snapshot_note
             FROM runs
+            WHERE target_username = ?
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+            """,
+            (target, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        return jsonify(rows)
+    finally:
+        conn.close()
+
+
+@app.route("/api/count_watch_samples", methods=["GET"])
+def api_count_watch_samples():
+    target = request.args.get("target")
+    limit = int(request.args.get("limit", 20))
+    if not target:
+        return jsonify({"error": "target is required"}), 400
+    conn = _get_db()
+    try:
+        cur = conn.execute(
+            """
+            SELECT id, timestamp, followers_count, followees_count, login_username,
+                   triggered_full_run, triggered_run_id, schedule_id, trigger_delta, created_at
+            FROM count_watch_samples
             WHERE target_username = ?
             ORDER BY timestamp DESC, id DESC
             LIMIT ?
@@ -5145,6 +5496,562 @@ def api_targets_summary():
         conn.close()
 
 
+def _event_view_model(row: dict) -> dict:
+    target_username = str(row.get("target_username") or "")
+    username = str(row.get("username") or "")
+    relation_type = str(row.get("relation_type") or "")
+    event_type = str(row.get("event_type") or "")
+    action = "followed" if event_type == "added" else "unfollowed"
+    if relation_type == "followers":
+        actor_username = username
+        object_username = target_username
+        direction = "target_followers"
+    else:
+        actor_username = target_username
+        object_username = username
+        direction = "target_following"
+    return {
+        "id": row.get("id"),
+        "observed_at": row.get("observed_at"),
+        "target_username": target_username,
+        "counterparty_username": username,
+        "relation_type": relation_type,
+        "event_type": event_type,
+        "action": action,
+        "direction": direction,
+        "actor_username": actor_username,
+        "object_username": object_username,
+        "sentence": f"@{actor_username} {action} @{object_username}" if actor_username and object_username else "",
+        "login_username": row.get("login_username"),
+        "run_id": row.get("run_id"),
+    }
+
+
+def _collector_health_rows() -> list[dict]:
+    entries = [e for e in list_logins(include_secrets=False) if not e.get("disabled")]
+    try:
+        from private_api_tracker import get_auth_state
+    except Exception:  # pragma: no cover
+        get_auth_state = None
+    rows = []
+    now_ts = time.time()
+    with RUN_COOLDOWN_GUARD:
+        cooldown_map = {
+            login: int(round(float(payload.get("until_ts") or 0) - now_ts))
+            for login, payload in RUN_COOLDOWN_UNTIL.items()
+            if int(round(float(payload.get("until_ts") or 0) - now_ts)) > 0
+        }
+    for entry in entries:
+        username = str(entry.get("login_username") or "")
+        path = _private_settings_path(username)
+        session_cached = bool(entry.get("session_settings")) or path.exists()
+        auth_state = get_auth_state(username) if callable(get_auth_state) else {}
+        fail_streak = int(entry.get("session_fail_streak") or 0)
+        stale = fail_streak >= _session_stale_threshold()
+        cooldown_seconds = cooldown_map.get(username)
+        if cooldown_seconds:
+            status = "cooling_down"
+        elif session_cached and not stale:
+            status = "healthy"
+        elif session_cached or bool(entry.get("has_password")):
+            status = "attention"
+        else:
+            status = "broken"
+        rows.append(
+            {
+                "login_username": username,
+                "status": status,
+                "private_session_exists": session_cached,
+                "has_password": bool(entry.get("has_password")),
+                "has_totp_seed": bool(entry.get("has_totp_seed")),
+                "session_fail_streak": fail_streak,
+                "session_marked_stale": stale,
+                "two_factor_method": auth_state.get("two_factor_method"),
+                "last_login_at": entry.get("last_login_at"),
+                "last_error": entry.get("last_error"),
+                "auth_last_event": auth_state.get("last_event"),
+                "auth_last_event_at": auth_state.get("last_event_at"),
+                "cooldown_seconds": cooldown_seconds,
+            }
+        )
+    return rows
+
+
+@app.route("/api/ui/evidence", methods=["GET"])
+def api_ui_evidence():
+    target = (request.args.get("target") or "").strip()
+    relation_type = (request.args.get("relation_type") or "").strip().lower()
+    event_type = (request.args.get("event_type") or "").strip().lower()
+    before = (request.args.get("before") or "").strip()
+    try:
+        limit = max(1, min(int(request.args.get("limit", 100)), 500))
+    except Exception:
+        limit = 100
+    where = []
+    params: list = []
+    if target:
+        where.append("target_username = ?")
+        params.append(target)
+    if relation_type in {"followers", "following"}:
+        where.append("relation_type = ?")
+        params.append(relation_type)
+    if event_type in {"added", "removed"}:
+        where.append("event_type = ?")
+        params.append(event_type)
+    if before:
+        where.append("observed_at < ?")
+        params.append(before)
+    params.append(limit)
+    conn = _get_db()
+    try:
+        query = """
+            SELECT id, target_username, login_username, username, relation_type, event_type, observed_at, run_id
+            FROM relationship_events
+        """
+        if where:
+            query += f" WHERE {' AND '.join(where)}"
+        query += " ORDER BY observed_at DESC, id DESC LIMIT ?"
+        rows = [dict(r) for r in conn.execute(query, tuple(params)).fetchall()]
+        return jsonify({"items": [_event_view_model(row) for row in rows]})
+    finally:
+        conn.close()
+
+
+@app.route("/api/ui/targets", methods=["GET"])
+def api_ui_targets():
+    conn = _get_db()
+    try:
+        targets = _get_targets(conn)
+        if not targets:
+            return jsonify({"items": []})
+        placeholders = ",".join(["?"] * len(targets))
+        latest_query = f"""
+            SELECT target_username, id, timestamp, followers_count, followees_count, non_followbacks_count
+            FROM (
+                SELECT target_username, id, timestamp, followers_count, followees_count, non_followbacks_count,
+                       ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp DESC, id DESC) as rn
+                FROM runs
+                WHERE target_username IN ({placeholders})
+            ) ranked
+            WHERE rn = 1
+        """
+        event_query = f"""
+            SELECT target_username, id, username, relation_type, event_type, observed_at, login_username, run_id
+            FROM (
+                SELECT target_username, id, username, relation_type, event_type, observed_at, login_username, run_id,
+                       ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY observed_at DESC, id DESC) as rn
+                FROM relationship_events
+                WHERE target_username IN ({placeholders})
+            ) ranked
+            WHERE rn = 1
+        """
+        change_query = f"""
+            SELECT target_username, MAX(observed_at) AS last_change_at
+            FROM relationship_events
+            WHERE target_username IN ({placeholders})
+            GROUP BY target_username
+        """
+        latest_rows = {row["target_username"]: dict(row) for row in conn.execute(latest_query, tuple(targets)).fetchall()}
+        event_rows = {row["target_username"]: dict(row) for row in conn.execute(event_query, tuple(targets)).fetchall()}
+        change_rows = {row["target_username"]: row["last_change_at"] for row in conn.execute(change_query, tuple(targets)).fetchall()}
+    finally:
+        conn.close()
+
+    next_run_by_target = {}
+    for row in _load_schedules_from_db():
+        target_username = str(row.get("target_username") or "")
+        if not target_username:
+            continue
+        job = scheduler.get_job(str(row["id"]))
+        next_run = job.next_run_time.isoformat() if job and job.next_run_time else None
+        if not next_run:
+            continue
+        existing = next_run_by_target.get(target_username)
+        if not existing or next_run < existing:
+            next_run_by_target[target_username] = next_run
+
+    items = []
+    for target_username in targets:
+        latest = latest_rows.get(target_username) or {}
+        latest_event = event_rows.get(target_username)
+        items.append(
+            {
+                "target_username": target_username,
+                "followers_count": latest.get("followers_count"),
+                "following_count": latest.get("followees_count"),
+                "non_followbacks_count": latest.get("non_followbacks_count"),
+                "last_full_run_at": latest.get("timestamp"),
+                "last_change_at": change_rows.get(target_username),
+                "next_check_at": next_run_by_target.get(target_username),
+                "latest_event": _event_view_model(latest_event) if latest_event else None,
+            }
+        )
+    return jsonify({"items": items})
+
+
+@app.route("/api/ui/network", methods=["GET"])
+def api_ui_network():
+    target = (request.args.get("target") or "").strip()
+    if not target:
+        return jsonify({"error": "target is required"}), 400
+    relationship_state = (request.args.get("state") or "").strip().lower()
+    search = (request.args.get("q") or "").strip().lower()
+    try:
+        limit = max(1, min(int(request.args.get("limit", 250)), 1000))
+    except Exception:
+        limit = 250
+
+    conn = _get_db()
+    try:
+        merged_query = """
+            WITH follower_side AS (
+                SELECT
+                    target_username,
+                    username,
+                    active AS actor_follows_subject,
+                    first_seen AS follower_first_seen,
+                    last_seen AS follower_last_seen,
+                    unfollowed_at AS follower_departed_at
+                FROM followers_history
+            ),
+            following_side AS (
+                SELECT
+                    target_username,
+                    username,
+                    active AS subject_follows_actor,
+                    first_seen AS following_first_seen,
+                    last_seen AS following_last_seen,
+                    unfollowed_at AS following_departed_at
+                FROM followees_history
+            ),
+            merged AS (
+                SELECT
+                    COALESCE(f.target_username, g.target_username) AS target_username,
+                    COALESCE(f.username, g.username) AS username,
+                    COALESCE(f.actor_follows_subject, 0) AS actor_follows_subject,
+                    COALESCE(g.subject_follows_actor, 0) AS subject_follows_actor,
+                    f.follower_first_seen,
+                    f.follower_last_seen,
+                    f.follower_departed_at,
+                    g.following_first_seen,
+                    g.following_last_seen,
+                    g.following_departed_at
+                FROM follower_side f
+                FULL OUTER JOIN following_side g
+                    ON f.target_username = g.target_username
+                   AND f.username = g.username
+            ),
+            latest_event AS (
+                SELECT *
+                FROM (
+                    SELECT
+                        target_username,
+                        username,
+                        relation_type,
+                        event_type,
+                        observed_at,
+                        login_username,
+                        run_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY target_username, username
+                            ORDER BY observed_at DESC, id DESC
+                        ) AS rn
+                    FROM relationship_events
+                ) ranked
+                WHERE rn = 1
+            )
+            SELECT
+                merged.*,
+                latest_event.relation_type AS latest_relation_type,
+                latest_event.event_type AS latest_event_type,
+                latest_event.observed_at AS latest_observed_at,
+                latest_event.login_username AS latest_login_username,
+                latest_event.run_id AS latest_run_id
+            FROM merged
+            LEFT JOIN latest_event
+                ON latest_event.target_username = merged.target_username
+               AND latest_event.username = merged.username
+        """
+        params: list = []
+        where = []
+        where.append("merged.target_username = ?")
+        params.append(target)
+        if search:
+            where.append("LOWER(merged.username) LIKE ?")
+            params.append(f"%{search}%")
+        if where:
+            merged_query += "\n WHERE " + " AND ".join(where)
+        merged_query += "\n ORDER BY merged.target_username ASC, latest_observed_at DESC NULLS LAST, merged.username ASC LIMIT ?"
+        params.append(limit)
+        rows = [dict(r) for r in conn.execute(merged_query, tuple(params)).fetchall()]
+    finally:
+        conn.close()
+
+    def _pick_ts(*values):
+        vals = [str(v) for v in values if v]
+        return max(vals) if vals else None
+
+    def _min_ts(*values):
+        vals = [str(v) for v in values if v]
+        return min(vals) if vals else None
+
+    def _relationship_state(row):
+        inbound = _is_active_flag(row.get("actor_follows_subject"))
+        outbound = _is_active_flag(row.get("subject_follows_actor"))
+        if inbound and outbound:
+            return "mutual"
+        if inbound:
+            return "they_follow"
+        if outbound:
+            return "subject_follows"
+        return "disconnected"
+
+    def _relationship_label(state):
+        return {
+            "mutual": "Mutual",
+            "they_follow": "They follow",
+            "subject_follows": "Subject follows",
+            "disconnected": "Disconnected",
+        }.get(state, state)
+
+    items = []
+    for row in rows:
+        state = _relationship_state(row)
+        if relationship_state and state != relationship_state:
+            continue
+        latest_event = None
+        if row.get("latest_observed_at"):
+            latest_event = _event_view_model(
+                {
+                    "target_username": row.get("target_username"),
+                    "username": row.get("username"),
+                    "relation_type": row.get("latest_relation_type"),
+                    "event_type": row.get("latest_event_type"),
+                    "observed_at": row.get("latest_observed_at"),
+                    "login_username": row.get("latest_login_username"),
+                    "run_id": row.get("latest_run_id"),
+                }
+            )
+        items.append(
+            {
+                "target_username": row.get("target_username"),
+                "username": row.get("username"),
+                "relationship_state": state,
+                "relationship_label": _relationship_label(state),
+                "actor_follows_subject": _is_active_flag(row.get("actor_follows_subject")),
+                "subject_follows_actor": _is_active_flag(row.get("subject_follows_actor")),
+                "first_seen_at": _min_ts(row.get("follower_first_seen"), row.get("following_first_seen")),
+                "latest_interaction_at": _pick_ts(
+                    row.get("latest_observed_at"),
+                    row.get("follower_last_seen"),
+                    row.get("following_last_seen"),
+                    row.get("follower_departed_at"),
+                    row.get("following_departed_at"),
+                ),
+                "departed_at": _pick_ts(row.get("follower_departed_at"), row.get("following_departed_at")),
+                "latest_event": latest_event,
+            }
+        )
+    return jsonify({"items": items})
+
+
+@app.route("/api/ui/target_timeline", methods=["GET"])
+def api_ui_target_timeline():
+    target = (request.args.get("target") or "").strip()
+    if not target:
+        return jsonify({"error": "target is required"}), 400
+    try:
+        limit = max(1, min(int(request.args.get("limit", 40)), 200))
+    except Exception:
+        limit = 40
+    conn = _get_db()
+    try:
+        rows = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT id, target_username, login_username, username, relation_type, event_type, observed_at, run_id
+                FROM relationship_events
+                WHERE target_username = ?
+                ORDER BY observed_at DESC, id DESC
+                LIMIT ?
+                """,
+                (target, limit * 100),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    grouped: dict[tuple[str, int | None], dict] = {}
+    order: list[tuple[str, int | None]] = []
+    for row in rows:
+        key = (str(row.get("observed_at") or ""), row.get("run_id"))
+        if key not in grouped:
+            grouped[key] = {
+                "target_username": target,
+                "observed_at": row.get("observed_at"),
+                "run_id": row.get("run_id"),
+                "login_username": row.get("login_username"),
+                "followers_added_count": 0,
+                "followers_removed_count": 0,
+                "following_added_count": 0,
+                "following_removed_count": 0,
+                "followers_added_sample": [],
+                "followers_removed_sample": [],
+                "following_added_sample": [],
+                "following_removed_sample": [],
+            }
+            order.append(key)
+        batch = grouped[key]
+        relation_type = row.get("relation_type")
+        event_type = row.get("event_type")
+        username = row.get("username")
+        if relation_type == "followers" and event_type == "added":
+            batch["followers_added_count"] += 1
+            if username and len(batch["followers_added_sample"]) < 8:
+                batch["followers_added_sample"].append(username)
+        elif relation_type == "followers" and event_type == "removed":
+            batch["followers_removed_count"] += 1
+            if username and len(batch["followers_removed_sample"]) < 8:
+                batch["followers_removed_sample"].append(username)
+        elif relation_type == "following" and event_type == "added":
+            batch["following_added_count"] += 1
+            if username and len(batch["following_added_sample"]) < 8:
+                batch["following_added_sample"].append(username)
+        elif relation_type == "following" and event_type == "removed":
+            batch["following_removed_count"] += 1
+            if username and len(batch["following_removed_sample"]) < 8:
+                batch["following_removed_sample"].append(username)
+
+    items = []
+    for key in order[:limit]:
+        batch = grouped[key]
+        batch["event_count"] = (
+            batch["followers_added_count"]
+            + batch["followers_removed_count"]
+            + batch["following_added_count"]
+            + batch["following_removed_count"]
+        )
+        items.append(batch)
+    return jsonify({"items": items})
+
+
+@app.route("/api/ui/target_changes", methods=["GET"])
+def api_ui_target_changes():
+    target = (request.args.get("target") or "").strip()
+    if not target:
+        return jsonify({"error": "target is required"}), 400
+    try:
+        limit = max(1, min(int(request.args.get("limit", 60)), 400))
+    except Exception:
+        limit = 60
+    conn = _get_db()
+    try:
+        rows = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT id, target_username, login_username, username, relation_type, event_type, observed_at, run_id
+                FROM relationship_events
+                WHERE target_username = ?
+                ORDER BY observed_at DESC, id DESC
+                LIMIT ?
+                """,
+                (target, limit),
+            ).fetchall()
+        ]
+        usernames = sorted({str(row.get("username") or "").strip() for row in rows if row.get("username")})
+        follower_history = {}
+        following_history = {}
+        if usernames:
+            placeholders = ",".join(["?"] * len(usernames))
+            follower_history = {
+                row["username"]: dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT username, first_seen, last_seen, unfollowed_at
+                    FROM followers_history
+                    WHERE target_username = ? AND username IN ({placeholders})
+                    """,
+                    (target, *usernames),
+                ).fetchall()
+            }
+            following_history = {
+                row["username"]: dict(row)
+                for row in conn.execute(
+                    f"""
+                    SELECT username, first_seen, last_seen, unfollowed_at
+                    FROM followees_history
+                    WHERE target_username = ? AND username IN ({placeholders})
+                    """,
+                    (target, *usernames),
+                ).fetchall()
+            }
+    finally:
+        conn.close()
+
+    items = []
+    for row in rows:
+        payload = _event_view_model(row)
+        history = (
+            follower_history.get(str(row.get("username") or ""))
+            if str(row.get("relation_type") or "") == "followers"
+            else following_history.get(str(row.get("username") or ""))
+        ) or {}
+        payload.update(
+            {
+                "first_seen_at": history.get("first_seen"),
+                "last_seen_at": history.get("last_seen"),
+                "departed_at": history.get("unfollowed_at"),
+            }
+        )
+        items.append(payload)
+    return jsonify({"items": items})
+
+
+@app.route("/api/ui/system/health", methods=["GET"])
+def api_ui_system_health():
+    status_payload = api_status().get_json() or {}
+    return jsonify(
+        {
+            "state": status_payload.get("state"),
+            "collectors": _collector_health_rows(),
+            "active_jobs": status_payload.get("active_jobs", []),
+            "queued_jobs": status_payload.get("queued_jobs", []),
+            "manual_actions": status_payload.get("manual_actions", []),
+            "cooldowns": status_payload.get("cooldowns", []),
+            "schedules": api_schedules().get_json() or [],
+        }
+    )
+
+
+@app.route("/api/ui/brief", methods=["GET"])
+def api_ui_brief():
+    evidence_resp = api_ui_evidence().get_json() or {}
+    targets_resp = api_ui_targets().get_json() or {}
+    system_resp = api_ui_system_health().get_json() or {}
+    recent_evidence = (evidence_resp.get("items") or [])[:10]
+    collectors = system_resp.get("collectors") or []
+    attention_collectors = [row for row in collectors if row.get("status") in {"attention", "broken", "cooling_down"}]
+    active_jobs = system_resp.get("active_jobs") or []
+    queued_jobs = system_resp.get("queued_jobs") or []
+    next_checks = sorted(
+        [item for item in (targets_resp.get("items") or []) if item.get("next_check_at")],
+        key=lambda item: str(item.get("next_check_at") or ""),
+    )[:8]
+    return jsonify(
+        {
+            "state": system_resp.get("state"),
+            "attention_collectors": attention_collectors,
+            "recent_evidence": recent_evidence,
+            "active_jobs": active_jobs,
+            "queued_jobs": queued_jobs,
+            "targets": targets_resp.get("items") or [],
+            "next_checks": next_checks,
+        }
+    )
+
+
 def _parse_run_ts(value: str | None):
     if not value:
         return None
@@ -5644,7 +6551,7 @@ def _execute_run_job(job_id: str, login_username: str, target_username: str, sou
         finished = datetime.now(LOCAL_TZ).isoformat()
         code = getattr(exc, "code", None)
         cooldown_seconds = 0
-        if str(code or "").strip().lower() in {"rate_limited", "feedback_required"}:
+        if _should_cooldown_run_error(code, str(exc)):
             cooldown_seconds = _set_run_cooldown(login_username, code, str(exc))
         terminal_state = _classify_terminal_run_state(code, str(exc), cooldown_seconds)
         _run_state_set(
@@ -5719,6 +6626,8 @@ def _run_dispatcher_loop():
                 if not job_id or not login_username or not target_username:
                     continue
                 if _get_run_cooldown_remaining(login_username) > 0:
+                    continue
+                if _get_run_min_gap_remaining(login_username) > 0:
                     continue
                 if UNFOLLOW_LOCK.locked() and str(UNFOLLOW_JOB.get("login_username") or "") == login_username:
                     continue
@@ -5815,6 +6724,19 @@ def api_run():
             ),
             429,
         )
+    gap_seconds = _get_run_min_gap_remaining(login_username)
+    if gap_seconds > 0:
+        return (
+            jsonify(
+                {
+                    "error": "login is resting between runs to avoid Instagram automation triggers",
+                    "error_code": "run_spacing",
+                    "login_username": login_username,
+                    "cooldown_seconds": gap_seconds,
+                }
+            ),
+            429,
+        )
 
     # refuse if this login already running, or unfollow is running on same login
     if _get_run_lock(login_username).locked():
@@ -5855,8 +6777,9 @@ def api_run_status(job_id):
             payload = {"status": "error", "error": str(exc)}
         return jsonify({"done": True, "payload": payload, "meta": merged_meta})
     if terminal:
+        terminal_status = str(record.get("status") or "").strip().lower()
         payload = {
-            "status": "success" if record.get("status") == "done" else "error",
+            "status": "success" if terminal_status == "done" else ("cancelled" if terminal_status == "cancelled" else "error"),
             "started_at": record.get("started_at"),
             "finished_at": record.get("finished_at"),
         }
@@ -6089,7 +7012,6 @@ def api_health_detail():
         "db": _health_check_db(),
         "files": _health_check_files(),
         "scheduler": _health_check_scheduler(),
-        "monitor": _health_check_monitor(),
         "sessions": _health_check_sessions(),
         "scraper": _health_check_scraper(),
         "runs": _health_check_runs(),
@@ -6101,46 +7023,19 @@ def api_health_detail():
 
 @app.route("/api/monitor/status", methods=["GET"])
 def api_monitor_status():
-    conn = _get_db()
-    try:
-        targets = _get_targets(conn)
-        per_target = []
-        for target in targets:
-            cur = conn.execute(
-                """
-                SELECT id, target_username, login_username, timestamp,
-                       followers_count, followees_count, run_requested,
-                       triggered_run_id, trigger_reason
-                FROM count_checks
-                WHERE target_username = ?
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-                (target,),
-            )
-            row = cur.fetchone()
-            if row:
-                per_target.append(dict(row))
-        cur2 = conn.execute(
-            """
-            SELECT id, target_username, login_username, timestamp,
-                   followers_count, followees_count, run_requested,
-                   triggered_run_id, trigger_reason
-            FROM count_checks
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        )
-        overall = cur2.fetchone()
-        return jsonify({"targets": per_target, "overall": dict(overall) if overall else None})
-    finally:
-        conn.close()
+    return jsonify({"error": "monitor checks have been removed"}), 410
 
 
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
     cfg = _get_config(force=True)
-    return jsonify({"config": _mask_config_for_api(cfg), "defaults": _mask_config_for_api(CONFIG_DEFAULTS)})
+    return jsonify(
+        {
+            "config": _mask_config_for_api(cfg),
+            "defaults": _mask_config_for_api(CONFIG_DEFAULTS),
+            "meta": _config_meta_for_api(),
+        }
+    )
 
 
 @app.route("/api/config", methods=["PUT"])
@@ -6184,10 +7079,6 @@ def api_config_update():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     try:
-        _schedule_monitor_job()
-    except Exception:
-        pass
-    try:
         _schedule_recon_maintenance_job()
     except Exception:
         pass
@@ -6197,6 +7088,7 @@ def api_config_update():
             "updated": list(updated.keys()),
             "profile_applied_backend": profile_applied_backend,
             "config": _mask_config_for_api(cfg),
+            "meta": _config_meta_for_api(),
         }
     )
 
@@ -6261,13 +7153,16 @@ def api_collector_auth_status():
         return jsonify({"error": "login_username is required"}), 400
     storage_path = _collector_storage_path(login_username)
     storage_file = Path(storage_path)
+    profile_dir = Path(browser_profile_dir_for_login(login_username))
     return jsonify(
         {
             "login_username": login_username,
             "scraper_backend": _normalize_scraper_backend(_get_config_value("run_scraper_backend", "browser")),
             "storage_path": storage_path,
+            "profile_path": str(profile_dir),
             "storage_exists": storage_file.exists(),
-            "auth_ready": ensure_auth_state(storage_path),
+            "profile_exists": browser_profile_has_state(str(profile_dir)),
+            "auth_ready": storage_state_has_session(storage_path, expected_username=login_username),
             "storage_mtime": storage_file.stat().st_mtime if storage_file.exists() else None,
         }
     )
@@ -6284,7 +7179,7 @@ def api_collector_auth_init():
     except Exception:
         max_wait_seconds = 300
     storage_path = _collector_storage_path(login_username)
-    proxy = _get_proxy_config(session_id=_generate_proxy_session_id())
+    proxy = _get_proxy_config(session_id=_generate_proxy_session_id(login_username=login_username))
     executor.submit(
         init_login,
         storage_path,
@@ -6596,6 +7491,14 @@ def api_schedules():
                 "login_username": row["login_username"],
                 "target_username": row["target_username"],
                 "interval": row["interval_expr"],
+                "mode": _normalize_schedule_mode(row.get("mode")),
+                "trigger_delta": max(1, int(row.get("trigger_delta") or 1)),
+                "schedule_kind": row.get("schedule_kind"),
+                "schedule_time": row.get("schedule_time"),
+                "schedule_weekday": row.get("schedule_weekday"),
+                "schedule_interval_days": row.get("schedule_interval_days"),
+                "schedule_start_date": row.get("schedule_start_date"),
+                "schedule_label": row.get("schedule_label"),
                 "next_run": job.next_run_time.isoformat() if job and job.next_run_time else None,
             }
         )
@@ -6608,19 +7511,58 @@ def api_schedules_create():
     login_username = data.get("login_username")
     target_username = data.get("target_username")
     interval_expr = data.get("interval")  # cron expression, e.g., "0 9,21 * * *"
-    if not login_username or not target_username or not interval_expr:
-        return jsonify({"error": "login_username, target_username, interval (cron) required"}), 400
-    # Validate cron
+    mode = _normalize_schedule_mode(data.get("mode"))
+    schedule_kind = _normalize_schedule_kind(data.get("schedule_kind") or ("cron" if interval_expr else "daily"))
+    schedule_time = _normalize_schedule_time(data.get("schedule_time"))
+    schedule_weekday = _normalize_schedule_weekday(data.get("schedule_weekday"))
+    schedule_interval_days = _normalize_schedule_interval_days(data.get("schedule_interval_days"))
+    schedule_start_date = _normalize_schedule_start_date(data.get("schedule_start_date"))
     try:
-        CronTrigger.from_crontab(interval_expr)
+        trigger_delta = max(1, int(data.get("trigger_delta") or 1))
+    except Exception:
+        return jsonify({"error": "trigger_delta must be an integer >= 1"}), 400
+    if not login_username or not target_username:
+        return jsonify({"error": "login_username and target_username are required"}), 400
+    try:
+        _build_schedule_trigger(
+            kind=schedule_kind,
+            interval=interval_expr,
+            schedule_time=schedule_time,
+            weekday=schedule_weekday,
+            interval_days=schedule_interval_days,
+            start_date=schedule_start_date,
+        )
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": f"invalid cron expression: {exc}"}), 400
+        return jsonify({"error": str(exc)}), 400
 
     # Validate credentials exist
     _get_credentials(login_username)
 
-    schedule_id = _persist_schedule(login_username, target_username, interval_expr)
-    _schedule_job(schedule_id, login_username, target_username, interval_expr)
+    schedule_id = _persist_schedule(
+        login_username,
+        target_username,
+        interval_expr,
+        mode=mode,
+        trigger_delta=trigger_delta,
+        schedule_kind=schedule_kind,
+        schedule_time=schedule_time,
+        schedule_weekday=schedule_weekday,
+        schedule_interval_days=schedule_interval_days,
+        schedule_start_date=schedule_start_date,
+    )
+    _schedule_job(
+        schedule_id,
+        login_username,
+        target_username,
+        interval_expr,
+        mode=mode,
+        trigger_delta=trigger_delta,
+        schedule_kind=schedule_kind,
+        schedule_time=schedule_time,
+        schedule_weekday=schedule_weekday,
+        schedule_interval_days=schedule_interval_days,
+        schedule_start_date=schedule_start_date,
+    )
     return jsonify({"id": schedule_id})
 
 
@@ -6638,38 +7580,111 @@ def api_schedule_update(schedule_id):
     data = request.get_json(force=True)
     target_username = data.get("target_username")
     interval_expr = data.get("interval")
-    if interval_expr is None and target_username is None:
+    mode = data.get("mode") if "mode" in data else None
+    trigger_delta = data.get("trigger_delta") if "trigger_delta" in data else None
+    schedule_kind = data.get("schedule_kind") if "schedule_kind" in data else None
+    schedule_time = data.get("schedule_time") if "schedule_time" in data else None
+    schedule_weekday = data.get("schedule_weekday") if "schedule_weekday" in data else None
+    schedule_interval_days = data.get("schedule_interval_days") if "schedule_interval_days" in data else None
+    schedule_start_date = data.get("schedule_start_date") if "schedule_start_date" in data else None
+    if (
+        interval_expr is None
+        and target_username is None
+        and mode is None
+        and trigger_delta is None
+        and schedule_kind is None
+        and schedule_time is None
+        and schedule_weekday is None
+        and schedule_interval_days is None
+        and schedule_start_date is None
+    ):
         return jsonify({"error": "nothing to update"}), 400
-    if interval_expr is not None:
+    normalized_mode = None
+    if mode is not None:
+        normalized_mode = _normalize_schedule_mode(mode)
+    normalized_trigger_delta = None
+    if trigger_delta is not None:
         try:
-            CronTrigger.from_crontab(interval_expr)
-        except Exception as exc:  # noqa: BLE001
-            return jsonify({"error": f"invalid cron expression: {exc}"}), 400
+            normalized_trigger_delta = max(1, int(trigger_delta))
+        except Exception:
+            return jsonify({"error": "trigger_delta must be an integer >= 1"}), 400
+    normalized_schedule_kind = _normalize_schedule_kind(schedule_kind) if schedule_kind is not None else None
+    normalized_schedule_time = _normalize_schedule_time(schedule_time) if schedule_time is not None else None
+    normalized_schedule_weekday = _normalize_schedule_weekday(schedule_weekday) if schedule_weekday is not None else None
+    normalized_schedule_interval_days = (
+        _normalize_schedule_interval_days(schedule_interval_days) if schedule_interval_days is not None else None
+    )
+    normalized_schedule_start_date = (
+        _normalize_schedule_start_date(schedule_start_date) if schedule_start_date is not None else None
+    )
 
     conn = _get_db()
     try:
-        cur = conn.execute("SELECT login_username FROM schedules WHERE id = ?", (schedule_id,))
+        cur = conn.execute(
+            """
+            SELECT login_username, target_username, interval, mode, trigger_delta,
+                   schedule_kind, schedule_time, schedule_weekday, schedule_interval_days, schedule_start_date
+            FROM schedules WHERE id = ?
+            """,
+            (schedule_id,),
+        )
         row = cur.fetchone()
         if not row:
             return jsonify({"error": "schedule not found"}), 404
         login_username = row[0]
         # validate creds still exist
         _get_credentials(login_username)
-
-        if target_username is not None and interval_expr is not None:
-            conn.execute(
-                "UPDATE schedules SET target_username = ?, interval = ? WHERE id = ?",
-                (target_username, interval_expr, schedule_id),
+        effective_kind = normalized_schedule_kind if normalized_schedule_kind is not None else row[5]
+        effective_interval = interval_expr if interval_expr is not None else row[2]
+        effective_time = normalized_schedule_time if schedule_time is not None else row[6]
+        effective_weekday = normalized_schedule_weekday if schedule_weekday is not None else row[7]
+        effective_interval_days = normalized_schedule_interval_days if schedule_interval_days is not None else row[8]
+        effective_start_date = normalized_schedule_start_date if schedule_start_date is not None else row[9]
+        try:
+            _build_schedule_trigger(
+                kind=effective_kind,
+                interval=effective_interval,
+                schedule_time=effective_time,
+                weekday=effective_weekday,
+                interval_days=effective_interval_days,
+                start_date=effective_start_date,
             )
-        elif target_username is not None:
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"error": str(exc)}), 400
+        assignments = []
+        params = []
+        if target_username is not None:
+            assignments.append("target_username = ?")
+            params.append(target_username)
+        if interval_expr is not None:
+            assignments.append("interval = ?")
+            params.append(interval_expr)
+        if normalized_mode is not None:
+            assignments.append("mode = ?")
+            params.append(normalized_mode)
+        if normalized_trigger_delta is not None:
+            assignments.append("trigger_delta = ?")
+            params.append(normalized_trigger_delta)
+        if normalized_schedule_kind is not None:
+            assignments.append("schedule_kind = ?")
+            params.append(normalized_schedule_kind)
+        if schedule_time is not None:
+            assignments.append("schedule_time = ?")
+            params.append(normalized_schedule_time)
+        if schedule_weekday is not None:
+            assignments.append("schedule_weekday = ?")
+            params.append(normalized_schedule_weekday)
+        if schedule_interval_days is not None:
+            assignments.append("schedule_interval_days = ?")
+            params.append(normalized_schedule_interval_days)
+        if schedule_start_date is not None:
+            assignments.append("schedule_start_date = ?")
+            params.append(normalized_schedule_start_date)
+        if assignments:
+            params.append(schedule_id)
             conn.execute(
-                "UPDATE schedules SET target_username = ? WHERE id = ?",
-                (target_username, schedule_id),
-            )
-        elif interval_expr is not None:
-            conn.execute(
-                "UPDATE schedules SET interval = ? WHERE id = ?",
-                (interval_expr, schedule_id),
+                f"UPDATE schedules SET {', '.join(assignments)} WHERE id = ?",
+                tuple(params),
             )
         conn.commit()
     finally:
@@ -6682,11 +7697,27 @@ def api_schedule_update(schedule_id):
     conn = _get_db()
     try:
         r = conn.execute(
-            "SELECT login_username, target_username, interval FROM schedules WHERE id = ?",
+            """
+            SELECT login_username, target_username, interval, mode, trigger_delta,
+                   schedule_kind, schedule_time, schedule_weekday, schedule_interval_days, schedule_start_date
+            FROM schedules WHERE id = ?
+            """,
             (schedule_id,),
         ).fetchone()
         if r:
-            _schedule_job(schedule_id, r[0], r[1], r[2])
+            _schedule_job(
+                schedule_id,
+                r[0],
+                r[1],
+                r[2],
+                mode=r[3],
+                trigger_delta=r[4],
+                schedule_kind=r[5],
+                schedule_time=r[6],
+                schedule_weekday=r[7],
+                schedule_interval_days=r[8],
+                schedule_start_date=r[9],
+            )
     finally:
         conn.close()
     return jsonify({"updated": schedule_id})

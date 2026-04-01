@@ -190,6 +190,28 @@ Returns the latest job for a login (progress/result/log tails + trace tail).
 - `worker_out_tail` / `worker_err_tail`
 - `trace_tail` – private API request/response trace (JSONL tail)
 
+### GET `/api/collector/auth/status?login_username=<login>`
+
+Returns browser-auth readiness for a collector login.
+
+**Response keys:**
+- `storage_path` – per-login browser storage path
+- `storage_exists` – whether the storage file exists
+- `auth_ready` – whether the storage contains a valid authenticated session for that login
+- `storage_mtime` – storage file mtime when present
+
+### POST `/api/collector/auth/init`
+
+Starts interactive collector login for a specific `login_username`.
+
+**Request:**
+```json
+{
+  "login_username": "login",
+  "max_wait_seconds": 300
+}
+```
+
 ---
 
 ## Targets

@@ -7,6 +7,7 @@ ARG PHONEINFOGA_VERSION=v2.11.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    chromium \
     curl \
     git \
     tar \
@@ -18,7 +19,9 @@ RUN pip install -r /app/requirements.txt
 
 # Install Blackbird (username/email recon provider)
 RUN git clone --depth 1 --branch "${BLACKBIRD_REF}" https://github.com/p1ngul1n0/blackbird.git /opt/blackbird \
-    && pip install -r /opt/blackbird/requirements.txt
+    && pip install -r /opt/blackbird/requirements.txt \
+    # Re-apply InstaLab pins because Blackbird downgrades shared libs like requests.
+    && pip install -r /app/requirements.txt
 
 # Install PhoneInfoga (phone recon provider)
 RUN curl -fsSL -o /tmp/phoneinfoga.tar.gz \
