@@ -399,9 +399,13 @@ export async function getRelationshipHistory(
   return relationshipHistorySchema.parse(data);
 }
 
-export async function getRuns(target: string, limit = 40): Promise<RunHistoryItem[]> {
+export async function getRuns(
+  target: string,
+  limit = 40,
+  kind: "full" | "profile_only" | "all" = "full"
+): Promise<RunHistoryItem[]> {
   const data = await fetchJson<unknown>(
-    `/runs?target=${encodeURIComponent(target)}&limit=${encodeURIComponent(String(limit))}`
+    `/runs?target=${encodeURIComponent(target)}&limit=${encodeURIComponent(String(limit))}&kind=${encodeURIComponent(kind)}`
   );
   return runHistorySchema.parse(data);
 }

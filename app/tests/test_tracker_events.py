@@ -1,7 +1,7 @@
 from uuid import uuid4
 
 from db import get_db
-from tracker_db import write_run_metadata
+from tracker_db import rebuild_target_relationship_state, write_run_metadata
 
 
 def _cleanup_target(conn, target_username: str) -> None:
@@ -135,6 +135,105 @@ def test_write_run_metadata_records_bidirectional_relationship_events_and_histor
             assert zara["unfollowed_at"] is None
             assert zara["active"] == 1
             assert zara["first_seen_known"] == 1
+        finally:
+            _cleanup_target(conn, target)
+            conn.close()
+    except Exception:
+        conn = get_db()
+        try:
+            _cleanup_target(conn, target)
+        finally:
+            conn.close()
+        raise
+
+
+def test_rebuild_target_relationship_state_recomputes_remaining_runs_after_delete():
+    suffix = uuid4().hex[:10]
+    target = f"pytest_rebuild_{suffix}"
+    login = f"pytest_login_{suffix}"
+    t1 = "2026-02-11_10-00-00"
+    t2 = "2026-02-11_11-00-00"
+    t3 = "2026-02-11_12-00-00"
+
+    conn = get_db()
+    try:
+        _cleanup_target(conn, target)
+    finally:
+        conn.close()
+
+    try:
+        _, first_run_id = write_run_metadata(
+            db_path="/tmp/instalab_runs.db",
+            login_username=login,
+            target_username=target,
+            timestamp=t1,
+            followers=["alice", "bob"],
+            followees=["xavier", "yuki"],
+            non_followbacks_count=2,
+        )
+        _, second_run_id = write_run_metadata(
+            db_path="/tmp/instalab_runs.db",
+            login_username=login,
+            target_username=target,
+            timestamp=t2,
+            followers=["bob", "charlie"],
+            followees=["xavier", "zara"],
+            non_followbacks_count=2,
+        )
+        _, third_run_id = write_run_metadata(
+            db_path="/tmp/instalab_runs.db",
+            login_username=login,
+            target_username=target,
+            timestamp=t3,
+            followers=["charlie", "dana"],
+            followees=["zara", "quinn"],
+            non_followbacks_count=2,
+        )
+
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM run_followers WHERE run_id = ?", (second_run_id,))
+            conn.execute("DELETE FROM run_followees WHERE run_id = ?", (second_run_id,))
+            conn.execute("DELETE FROM runs WHERE id = ?", (second_run_id,))
+            summary = rebuild_target_relationship_state(conn, target_username=target)
+            conn.commit()
+
+            assert summary["runs_seen"] == 2
+            assert summary["runs_replayed"] == 2
+
+            third_run = conn.execute(
+                """
+                SELECT prev_run_id, followers_added, followers_removed, followees_added, followees_removed
+                FROM runs
+                WHERE id = ?
+                """,
+                (third_run_id,),
+            ).fetchone()
+            assert third_run["prev_run_id"] == first_run_id
+            assert third_run["followers_added"] == 2
+            assert third_run["followers_removed"] == 1
+            assert third_run["followees_added"] == 2
+            assert third_run["followees_removed"] == 1
+
+            events = {
+                (row["run_id"], row["relation_type"], row["event_type"], row["username"])
+                for row in conn.execute(
+                    """
+                    SELECT run_id, relation_type, event_type, username
+                    FROM relationship_events
+                    WHERE target_username = ?
+                    ORDER BY run_id, relation_type, event_type, username
+                    """,
+                    (target,),
+                ).fetchall()
+            }
+            assert all(run_id != second_run_id for run_id, *_ in events)
+            assert (third_run_id, "followers", "added", "dana") in events
+            assert (third_run_id, "followers", "added", "charlie") in events
+            assert (third_run_id, "followers", "removed", "alice") in events
+            assert (third_run_id, "following", "added", "quinn") in events
+            assert (third_run_id, "following", "added", "zara") in events
+            assert (third_run_id, "following", "removed", "yuki") in events
         finally:
             _cleanup_target(conn, target)
             conn.close()

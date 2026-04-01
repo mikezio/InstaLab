@@ -1668,16 +1668,19 @@ function ExplorerPage() {
 
   const runsQ = useQuery({
     queryKey: ["runs", selectedTarget],
-    queryFn: () => getRuns(selectedTarget, 60),
+    queryFn: () => getRuns(selectedTarget, 60, "full"),
     enabled: Boolean(selectedTarget),
     refetchInterval: 15000,
   });
 
   useEffect(() => {
     const firstId = runsQ.data?.[0]?.id;
-    if (typeof firstId === "number" && !selectedRunId) {
+    const stillPresent = (runsQ.data ?? []).some((run) => run.id === selectedRunId);
+    if (typeof firstId === "number" && (!selectedRunId || !stillPresent)) {
       setSelectedRunId(firstId);
+      return;
     }
+    if (!firstId) setSelectedRunId(null);
   }, [runsQ.data, selectedRunId]);
 
   const runDetailQ = useQuery({
@@ -1759,7 +1762,7 @@ function ExplorerPage() {
           <strong>@{selectedTarget || "-"}</strong>
         </article>
         <article className="explorer-kpi">
-          <span>Snapshots</span>
+          <span>Full runs</span>
           <strong>{runsQ.data?.length ?? 0}</strong>
         </article>
         <article className="explorer-kpi">
@@ -1769,7 +1772,7 @@ function ExplorerPage() {
       </div>
       <div className="explorer-main-grid">
         <article className="card">
-          <h3>Snapshots</h3>
+          <h3>Full Runs</h3>
           <div className="form-grid">
             <label>
               Target
@@ -1782,11 +1785,11 @@ function ExplorerPage() {
               </select>
             </label>
           </div>
-          <p className="hint">Choose a snapshot.</p>
+          <p className="hint">Choose a full follower/following snapshot run. Profile-only and count-watch evidence stay separate.</p>
           {runs.length ? (
             <>
               <label>
-                Snapshot
+                Full run
                 <select
                   value={selectedRunId ?? ""}
                   onChange={(e) => setSelectedRunId(e.target.value ? Number(e.target.value) : null)}
@@ -1835,19 +1838,19 @@ function ExplorerPage() {
             </>
           ) : (
             <div className="explorer-empty">
-              <h4>No snapshots yet</h4>
-              <p>Run a collection first.</p>
+              <h4>No full runs yet</h4>
+              <p>Run a full follower/following collection first. Profile-only checks and count-watch samples stay separate.</p>
             </div>
           )}
           {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
           {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}
         </article>
         <article className="card explorer-panel">
-          <h3>Snapshot {selectedRunId ? `#${selectedRunId}` : ""}</h3>
+          <h3>Full Run {selectedRunId ? `#${selectedRunId}` : ""}</h3>
           {!detail ? (
             <div className="explorer-empty detail-empty">
-              <h4>Select a snapshot</h4>
-              <p>Pick a snapshot to inspect exact adds and removals.</p>
+              <h4>Select a full run</h4>
+              <p>Pick a full follower/following run to inspect exact adds and removals.</p>
             </div>
           ) : null}
           {detail ? (

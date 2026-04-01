@@ -425,6 +425,142 @@ def backfill_relationship_events(conn):
     return created
 
 
+def rebuild_target_relationship_state(conn, *, target_username):
+    _init_db(conn)
+    target_username = str(target_username or "").strip()
+    if not target_username:
+        return {
+            "target_username": "",
+            "runs_seen": 0,
+            "runs_replayed": 0,
+            "events_rebuilt": 0,
+        }
+
+    conn.execute("DELETE FROM relationship_events WHERE target_username = ?", (target_username,))
+    conn.execute("DELETE FROM followers_history WHERE target_username = ?", (target_username,))
+    conn.execute("DELETE FROM followees_history WHERE target_username = ?", (target_username,))
+
+    runs = conn.execute(
+        """
+        SELECT id, target_username, login_username, timestamp,
+               followers_count, followees_count, non_followbacks_count, snapshot_note
+        FROM runs
+        WHERE target_username = ?
+        ORDER BY timestamp ASC, id ASC
+        """,
+        (target_username,),
+    ).fetchall()
+    if not runs:
+        return {
+            "target_username": target_username,
+            "runs_seen": 0,
+            "runs_replayed": 0,
+            "events_rebuilt": 0,
+        }
+
+    prev = None
+    events_rebuilt = 0
+    runs_replayed = 0
+    for run in runs:
+        run_id = run["id"]
+        followers, followees = _get_run_members(conn, run_id)
+        snapshot_note = str(run["snapshot_note"] or "").strip().lower()
+        has_member_snapshot = bool(followers or followees)
+        if not has_member_snapshot:
+            # Count/profile-only snapshots do not have member lists, so they cannot
+            # safely drive relationship history or delta recalculation.
+            if snapshot_note:
+                continue
+            if int(run["followers_count"] or 0) > 0 or int(run["followees_count"] or 0) > 0:
+                continue
+
+        if prev is None:
+            prev_run_id = None
+            prev_followers = followers
+            prev_followees = followees
+            followers_added = []
+            followers_removed = []
+            followees_added = []
+            followees_removed = []
+            first_seen_known = 0
+        else:
+            prev_run_id = prev["run_id"]
+            prev_followers = prev["followers"]
+            prev_followees = prev["followees"]
+            followers_added = sorted(followers - prev_followers)
+            followers_removed = sorted(prev_followers - followers)
+            followees_added = sorted(followees - prev_followees)
+            followees_removed = sorted(prev_followees - followees)
+            first_seen_known = 1
+
+        conn.execute(
+            """
+            UPDATE runs
+            SET prev_run_id = ?,
+                followers_added = ?,
+                followers_removed = ?,
+                followees_added = ?,
+                followees_removed = ?,
+                non_followbacks_count = ?
+            WHERE id = ?
+            """,
+            (
+                prev_run_id,
+                len(followers_added),
+                len(followers_removed),
+                len(followees_added),
+                len(followees_removed),
+                len(followees - followers),
+                run_id,
+            ),
+        )
+        events_rebuilt += _insert_relationship_events(
+            conn,
+            target_username=target_username,
+            login_username=run["login_username"],
+            run_id=run_id,
+            prev_run_id=prev_run_id,
+            timestamp=run["timestamp"],
+            followers_added=followers_added,
+            followers_removed=followers_removed,
+            followees_added=followees_added,
+            followees_removed=followees_removed,
+        )
+        _update_history_table(
+            conn,
+            table="followers_history",
+            target_username=target_username,
+            run_id=run_id,
+            timestamp=run["timestamp"],
+            added=sorted(followers if prev is None else followers_added),
+            removed=[] if prev is None else followers_removed,
+            first_seen_known=first_seen_known,
+        )
+        _update_history_table(
+            conn,
+            table="followees_history",
+            target_username=target_username,
+            run_id=run_id,
+            timestamp=run["timestamp"],
+            added=sorted(followees if prev is None else followees_added),
+            removed=[] if prev is None else followees_removed,
+            first_seen_known=first_seen_known,
+        )
+        prev = {
+            "run_id": run_id,
+            "followers": followers,
+            "followees": followees,
+        }
+        runs_replayed += 1
+
+    return {
+        "target_username": target_username,
+        "runs_seen": len(runs),
+        "runs_replayed": runs_replayed,
+        "events_rebuilt": events_rebuilt,
+    }
+
+
 def write_run_metadata(
     *,
     db_path,

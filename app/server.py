@@ -37,6 +37,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory, redire
 import requests
 
 from tracker_db import (
+    rebuild_target_relationship_state,
     backfill_relationship_events,
     get_latest_count_watch_sample,
     get_recent_count_watch_samples,
@@ -3072,6 +3073,7 @@ def _delete_run(run_id):
         conn.execute("DELETE FROM run_followers WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM run_followees WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+        rebuild_target_relationship_state(conn, target_username=run["target_username"])
         conn.commit()
         DELETED_RUNS[run_id] = {
             "run": run,
@@ -3135,6 +3137,7 @@ def _restore_run(run_id):
             "INSERT INTO run_followees (run_id, username) VALUES (?, ?)",
             [(run_id, u) for u in payload["followees"]],
         )
+        rebuild_target_relationship_state(conn, target_username=run["target_username"])
         conn.commit()
     finally:
         conn.close()
@@ -4938,24 +4941,40 @@ def api_targets():
 def api_runs():
     target = request.args.get("target")
     limit = int(request.args.get("limit", 20))
+    kind = (request.args.get("kind") or "full").strip().lower()
     if not target:
         return jsonify({"error": "target is required"}), 400
+    if kind not in {"full", "profile_only", "all"}:
+        return jsonify({"error": "kind must be full, profile_only, or all"}), 400
     conn = _get_db()
     try:
+        where = ["target_username = ?"]
+        params = [target]
+        if kind == "full":
+            where.append("(snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)")
+            params.append("%profile_only%")
+        elif kind == "profile_only":
+            where.append("LOWER(COALESCE(snapshot_note, '')) LIKE ?")
+            params.append("%profile_only%")
         cur = conn.execute(
-            """
+            f"""
             SELECT id, timestamp, followers_count, followees_count,
                    followers_added, followers_removed, followees_added, followees_removed,
                    non_followbacks_count, login_username, duration_seconds, confidence_score, confidence_flag,
                    followers_collected_count, followees_collected_count, snapshot_complete, snapshot_note
             FROM runs
-            WHERE target_username = ?
+            WHERE {' AND '.join(where)}
             ORDER BY timestamp DESC, id DESC
             LIMIT ?
             """,
-            (target, limit),
+            (*params, limit),
         )
-        rows = [dict(r) for r in cur.fetchall()]
+        rows = []
+        for row in cur.fetchall():
+            payload = dict(row)
+            note = str(payload.get("snapshot_note") or "").lower()
+            payload["run_kind"] = "profile_only" if "profile_only" in note else "full"
+            rows.append(payload)
         return jsonify(rows)
     finally:
         conn.close()
@@ -5665,6 +5684,17 @@ def api_ui_targets():
             ) ranked
             WHERE rn = 1
         """
+        latest_full_query = f"""
+            SELECT target_username, id, timestamp
+            FROM (
+                SELECT target_username, id, timestamp,
+                       ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp DESC, id DESC) as rn
+                FROM runs
+                WHERE target_username IN ({placeholders})
+                  AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
+            ) ranked
+            WHERE rn = 1
+        """
         event_query = f"""
             SELECT target_username, id, username, relation_type, event_type, observed_at, login_username, run_id
             FROM (
@@ -5682,6 +5712,10 @@ def api_ui_targets():
             GROUP BY target_username
         """
         latest_rows = {row["target_username"]: dict(row) for row in conn.execute(latest_query, tuple(targets)).fetchall()}
+        latest_full_rows = {
+            row["target_username"]: dict(row)
+            for row in conn.execute(latest_full_query, tuple(targets) + ("%profile_only%",)).fetchall()
+        }
         event_rows = {row["target_username"]: dict(row) for row in conn.execute(event_query, tuple(targets)).fetchall()}
         change_rows = {row["target_username"]: row["last_change_at"] for row in conn.execute(change_query, tuple(targets)).fetchall()}
     finally:
@@ -5703,6 +5737,7 @@ def api_ui_targets():
     items = []
     for target_username in targets:
         latest = latest_rows.get(target_username) or {}
+        latest_full = latest_full_rows.get(target_username) or {}
         latest_event = event_rows.get(target_username)
         items.append(
             {
@@ -5710,7 +5745,7 @@ def api_ui_targets():
                 "followers_count": latest.get("followers_count"),
                 "following_count": latest.get("followees_count"),
                 "non_followbacks_count": latest.get("non_followbacks_count"),
-                "last_full_run_at": latest.get("timestamp"),
+                "last_full_run_at": latest_full.get("timestamp"),
                 "last_change_at": change_rows.get(target_username),
                 "next_check_at": next_run_by_target.get(target_username),
                 "latest_event": _event_view_model(latest_event) if latest_event else None,
