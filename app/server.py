@@ -4022,14 +4022,60 @@ def _get_run_cooldown_remaining(login_username: str) -> int:
         return 0
     with RUN_COOLDOWN_GUARD:
         payload = RUN_COOLDOWN_UNTIL.get(login_username)
-        if not payload:
-            return 0
-        until_ts = float(payload.get("until_ts") or 0)
-        remaining = int(round(until_ts - time.time()))
-        if remaining <= 0:
-            RUN_COOLDOWN_UNTIL.pop(login_username, None)
-            return 0
-        return remaining
+        if payload:
+            until_ts = float(payload.get("until_ts") or 0)
+            remaining = int(round(until_ts - time.time()))
+            if remaining <= 0:
+                RUN_COOLDOWN_UNTIL.pop(login_username, None)
+                return 0
+            return remaining
+    latest = _latest_finished_run_job_for_login(login_username)
+    if not latest:
+        return 0
+    cooldown_seconds = int(latest.get("cooldown_seconds") or 0)
+    finished_at = str(latest.get("finished_at") or "").strip()
+    if cooldown_seconds <= 0 or not finished_at:
+        return 0
+    try:
+        finished_dt = datetime.fromisoformat(finished_at)
+        if finished_dt.tzinfo is None:
+            finished_dt = finished_dt.replace(tzinfo=LOCAL_TZ)
+    except Exception:
+        return 0
+    remaining = int(round(cooldown_seconds - (datetime.now(LOCAL_TZ) - finished_dt).total_seconds()))
+    if remaining <= 0:
+        return 0
+    with RUN_COOLDOWN_GUARD:
+        RUN_COOLDOWN_UNTIL[login_username] = {
+            "until_ts": time.time() + remaining,
+            "error_code": str(latest.get("error_code") or ""),
+            "error_message": str(latest.get("error_message") or ""),
+        }
+    return remaining
+
+
+def _hydrate_recent_run_cooldowns(limit: int = 100) -> None:
+    conn = _get_db()
+    try:
+        rows = conn.execute(
+            """
+            SELECT login_username
+            FROM run_jobs
+            WHERE cooldown_seconds IS NOT NULL
+              AND cooldown_seconds > 0
+              AND finished_at IS NOT NULL
+            GROUP BY login_username
+            ORDER BY MAX(finished_at) DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit or 100), 500)),),
+        ).fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        login = str(row.get("login_username") or "").strip()
+        if login:
+            _get_run_cooldown_remaining(login)
 
 
 def _get_run_min_gap_remaining(login_username: str) -> int:
@@ -6675,6 +6721,12 @@ def _compact_job_summary(job_id: str) -> dict | None:
     progress = progress if isinstance(progress, dict) else {}
     result = result if isinstance(result, dict) else None
     meta = _run_record_meta(record) if record else None
+    if RUN_META.get(job_id):
+        merged_meta = dict(meta or {})
+        merged_meta.update(RUN_META.get(job_id) or {})
+        if record:
+            merged_meta["state"] = record.get("status") or merged_meta.get("state")
+        meta = merged_meta
     worker_out = _tail_file(job_dir / "worker.out", lines=8) if job_dir.exists() else ""
     worker_err = _tail_file(job_dir / "worker.err", lines=8) if job_dir.exists() else ""
     phase = str(progress.get("phase") or "")
@@ -6744,6 +6796,96 @@ def _compact_job_summary(job_id: str) -> dict | None:
         "error": (meta or {}).get("error_message"),
         "error_code": (meta or {}).get("error_code"),
     }
+
+
+def _clip_status_text(value, limit: int = 240) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(0, limit - 1)]}…"
+
+
+def _recent_run_job_payload(summary: dict) -> dict:
+    result = summary.get("result") if isinstance(summary.get("result"), dict) else {}
+    error_message = summary.get("error") or result.get("error") or summary.get("last_worker_message")
+    error_code = summary.get("error_code") or result.get("error_code")
+    return {
+        "job_id": summary.get("job_id"),
+        "state": summary.get("state"),
+        "login_username": summary.get("login_username"),
+        "target_username": summary.get("target_username"),
+        "source": summary.get("source"),
+        "submitted_at": summary.get("submitted_at"),
+        "started_at": summary.get("started_at"),
+        "finished_at": summary.get("finished_at"),
+        "phase": summary.get("phase"),
+        "count": summary.get("count"),
+        "expected_total": summary.get("expected_total"),
+        "page_index": summary.get("page_index"),
+        "error_code": _clip_status_text(error_code, 80),
+        "error_message": _clip_status_text(error_message),
+    }
+
+
+def _recent_run_jobs(limit: int = 8) -> list[dict]:
+    limit = max(1, min(int(limit or 8), 25))
+    seen: set[str] = set()
+    rows: list[dict] = []
+    placeholders = ",".join(["?"] * len(RUN_STATE_TERMINAL))
+    conn = _get_db()
+    try:
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT job_id
+                FROM run_jobs
+                WHERE status IN ({placeholders})
+                ORDER BY COALESCE(finished_at, started_at, submitted_at) DESC, submitted_at DESC, job_id DESC
+                LIMIT ?
+                """,
+                (*sorted(RUN_STATE_TERMINAL), limit),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    recent: list[dict] = []
+    for row in rows:
+        job_id = str(row.get("job_id") or "")
+        if not job_id or job_id in seen:
+            continue
+        summary = _compact_job_summary(job_id)
+        if not summary:
+            continue
+        seen.add(job_id)
+        recent.append(_recent_run_job_payload(summary))
+
+    meta_rows = sorted(
+        RUN_META.items(),
+        key=lambda item: str(
+            (item[1] or {}).get("finished_at")
+            or (item[1] or {}).get("started_at")
+            or (item[1] or {}).get("submitted_at")
+            or ""
+        ),
+        reverse=True,
+    )
+    for job_id, meta in meta_rows:
+        if len(recent) >= limit:
+            break
+        if str(meta.get("state") or "").strip().lower() not in RUN_STATE_TERMINAL:
+            continue
+        if str(job_id) in seen:
+            continue
+        summary = _compact_job_summary(str(job_id))
+        if not summary:
+            continue
+        seen.add(str(job_id))
+        recent.append(_recent_run_job_payload(summary))
+    return recent[:limit]
 
 
 @app.route("/api/jobs/<job_id>/summary", methods=["GET"])
@@ -6854,6 +6996,7 @@ def api_status():
     manual_actions = _open_manual_actions()
     cooldown_entries = []
     now_ts = time.time()
+    _hydrate_recent_run_cooldowns()
     with RUN_COOLDOWN_GUARD:
         stale_logins = []
         for login, payload in RUN_COOLDOWN_UNTIL.items():
@@ -6867,7 +7010,7 @@ def api_status():
                     "login_username": login,
                     "cooldown_seconds": remaining,
                     "error_code": payload.get("error_code"),
-                    "error_message": payload.get("error_message"),
+                    "error_message": _clip_status_text(payload.get("error_message")),
                 }
             )
         for login in stale_logins:
@@ -6889,6 +7032,7 @@ def api_status():
         "active_logins": list(active_logins),
         "queued_jobs": queued,
         "queued_logins": [q["meta"].get("login_username") for q in queued],
+        "recent_jobs": _recent_run_jobs(limit=8),
         "manual_actions": manual_actions,
         "manual_actions_open": len(manual_actions),
         "cooldowns": cooldown_entries,

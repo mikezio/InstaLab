@@ -74,6 +74,14 @@ function formatSecondsAge(value?: number | null): string {
   return `${Math.max(0, Math.round(value))}s ago`;
 }
 
+function statusTone(value?: string | null): "good" | "bad" | "info" | "neutral" {
+  const state = String(value || "").toLowerCase();
+  if (["done", "success", "idle"].includes(state)) return "good";
+  if (["error", "blocked", "challenge_required", "manual_required", "cancelled"].includes(state)) return "bad";
+  if (["running", "queued", "cooling_down"].includes(state)) return "info";
+  return "neutral";
+}
+
 function formatDateSpan(start?: string | null, end?: string | null): string {
   if (!start && !end) return "-";
   if (start && end) return `${formatTime(start)} -> ${formatTime(end)}`;
@@ -445,26 +453,47 @@ function browserCollectionMethodLabel(value: string | undefined): string {
   return normalized || "-";
 }
 
+type ThemeMode = "system" | "light" | "dark";
+
 function AppShell({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<"dark" | "light">(() => {
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    if (typeof window === "undefined") return "system";
+    const stored = window.localStorage.getItem("instalab-theme-mode") as ThemeMode | null;
+    return stored === "light" || stored === "dark" || stored === "system" ? stored : "system";
+  });
+  const [systemTheme, setSystemTheme] = useState<"dark" | "light">(() => {
     if (typeof window === "undefined") return "dark";
-    return (window.localStorage.getItem("instalab-theme") as "dark" | "light") ?? "dark";
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   });
 
   useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const onChange = () => setSystemTheme(media.matches ? "light" : "dark");
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    const appliedTheme = theme === "system" ? systemTheme : theme;
     const root = document.documentElement;
-    root.setAttribute("data-theme", theme);
-    window.localStorage.setItem("instalab-theme", theme);
-  }, [theme]);
+    root.setAttribute("data-theme", appliedTheme);
+    root.setAttribute("data-theme-mode", theme);
+    window.localStorage.setItem("instalab-theme-mode", theme);
+  }, [theme, systemTheme]);
+
+  const themeLabel = theme === "system" ? "System" : theme === "dark" ? "Dark" : "Light";
+  const nextTheme = theme === "system" ? "light" : theme === "light" ? "dark" : "system";
 
   const navItems = [
-    { to: "/", label: "Home", helper: "Overview", end: true },
-    { to: "/targets", label: "Targets", helper: "Tracked profiles" },
-    { to: "/activity", label: "Activity", helper: "Run history" },
-    { to: "/operations", label: "Operations", helper: "Launch queue" },
-    { to: "/accounts", label: "Accounts", helper: "Collectors" },
-    { to: "/settings", label: "Settings", helper: "Runtime" },
+    { to: "/", label: "Home", helper: "Overview", end: true, mobile: true },
+    { to: "/targets", label: "Targets", helper: "Tracked profiles", mobile: true },
+    { to: "/activity", label: "Activity", helper: "Run history", mobile: false },
+    { to: "/operations", label: "Ops", helper: "Launch queue", mobile: true },
+    { to: "/accounts", label: "Accounts", helper: "Collectors", mobile: true },
+    { to: "/settings", label: "Settings", helper: "Runtime", mobile: true },
   ];
+  const mobileNavItems = navItems.filter((item) => item.mobile);
 
   return (
     <div className="app-shell">
@@ -484,20 +513,18 @@ function AppShell({ children }: { children: React.ReactNode }) {
         <button
           className="theme-toggle theme-toggle--rail"
           type="button"
-          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-          aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          onClick={() => setTheme(nextTheme)}
+          aria-label={`Theme: ${themeLabel}. Switch to ${nextTheme}.`}
         >
-          <span aria-hidden="true">{theme === "dark" ? "Light" : "Dark"}</span>
-          <span className="sr-only">
-            {theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-          </span>
+          <span aria-hidden="true">{themeLabel}</span>
+          <span className="sr-only">Theme: {themeLabel}. Switch to {nextTheme}.</span>
         </button>
       </aside>
 
       <main className="content">{children}</main>
 
       <nav className="mobile-nav">
-        {navItems.map((item) => (
+        {mobileNavItems.map((item) => (
           <NavLink key={item.to} to={item.to} end={item.end}>
             {item.label}
           </NavLink>
@@ -506,13 +533,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
       <button
         className="theme-toggle"
         type="button"
-        onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-        aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+        onClick={() => setTheme(nextTheme)}
+        aria-label={`Theme: ${themeLabel}. Switch to ${nextTheme}.`}
       >
-        <span aria-hidden="true">{theme === "dark" ? "☀" : "🌙"}</span>
-        <span className="sr-only">
-          {theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-        </span>
+        <span aria-hidden="true">{theme === "system" ? "S" : theme === "dark" ? "☀" : "☾"}</span>
+        <span className="sr-only">Theme: {themeLabel}. Switch to {nextTheme}.</span>
       </button>
     </div>
   );
@@ -525,71 +550,63 @@ function CommandCenterPage() {
   const targetRows = (briefQ.data?.targets ?? []).slice(0, 6);
   const nextChecks = (briefQ.data?.next_checks ?? []).slice(0, 6);
   const attentionCollectors = (briefQ.data?.attention_collectors ?? []).slice(0, 6);
-  const totalCollectors = targetRows.length || (briefQ.data?.attention_collectors?.length ?? 0);
-  const healthyCollectors = Math.max(totalCollectors - attentionCollectors.length, 0);
+  const totalTargets = briefQ.data?.targets?.length ?? 0;
+  const jobCount = (briefQ.data?.active_jobs?.length ?? 0) + (briefQ.data?.queued_jobs?.length ?? 0);
+  const openActions = briefQ.data?.attention_collectors?.length ?? 0;
+  const homeState = briefQ.data?.state || statusQ.data?.status || statusQ.data?.state || "checking";
 
   return (
-    <section>
+    <section className="home-page">
       <header className="page-header">
         <h1>Home</h1>
-        <p>The product is target-first again. Use this page to orient quickly, then step into the active workspace.</p>
+        <p>Today’s collector status and the next place to act.</p>
       </header>
 
-      <div className="dossier-strip">
-        <article className="dossier-cell">
-          <span>Status</span>
-          <strong>{statusQ.data?.status || statusQ.data?.state || "loading"}</strong>
+      <section className="home-dashboard">
+        <article className={`home-state ${statusTone(homeState)}`}>
+          <span>System</span>
+          <strong>{homeState.replace(/_/g, " ")}</strong>
+          <p>{jobCount ? `${jobCount} job${jobCount === 1 ? "" : "s"} in motion` : openActions ? `${openActions} item${openActions === 1 ? " needs" : "s need"} review` : "Ready for the next run"}</p>
         </article>
-        <article className="dossier-cell">
-          <span>Ready accounts</span>
-          <strong>
-            {healthyCollectors}/{totalCollectors}
-          </strong>
-        </article>
-        <article className="dossier-cell">
-          <span>Jobs</span>
-          <strong>
-            {(briefQ.data?.active_jobs?.length ?? 0) + (briefQ.data?.queued_jobs?.length ?? 0)}
-          </strong>
-        </article>
-        <article className="dossier-cell">
-          <span>Open actions</span>
-          <strong>{briefQ.data?.attention_collectors?.length ?? 0}</strong>
-        </article>
-      </div>
+        <div className="home-metrics">
+          <div>
+            <span>Targets</span>
+            <strong>{briefQ.isLoading ? "..." : totalTargets}</strong>
+          </div>
+          <div>
+            <span>Jobs</span>
+            <strong>{jobCount}</strong>
+          </div>
+          <div>
+            <span>Review</span>
+            <strong>{openActions}</strong>
+          </div>
+        </div>
+      </section>
 
-      <div className="action-strip">
-        <NavLink to="/targets" className="action-link">
-          <span>Main workspace</span>
-          <strong>Open targets</strong>
-          <em>Launch runs, adjust schedules, and inspect the active watchlist.</em>
+      <section className="home-actions">
+        <NavLink to="/targets" className="home-action primary">
+          <strong>Targets</strong>
+          <span>Run and inspect tracked profiles</span>
         </NavLink>
-        <NavLink to="/accounts" className="action-link">
-          <span>Collector readiness</span>
-          <strong>Open accounts</strong>
-          <em>Repair sessions, add logins, or start account creation.</em>
+        <NavLink to={openActions ? "/accounts" : "/operations"} className="home-action">
+          <strong>{openActions ? "Review accounts" : "Operations"}</strong>
+          <span>{openActions ? `${openActions} account${openActions === 1 ? "" : "s"} need attention` : "Queue and recent attempts"}</span>
         </NavLink>
-        <NavLink to="/operations" className="action-link">
-          <span>Recovery queue</span>
-          <strong>Open operations</strong>
-          <em>Resolve manual actions, watch live jobs, and prune schedules.</em>
-        </NavLink>
-      </div>
+      </section>
 
-      <div className="brief-grid">
-        <article className="card panel-flat">
-            <div className="panel-head">
-              <h3>Targets</h3>
-            <NavLink to="/targets" className="text-link">
-              Open targets
-            </NavLink>
+      <div className="brief-grid home-brief-grid">
+        <article className="card panel-flat home-list-card">
+          <div className="panel-head">
+            <h3>Targets</h3>
+            <NavLink to="/targets" className="text-link">Open</NavLink>
           </div>
           <div className="ledger-list">
-            {targetRows.map((target, idx) => (
+            {targetRows.slice(0, 4).map((target, idx) => (
               <div className="ledger-row" key={`${target.target_username || "target"}-${idx}`}>
                 <div>
                   <div className="ledger-title">@{target.target_username || "-"}</div>
-                  <div className="ledger-meta">last change {formatTime(target.last_change_at || undefined)}</div>
+                  <div className="ledger-meta">{formatTime(target.last_change_at || undefined)}</div>
                 </div>
                 <div className="ledger-side">
                   {target.followers_count ?? "-"} / {target.following_count ?? "-"}
@@ -601,19 +618,17 @@ function CommandCenterPage() {
         </article>
 
         <div className="brief-side-stack">
-          <article className="card panel-flat">
+          <article className="card panel-flat home-list-card">
             <div className="panel-head">
-              <h3>Needs review</h3>
-              <NavLink to="/accounts" className="text-link">
-                Open accounts
-              </NavLink>
+              <h3>Review</h3>
+              <NavLink to="/accounts" className="text-link">Open</NavLink>
             </div>
             <div className="stack-list">
-              {attentionCollectors.map((item, idx) => (
+              {attentionCollectors.slice(0, 3).map((item, idx) => (
                 <div className="stack-row" key={`${String(item.login_username || "manual")}-${idx}`}>
                   <div>
                     <div className="ledger-title">@{String(item.login_username || "-")}</div>
-                    <div className="ledger-meta">{String(item.last_error || item.auth_last_event || "-")}</div>
+                    <div className="ledger-meta">{String(item.status || item.auth_last_event || "-")}</div>
                   </div>
                   <span>{String(item.status || "attention")}</span>
                 </div>
@@ -630,19 +645,17 @@ function CommandCenterPage() {
             </div>
           </article>
 
-          <article className="card panel-flat">
+          <article className="card panel-flat home-list-card">
             <div className="panel-head">
-              <h3>Upcoming checks</h3>
-              <NavLink to="/targets" className="text-link">
-                Open targets
-              </NavLink>
+              <h3>Next checks</h3>
+              <NavLink to="/targets" className="text-link">Open</NavLink>
             </div>
             <div className="stack-list">
-              {nextChecks.map((item, idx) => (
+              {nextChecks.slice(0, 3).map((item, idx) => (
                 <div className="stack-row" key={`${item.target_username || "schedule"}-${idx}`}>
                   <div>
                     <div className="ledger-title">@{item.target_username || "-"}</div>
-                    <div className="ledger-meta">last full read {formatTime(item.last_full_run_at || undefined)}</div>
+                    <div className="ledger-meta">{formatTime(item.last_full_run_at || undefined)}</div>
                   </div>
                   <span>{formatTime(item.next_check_at || undefined)}</span>
                 </div>
@@ -2495,6 +2508,11 @@ function OperationsPage() {
   const activeJobs = runStatusQ.data?.active_jobs?.length ?? 0;
   const queuedJobs = runStatusQ.data?.queued_jobs?.length ?? 0;
   const liveJobs = runStatusQ.data?.active_jobs ?? [];
+  const recentJobs = runStatusQ.data?.recent_jobs ?? [];
+  const cooldowns = runStatusQ.data?.cooldowns ?? [];
+  const manualActions = manualActionsQ.data?.actions ?? [];
+  const systemState = runStatusQ.data?.state || "idle";
+  const primaryBlocker = manualActions[0] || cooldowns[0];
   const controllableJobs = [
     ...(runStatusQ.data?.active_jobs ?? []).map((job) => ({
       state: "running",
@@ -2511,45 +2529,85 @@ function OperationsPage() {
       elapsed_seconds: undefined,
     })),
   ].filter((job) => job.job_id || (job.login_username && job.target_username));
-  const manualActionCount = manualActionsQ.data?.actions?.length ?? 0;
+  const manualActionCount = manualActions.length;
   const totalSchedules = schedulesQ.data?.length ?? 0;
 
   return (
-    <section>
-      <header className="page-header">
-        <h1>Operations</h1>
-        <p>Queue state, recovery work, and operator-only controls. Primary launch lives in Targets.</p>
-      </header>
-      <div className="dossier-strip operations-kpis">
-        <article className="dossier-cell">
-          <span>Active jobs</span>
-          <strong>{activeJobs}</strong>
-        </article>
-        <article className="dossier-cell">
-          <span>Queued</span>
-          <strong>{queuedJobs}</strong>
-        </article>
-        <article className="dossier-cell">
-          <span>Manual actions</span>
-          <strong>{manualActionCount}</strong>
-        </article>
-        <article className="dossier-cell">
-          <span>Schedules</span>
-          <strong>{totalSchedules}</strong>
-        </article>
-      </div>
-      <article className="card panel-flat operations-callout">
+    <section className="operations-page">
+      <header className="page-header operations-header">
         <div>
-          <h3>Operator view</h3>
-          <p className="hint">Use this page when a run is already in motion, blocked on verification, or needs manual cleanup.</p>
+          <h1>Operations</h1>
+          <p>Run state, blockers, and latest attempts.</p>
         </div>
         <NavLink to="/targets" className="text-link">
-          Return to targets
+          Targets
         </NavLink>
-      </article>
-      <article className="card">
-        <h3>Live Progress Telemetry</h3>
-        <p className="hint">Page-level collection status for active runs.</p>
+      </header>
+      <section className="operations-dashboard">
+        <article className={`ops-status-panel ${statusTone(systemState)}`}>
+          <span>System</span>
+          <strong>{systemState.replace(/_/g, " ")}</strong>
+          <p>{activeJobs ? `${activeJobs} running` : queuedJobs ? `${queuedJobs} queued` : cooldowns.length ? "Cooldown active" : "No active run"}</p>
+        </article>
+        <div className="ops-metrics">
+          <article>
+            <span>Active</span>
+            <strong>{activeJobs}</strong>
+          </article>
+          <article>
+            <span>Queued</span>
+            <strong>{queuedJobs}</strong>
+          </article>
+          <article>
+            <span>Manual</span>
+            <strong>{manualActionCount}</strong>
+          </article>
+          <article>
+            <span>Cooldown</span>
+            <strong>{cooldowns.length}</strong>
+          </article>
+        </div>
+        <article className="ops-focus-panel">
+          <span>Needs attention</span>
+          {primaryBlocker ? (
+            <>
+              <strong>
+                {String(primaryBlocker.login_username || "-")}
+                {"target_username" in primaryBlocker && primaryBlocker.target_username ? ` -> ${String(primaryBlocker.target_username)}` : ""}
+              </strong>
+              <p>
+                {"action_type" in primaryBlocker
+                  ? String(primaryBlocker.action_type || primaryBlocker.reason || "manual action")
+                  : `${String(primaryBlocker.error_code || "cooldown")} · ${String(primaryBlocker.cooldown_seconds || 0)}s`}
+              </p>
+            </>
+          ) : (
+            <>
+              <strong>Clear</strong>
+              <p>No open blocker.</p>
+            </>
+          )}
+        </article>
+      </section>
+      <article className="card operations-card">
+        <div className="ops-section-head">
+          <h3>Live Jobs</h3>
+          <span className={`pill ${activeJobs || queuedJobs ? "info" : "neutral"}`}>{activeJobs + queuedJobs}</span>
+        </div>
+        <div className="ops-mobile-list">
+          {liveJobs.map((job, idx) => (
+            <NavLink
+              key={`${String(job.job_id || "live")}-${idx}`}
+              to={job.job_id ? `/jobs/${encodeURIComponent(String(job.job_id))}` : "/operations"}
+              className="ops-mobile-row"
+            >
+              <span>{String(job.target_username || "-")}</span>
+              <strong>{String(job.phase || job.progress_detail?.phase || "running")}</strong>
+              <em>{typeof job.elapsed_seconds === "number" ? `${job.elapsed_seconds}s` : "active"}</em>
+            </NavLink>
+          ))}
+          {!liveJobs.length ? <p className="hint">No active runs.</p> : null}
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -2625,9 +2683,73 @@ function OperationsPage() {
           </table>
         </div>
       </article>
-      <article className="card">
-        <h3>Run Control</h3>
-        <p className="hint">Cancel any active or queued collector job.</p>
+      <article className="card operations-card">
+        <div className="ops-section-head">
+          <h3>Recent Attempts</h3>
+          <span className="pill neutral">{recentJobs.length}</span>
+        </div>
+        <div className="ops-mobile-list">
+          {recentJobs.slice(0, 4).map((job, idx) => (
+            <NavLink
+              key={`${String(job.job_id || "recent-mobile")}-${idx}`}
+              to={job.job_id ? `/jobs/${encodeURIComponent(String(job.job_id))}` : "/operations"}
+              className="ops-mobile-row"
+            >
+              <span>{String(job.target_username || "-")}</span>
+              <strong>{String(job.state || "-").replace(/_/g, " ")}</strong>
+              <em>
+                {job.error_code ? String(job.error_code) : job.phase ? String(job.phase) : formatTime(String(job.finished_at || job.started_at || ""))}
+              </em>
+            </NavLink>
+          ))}
+          {!recentJobs.length ? <p className="hint">No finished attempts yet.</p> : null}
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>State</th>
+                <th>Target</th>
+                <th>Login</th>
+                <th>Progress</th>
+                <th>Ended</th>
+                <th>Inspect</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recentJobs.map((job, idx) => (
+                <tr key={`${String(job.job_id || "recent")}-${idx}`}>
+                  <td><span className={`pill ${statusTone(job.state)}`}>{String(job.state || "-").replace(/_/g, " ")}</span></td>
+                  <td>{String(job.target_username || "-")}</td>
+                  <td>{String(job.login_username || "-")}</td>
+                  <td>
+                    {String(job.phase || "-")}
+                    {typeof job.count === "number" ? ` · ${job.count}` : ""}
+                    {typeof job.page_index === "number" ? ` · page ${job.page_index}` : ""}
+                    {job.error_code ? ` · ${String(job.error_code)}` : ""}
+                  </td>
+                  <td>{formatTime(String(job.finished_at || job.started_at || job.submitted_at || ""))}</td>
+                  <td>
+                    {job.job_id ? (
+                      <NavLink to={`/jobs/${encodeURIComponent(String(job.job_id))}`} className="text-link">
+                        Open
+                      </NavLink>
+                    ) : "-"}
+                  </td>
+                </tr>
+              ))}
+              {!recentJobs.length ? (
+                <tr><td colSpan={6} className="hint">No finished attempts yet.</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      <article className="card operations-card">
+        <div className="ops-section-head">
+          <h3>Cancel Queue</h3>
+          <span className="pill neutral">{controllableJobs.length}</span>
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -2673,9 +2795,27 @@ function OperationsPage() {
         </div>
         {cancelRunMutation.error ? <p className="error">{(cancelRunMutation.error as Error).message}</p> : null}
       </article>
-      <article className="card">
-        <h3>Manual Action Queue</h3>
-        <p className="hint">Items that require human action before runs can continue safely.</p>
+      <article className="card operations-card">
+        <div className="ops-section-head">
+          <h3>Manual Actions</h3>
+          <span className={`pill ${manualActionCount ? "bad" : "neutral"}`}>{manualActionCount}</span>
+        </div>
+        <div className="ops-mobile-list">
+          {manualActions.slice(0, 4).map((item, idx) => (
+            <div className="ops-mobile-row" key={`${String(item.action_id || "manual-mobile")}-${idx}`}>
+              <span>{String(item.login_username || "-")}</span>
+              <strong>{String(item.action_type || item.reason || "review")}</strong>
+              <button
+                className="btn-secondary"
+                disabled={resolveManualMutation.isPending || !item.action_id}
+                onClick={() => resolveManualMutation.mutate({ actionId: String(item.action_id), note: "resolved from operations ui" })}
+              >
+                Resolve
+              </button>
+            </div>
+          ))}
+          {!manualActions.length ? <p className="hint">No open manual actions.</p> : null}
+        </div>
         <div className="table-wrap">
           <table>
             <thead>
@@ -2689,7 +2829,7 @@ function OperationsPage() {
               </tr>
             </thead>
             <tbody>
-              {(manualActionsQ.data?.actions ?? []).map((item, idx) => (
+              {manualActions.map((item, idx) => (
                 <tr key={`${String(item.action_id || "manual")}-${idx}`}>
                   <td>{formatTime(String(item.updated_at || item.created_at || ""))}</td>
                   <td>{String(item.login_username || "-")}</td>
@@ -2718,10 +2858,9 @@ function OperationsPage() {
         </div>
         {resolveManualMutation.error ? <p className="error">{(resolveManualMutation.error as Error).message}</p> : null}
       </article>
-      <article className="card">
-        <h3>Schedule Setup</h3>
+      <article className="card operations-card">
         <details className="settings-detail">
-          <summary>Override from operations</summary>
+          <summary>Schedules ({totalSchedules})</summary>
           <div className="form-grid">
             <label>
               Collector login
@@ -2760,10 +2899,6 @@ function OperationsPage() {
           </div>
           {createScheduleMutation.error ? <p className="error">{(createScheduleMutation.error as Error).message}</p> : null}
         </details>
-      </article>
-      <article className="card">
-        <h3>Schedules</h3>
-        <p className="hint">Total {schedulesQ.data?.length ?? 0}</p>
         <div className="table-wrap">
           <table>
             <thead>
@@ -2802,10 +2937,9 @@ function OperationsPage() {
           </table>
         </div>
       </article>
-      <article className="card">
-        <h3>Emergency Run Control</h3>
+      <article className="card operations-card">
         <details className="settings-detail">
-          <summary>Open manual launch controls</summary>
+          <summary>Manual launch</summary>
           <div className="form-grid">
             <label>
               Collector login
@@ -2847,9 +2981,9 @@ function OperationsPage() {
           <p className="hint">
             Active {activeJobs} · Queued {queuedJobs}
           </p>
-          {runStatusQ.data?.cooldowns?.length ? (
+          {cooldowns.length ? (
             <p className="hint">
-              Cooldowns: {(runStatusQ.data.cooldowns ?? []).map((c) => `@${c.login_username} (${c.cooldown_seconds}s)`).join(" · ")}
+              Cooldowns: {cooldowns.map((c) => `@${c.login_username} (${c.cooldown_seconds}s)`).join(" · ")}
             </p>
           ) : null}
           {manualJobId ? (

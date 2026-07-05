@@ -35,33 +35,33 @@ export const runStatusSchema = z.object({
       })
     )
     .optional(),
-	  active_jobs: z
-	    .array(
-	      z.object({
-	        login_username: z.string().nullable().optional(),
-	        target_username: z.string().nullable().optional(),
-	        job_id: z.string().nullable().optional(),
-	        elapsed_seconds: z.number().optional(),
-	        avg_duration_seconds: z.number().nullable().optional(),
-	        eta_seconds: z.number().nullable().optional(),
-	        source: z.string().optional(),
-	        phase: z.string().nullable().optional(),
-	        followers_progress: z.number().nullable().optional(),
-	        followers_total: z.number().nullable().optional(),
-	        following_progress: z.number().nullable().optional(),
-	        following_total: z.number().nullable().optional(),
-	        worker_pid: z.number().nullable().optional(),
-	        progress_detail: z.record(z.string(), z.any()).optional(),
-	        followers_pages: z.number().nullable().optional(),
-	        following_pages: z.number().nullable().optional(),
-	        followers_last_page_at: z.number().nullable().optional(),
-	        following_last_page_at: z.number().nullable().optional(),
-	        followers_duplicates_total: z.number().nullable().optional(),
-	        following_duplicates_total: z.number().nullable().optional(),
-	      })
-	      .passthrough()
-	    )
-	    .optional(),
+  active_jobs: z
+    .array(
+      z.object({
+        login_username: z.string().nullable().optional(),
+        target_username: z.string().nullable().optional(),
+        job_id: z.string().nullable().optional(),
+        elapsed_seconds: z.number().optional(),
+        avg_duration_seconds: z.number().nullable().optional(),
+        eta_seconds: z.number().nullable().optional(),
+        source: z.string().optional(),
+        phase: z.string().nullable().optional(),
+        followers_progress: z.number().nullable().optional(),
+        followers_total: z.number().nullable().optional(),
+        following_progress: z.number().nullable().optional(),
+        following_total: z.number().nullable().optional(),
+        worker_pid: z.number().nullable().optional(),
+        progress_detail: z.record(z.string(), z.any()).optional(),
+        followers_pages: z.number().nullable().optional(),
+        following_pages: z.number().nullable().optional(),
+        followers_last_page_at: z.number().nullable().optional(),
+        following_last_page_at: z.number().nullable().optional(),
+        followers_duplicates_total: z.number().nullable().optional(),
+        following_duplicates_total: z.number().nullable().optional(),
+      })
+      .passthrough()
+    )
+    .optional(),
   queued_jobs: z
     .array(
       z.object({
@@ -74,6 +74,27 @@ export const runStatusSchema = z.object({
           .passthrough()
           .optional(),
       })
+    )
+    .optional(),
+  recent_jobs: z
+    .array(
+      z.object({
+        job_id: z.string().optional(),
+        state: z.string().nullable().optional(),
+        login_username: z.string().nullable().optional(),
+        target_username: z.string().nullable().optional(),
+        source: z.string().nullable().optional(),
+        submitted_at: z.string().nullable().optional(),
+        started_at: z.string().nullable().optional(),
+        finished_at: z.string().nullable().optional(),
+        phase: z.string().nullable().optional(),
+        count: z.number().nullable().optional(),
+        expected_total: z.number().nullable().optional(),
+        page_index: z.number().nullable().optional(),
+        error_code: z.string().nullable().optional(),
+        error_message: z.string().nullable().optional(),
+      })
+      .passthrough()
     )
     .optional(),
 });
