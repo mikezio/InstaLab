@@ -408,30 +408,6 @@ Update target or cron.
 
 ---
 
-## Import
-
-### POST `/api/import/osintgraph`
-
-Bulk import follower/followee lists.
-
-**Request:**
-```json
-{
-  "target_username": "target",
-  "login_username": "login",
-  "followers": ["user1"],
-  "followees": ["user2"],
-  "timestamp": "2026-02-04_12-08-23"
-}
-```
-
-**Response:**
-```json
-{ "ok": true, "run_id": 123, "changes": {"followers": {"added": [], "removed": []}} }
-```
-
----
-
 ## Error Responses
 
 **400:** `{"error": "..."}`

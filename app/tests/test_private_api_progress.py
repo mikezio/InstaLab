@@ -52,7 +52,23 @@ def test_progress_updates_incrementally_for_paginated_followers_and_following():
     client.private_request(following_endpoint)
     client.private_request("friendships/123/close_friends/")
 
-    assert events == [("followers", 2), ("followers", 3), ("following", 1)]
+    assert [phase for phase, _ in events] == ["followers", "followers", "following"]
+
+    first_followers = events[0][1]
+    assert first_followers["count"] == 2
+    assert first_followers["page_index"] == 1
+    assert first_followers["page_unique_new"] == 2
+    assert first_followers["duplicates_total"] == 0
+
+    second_followers = events[1][1]
+    assert second_followers["count"] == 3
+    assert second_followers["page_index"] == 2
+    assert second_followers["page_unique_new"] == 1
+    assert second_followers["duplicates_total"] == 1
+
+    following = events[2][1]
+    assert following["count"] == 1
+    assert following["page_index"] == 1
 
 
 def test_progress_ignores_different_target_id():

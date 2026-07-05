@@ -7,7 +7,7 @@ from contextlib import contextmanager
 
 def _select_backend():
     name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "browser").strip().lower()
-    if name in {"private", "private_api", "private-api", "osintgram"}:
+    if name in {"private", "private_api", "private-api"}:
         from private_api_tracker import fetch_counts, has_session  # type: ignore
         return fetch_counts, has_session
     if name in {"browser", "guided_browser", "playwright"}:

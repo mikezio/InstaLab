@@ -35,16 +35,33 @@ export const runStatusSchema = z.object({
       })
     )
     .optional(),
-  active_jobs: z
-    .array(
-      z.object({
-        login_username: z.string().nullable().optional(),
-        target_username: z.string().nullable().optional(),
-        job_id: z.string().nullable().optional(),
-        elapsed_seconds: z.number().optional(),
-      })
-    )
-    .optional(),
+	  active_jobs: z
+	    .array(
+	      z.object({
+	        login_username: z.string().nullable().optional(),
+	        target_username: z.string().nullable().optional(),
+	        job_id: z.string().nullable().optional(),
+	        elapsed_seconds: z.number().optional(),
+	        avg_duration_seconds: z.number().nullable().optional(),
+	        eta_seconds: z.number().nullable().optional(),
+	        source: z.string().optional(),
+	        phase: z.string().nullable().optional(),
+	        followers_progress: z.number().nullable().optional(),
+	        followers_total: z.number().nullable().optional(),
+	        following_progress: z.number().nullable().optional(),
+	        following_total: z.number().nullable().optional(),
+	        worker_pid: z.number().nullable().optional(),
+	        progress_detail: z.record(z.string(), z.any()).optional(),
+	        followers_pages: z.number().nullable().optional(),
+	        following_pages: z.number().nullable().optional(),
+	        followers_last_page_at: z.number().nullable().optional(),
+	        following_last_page_at: z.number().nullable().optional(),
+	        followers_duplicates_total: z.number().nullable().optional(),
+	        following_duplicates_total: z.number().nullable().optional(),
+	      })
+	      .passthrough()
+	    )
+	    .optional(),
   queued_jobs: z
     .array(
       z.object({
@@ -94,6 +111,41 @@ export const runJobDetailSchema = z.object({
   worker_err_tail: z.string().optional(),
   trace_tail: z.string().optional(),
 });
+
+export const runJobSummarySchema = z
+  .object({
+    job_id: z.string().optional(),
+    state: z.string().nullable().optional(),
+    target_username: z.string().nullable().optional(),
+    login_username: z.string().nullable().optional(),
+    source: z.string().nullable().optional(),
+    submitted_at: z.string().nullable().optional(),
+    started_at: z.string().nullable().optional(),
+    finished_at: z.string().nullable().optional(),
+    phase: z.string().nullable().optional(),
+    count: z.number().nullable().optional(),
+    expected_total: z.number().nullable().optional(),
+    missing_count: z.number().nullable().optional(),
+    page_index: z.number().nullable().optional(),
+    page_raw_count: z.number().nullable().optional(),
+    page_unique_count: z.number().nullable().optional(),
+    page_unique_new: z.number().nullable().optional(),
+    duplicates_total: z.number().nullable().optional(),
+    has_more: z.boolean().nullable().optional(),
+    last_page_at: z.number().nullable().optional(),
+    updated_at: z.number().nullable().optional(),
+    seconds_since_last_page: z.number().nullable().optional(),
+    seconds_since_update: z.number().nullable().optional(),
+    followers: z.record(z.string(), z.any()).optional(),
+    following: z.record(z.string(), z.any()).optional(),
+    alternate: z.record(z.string(), z.any()).optional(),
+    retry: z.record(z.string(), z.any()).optional(),
+    result: z.record(z.string(), z.any()).nullable().optional(),
+    last_worker_message: z.string().optional(),
+    error: z.string().nullable().optional(),
+    error_code: z.string().nullable().optional(),
+  })
+  .passthrough();
 
 export const targetsSummarySchema = z.array(
   z.object({
@@ -157,6 +209,10 @@ export const loginSchema = z.array(
     private_session_mtime: z.number().nullable().optional(),
     has_password: z.boolean().optional(),
     has_totp_seed: z.boolean().optional(),
+    challenge_email_configured: z.boolean().optional(),
+    challenge_email_host: z.string().nullable().optional(),
+    challenge_email_username: z.string().nullable().optional(),
+    challenge_email_mailbox: z.string().nullable().optional(),
     private_session_exists: z.boolean().optional(),
     last_login_at: z.string().nullable().optional(),
     last_error: z.string().nullable().optional(),
@@ -216,19 +272,40 @@ export const configValuesSchema = z.object({
   run_stall_seconds: z.number().optional(),
   run_max_seconds: z.number().optional(),
   run_http_timeout_seconds: z.number().optional(),
+  run_private_request_sleep_seconds: z.number().optional(),
   run_request_timeout: z.number().optional(),
   run_item_delay_min: z.number().optional(),
   run_item_delay_max: z.number().optional(),
+  run_fetch_order: z.string().optional(),
+  run_followers_order: z.string().optional(),
+  run_initial_fetch_delay_seconds: z.number().optional(),
+  run_pause_every_min: z.number().optional(),
+  run_pause_every_max: z.number().optional(),
+  run_pause_seconds_min: z.number().optional(),
+  run_pause_seconds_max: z.number().optional(),
+  run_completeness_retry_max: z.number().optional(),
+  run_completeness_retry_delay_seconds: z.number().optional(),
+  run_pre_login_flow: z.boolean().optional(),
+  run_post_login_flow: z.boolean().optional(),
+  run_rate_limit_cooldown_seconds: z.number().optional(),
+  run_post_checkpoint_cooldown_seconds: z.number().optional(),
+  run_min_gap_seconds: z.number().optional(),
+  run_profile_only: z.boolean().optional(),
   run_login_mode: z.string().optional(),
   run_scraper_backend: z.string().optional(),
   run_browser_collection_method: z.string().optional(),
   run_trace_enabled: z.boolean().optional(),
+  private_device_settings_json: z.string().optional(),
+  private_user_agent: z.string().optional(),
   proxy_enabled: z.boolean().optional(),
+  proxy_provider: z.string().optional(),
+  proxy_access_mode: z.string().optional(),
   proxy_host: z.string().optional(),
   proxy_port: z.number().optional(),
   proxy_username: z.string().optional(),
+  proxy_username_pool: z.string().optional(),
   proxy_password_set: z.boolean().optional(),
-});
+}).passthrough();
 
 export const configSchema = z.object({
   config: configValuesSchema,
@@ -449,6 +526,10 @@ export const runDetailSchema = z
     followers_removed_list: z.array(z.string()).optional(),
     followees_added_list: z.array(z.string()).optional(),
     followees_removed_list: z.array(z.string()).optional(),
+    followers_added_details: z.array(z.record(z.string(), z.any())).optional(),
+    followers_removed_details: z.array(z.record(z.string(), z.any())).optional(),
+    followees_added_details: z.array(z.record(z.string(), z.any())).optional(),
+    followees_removed_details: z.array(z.record(z.string(), z.any())).optional(),
     relationship_events: z.array(z.record(z.string(), z.any())).optional(),
   })
   .passthrough();
@@ -483,6 +564,7 @@ export type AppStatus = z.infer<typeof appStatusSchema>;
 export type RunStatus = z.infer<typeof runStatusSchema>;
 export type RunJobStatus = z.infer<typeof runJobStatusSchema>;
 export type RunJobDetail = z.infer<typeof runJobDetailSchema>;
+export type RunJobSummary = z.infer<typeof runJobSummarySchema>;
 export type TargetSummaryItem = z.infer<typeof targetsSummarySchema>[number];
 export type ScheduleItem = z.infer<typeof scheduleSchema>[number];
 export type CountWatchSampleItem = z.infer<typeof countWatchSampleSchema>[number];

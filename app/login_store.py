@@ -9,7 +9,7 @@ from crypto_utils import decrypt_value, encrypt_value
 
 
 LOGIN_TABLE = "login_accounts"
-CHALLENGE_TTL_MINUTES = 2
+CHALLENGE_TTL_MINUTES = 10
 
 
 def _utc_now() -> str:
@@ -53,6 +53,12 @@ def init_login_table() -> None:
                     challenge_code_enc TEXT,
                     challenge_code_at TEXT,
                     new_password_enc TEXT,
+                    challenge_email_host TEXT,
+                    challenge_email_port INTEGER,
+                    challenge_email_ssl INTEGER NOT NULL DEFAULT 1,
+                    challenge_email_username_enc TEXT,
+                    challenge_email_password_enc TEXT,
+                    challenge_email_mailbox TEXT,
                     session_fail_streak INTEGER NOT NULL DEFAULT 0,
                     session_last_fail_at TEXT,
                     cookie_file TEXT,
@@ -73,6 +79,18 @@ def init_login_table() -> None:
             conn.execute("ALTER TABLE login_accounts ADD COLUMN session_fail_streak INTEGER NOT NULL DEFAULT 0")
         if "session_last_fail_at" not in cols:
             conn.execute("ALTER TABLE login_accounts ADD COLUMN session_last_fail_at TEXT")
+        if "challenge_email_host" not in cols:
+            conn.execute("ALTER TABLE login_accounts ADD COLUMN challenge_email_host TEXT")
+        if "challenge_email_port" not in cols:
+            conn.execute("ALTER TABLE login_accounts ADD COLUMN challenge_email_port INTEGER")
+        if "challenge_email_ssl" not in cols:
+            conn.execute("ALTER TABLE login_accounts ADD COLUMN challenge_email_ssl INTEGER NOT NULL DEFAULT 1")
+        if "challenge_email_username_enc" not in cols:
+            conn.execute("ALTER TABLE login_accounts ADD COLUMN challenge_email_username_enc TEXT")
+        if "challenge_email_password_enc" not in cols:
+            conn.execute("ALTER TABLE login_accounts ADD COLUMN challenge_email_password_enc TEXT")
+        if "challenge_email_mailbox" not in cols:
+            conn.execute("ALTER TABLE login_accounts ADD COLUMN challenge_email_mailbox TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -83,7 +101,10 @@ def list_logins(include_secrets: bool = False) -> list[dict]:
     try:
         cur = conn.execute(
             """
-            SELECT login_username, login_password_enc, totp_seed_enc, session_fail_streak, session_last_fail_at, cookie_file, disabled,
+            SELECT login_username, login_password_enc, totp_seed_enc,
+                   challenge_email_host, challenge_email_port, challenge_email_ssl,
+                   challenge_email_username_enc, challenge_email_password_enc, challenge_email_mailbox,
+                   session_fail_streak, session_last_fail_at, cookie_file, disabled,
                    source, session_settings, created_at, updated_at, last_login_at, last_error
             FROM login_accounts
             ORDER BY login_username
@@ -98,12 +119,22 @@ def list_logins(include_secrets: bool = False) -> list[dict]:
         data["session_settings"] = _parse_json(data.get("session_settings"))
         data["has_password"] = bool(data.get("login_password_enc"))
         data["has_totp_seed"] = bool(data.get("totp_seed_enc"))
+        data["challenge_email_configured"] = bool(
+            data.get("challenge_email_host")
+            and data.get("challenge_email_username_enc")
+            and data.get("challenge_email_password_enc")
+        )
         if not include_secrets:
+            data["challenge_email_username"] = decrypt_value(data.get("challenge_email_username_enc"))
             data.pop("login_password_enc", None)
             data.pop("totp_seed_enc", None)
+            data.pop("challenge_email_username_enc", None)
+            data.pop("challenge_email_password_enc", None)
         else:
             data["login_password"] = decrypt_value(data.pop("login_password_enc", None))
             data["totp_seed"] = decrypt_value(data.pop("totp_seed_enc", None))
+            data["challenge_email_username"] = decrypt_value(data.pop("challenge_email_username_enc", None))
+            data["challenge_email_password"] = decrypt_value(data.pop("challenge_email_password_enc", None))
         out.append(data)
     return out
 
@@ -114,7 +145,9 @@ def get_login(login_username: str, include_secrets: bool = False) -> dict | None
         cur = conn.execute(
             """
             SELECT login_username, login_password_enc, totp_seed_enc, challenge_code_enc, challenge_code_at,
-                   new_password_enc, session_fail_streak, session_last_fail_at, cookie_file, disabled, source, session_settings,
+                   new_password_enc, challenge_email_host, challenge_email_port, challenge_email_ssl,
+                   challenge_email_username_enc, challenge_email_password_enc, challenge_email_mailbox,
+                   session_fail_streak, session_last_fail_at, cookie_file, disabled, source, session_settings,
                    created_at, updated_at, last_login_at, last_error
             FROM login_accounts
             WHERE login_username = ?
@@ -130,16 +163,26 @@ def get_login(login_username: str, include_secrets: bool = False) -> dict | None
     data["session_settings"] = _parse_json(data.get("session_settings"))
     data["has_password"] = bool(data.get("login_password_enc"))
     data["has_totp_seed"] = bool(data.get("totp_seed_enc"))
+    data["challenge_email_configured"] = bool(
+        data.get("challenge_email_host")
+        and data.get("challenge_email_username_enc")
+        and data.get("challenge_email_password_enc")
+    )
     if include_secrets:
         data["login_password"] = decrypt_value(data.pop("login_password_enc", None))
         data["totp_seed"] = decrypt_value(data.pop("totp_seed_enc", None))
         data["challenge_code"] = decrypt_value(data.pop("challenge_code_enc", None))
         data["new_password"] = decrypt_value(data.pop("new_password_enc", None))
+        data["challenge_email_username"] = decrypt_value(data.pop("challenge_email_username_enc", None))
+        data["challenge_email_password"] = decrypt_value(data.pop("challenge_email_password_enc", None))
     else:
+        data["challenge_email_username"] = decrypt_value(data.get("challenge_email_username_enc"))
         data.pop("login_password_enc", None)
         data.pop("totp_seed_enc", None)
         data.pop("challenge_code_enc", None)
         data.pop("new_password_enc", None)
+        data.pop("challenge_email_username_enc", None)
+        data.pop("challenge_email_password_enc", None)
     return data
 
 
@@ -395,6 +438,72 @@ def set_totp_seed(login_username: str, seed: str | None) -> None:
 
 def set_login_password(login_username: str, password: str | None) -> None:
     upsert_login(login_username=login_username, login_password=password)
+
+
+def set_challenge_email_settings(
+    login_username: str,
+    *,
+    host: str | None,
+    port: int | None = None,
+    use_ssl: bool = True,
+    username: str | None,
+    password: str | None = None,
+    mailbox: str | None = "INBOX",
+) -> None:
+    existing = get_login(login_username, include_secrets=True) or {}
+    existing_password = existing.get("challenge_email_password")
+    enc_username = encrypt_value(username)
+    enc_password = encrypt_value(password if password is not None else existing_password)
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            UPDATE login_accounts
+            SET challenge_email_host = ?,
+                challenge_email_port = ?,
+                challenge_email_ssl = ?,
+                challenge_email_username_enc = ?,
+                challenge_email_password_enc = ?,
+                challenge_email_mailbox = ?,
+                updated_at = ?
+            WHERE login_username = ?
+            """,
+            (
+                (host or "").strip() or None,
+                int(port) if port else None,
+                1 if use_ssl else 0,
+                enc_username,
+                enc_password,
+                (mailbox or "INBOX").strip() or "INBOX",
+                _utc_now(),
+                login_username,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def clear_challenge_email_settings(login_username: str) -> None:
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            UPDATE login_accounts
+            SET challenge_email_host = NULL,
+                challenge_email_port = NULL,
+                challenge_email_ssl = 1,
+                challenge_email_username_enc = NULL,
+                challenge_email_password_enc = NULL,
+                challenge_email_mailbox = NULL,
+                updated_at = ?
+            WHERE login_username = ?
+            """,
+            (_utc_now(), login_username),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def set_last_login(login_username: str, error: str | None = None) -> None:

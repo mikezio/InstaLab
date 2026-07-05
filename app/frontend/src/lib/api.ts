@@ -4,11 +4,13 @@ import {
   runStatusSchema,
   runJobStatusSchema,
   runJobDetailSchema,
+  runJobSummarySchema,
   type AppStatus,
   type AccountCreateStatus,
   type RunStatus,
   type RunJobStatus,
   type RunJobDetail,
+  type RunJobSummary,
   type TargetSummaryItem,
   type ScheduleItem,
   type CountWatchSampleItem,
@@ -327,10 +329,27 @@ export async function getRunJobDetail(jobId: string): Promise<RunJobDetail> {
   return runJobDetailSchema.parse(data);
 }
 
-export async function submitChallengeCode(login_username: string, code: string): Promise<{ ok: boolean; login_username: string }> {
+export async function getRunJobSummary(jobId: string): Promise<RunJobSummary> {
+  const data = await fetchJson<unknown>(`/jobs/${encodeURIComponent(jobId)}/summary`);
+  return runJobSummarySchema.parse(data);
+}
+
+export async function submitChallengeCode(
+  login_username: string,
+  code: string,
+  options?: { retry_run?: boolean }
+): Promise<{
+  ok: boolean;
+  login_username: string;
+  retry_queued?: boolean;
+  retry_job_id?: string | null;
+  retry_target_username?: string | null;
+  retry_error?: string;
+  cooldown_seconds?: number;
+}> {
   return fetchJson("/logins/challenge", {
     method: "POST",
-    body: JSON.stringify({ login_username, code }),
+    body: JSON.stringify({ login_username, code, retry_run: Boolean(options?.retry_run) }),
   });
 }
 
@@ -338,6 +357,32 @@ export async function setLoginNewPassword(login_username: string, new_password: 
   return fetchJson("/logins/new-password", {
     method: "POST",
     body: JSON.stringify({ login_username, new_password }),
+  });
+}
+
+export async function setChallengeEmail(payload: {
+  login_username: string;
+  host?: string;
+  port?: number;
+  use_ssl?: boolean;
+  username?: string;
+  password?: string;
+  mailbox?: string;
+  test?: boolean;
+  clear?: boolean;
+}): Promise<{
+  ok: boolean;
+  login_username: string;
+  configured?: boolean;
+  host?: string;
+  port?: number;
+  use_ssl?: boolean;
+  mailbox?: string;
+  test?: { ok?: boolean; unseen_count?: number; error?: string };
+}> {
+  return fetchJson("/logins/challenge-email", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 
@@ -432,7 +477,7 @@ export async function cancelRun(payload: {
   login_username?: string;
   target_username?: string;
   job_id?: string;
-}): Promise<{ cancelled: boolean }> {
+}): Promise<{ cancelled: boolean; queued_cancelled?: boolean; stale_running_cancelled?: boolean }> {
   return fetchJson("/run/cancel", {
     method: "POST",
     body: JSON.stringify(payload),

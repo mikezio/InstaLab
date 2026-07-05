@@ -8,9 +8,9 @@ Features:
 """
 
 import json
+import imaplib
 import os
 import signal
-import shlex
 import shutil
 import subprocess
 import sys
@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from flask import Flask, Response, jsonify, request, send_from_directory, redirect
+from flask import Flask, Response, jsonify, request, redirect
 import requests
 
 from tracker_db import (
@@ -41,6 +41,8 @@ from tracker_db import (
     backfill_relationship_events,
     get_latest_count_watch_sample,
     get_recent_count_watch_samples,
+    load_account_profiles,
+    update_relationship_event_account_statuses,
     update_run_duration,
     write_count_watch_sample,
     write_run_metadata,
@@ -59,6 +61,7 @@ from unfollow_bot import unfollow_users
 from db import get_db, get_columns, ddl, is_postgres
 from login_store import (
     clear_session_settings,
+    clear_challenge_email_settings,
     clear_challenge_code,
     delete_login,
     disable_login,
@@ -66,6 +69,7 @@ from login_store import (
     init_login_table,
     list_logins,
     set_challenge_code,
+    set_challenge_email_settings,
     set_last_error,
     set_last_login,
     set_login_password,
@@ -74,20 +78,6 @@ from login_store import (
     set_totp_seed,
     upsert_login,
 )
-from recon_store import (
-    create_recon_job,
-    create_recon_query,
-    delete_recon_job,
-    finalize_recon_job,
-    get_recon_job,
-    init_recon_tables,
-    list_recon_artifacts,
-    list_recon_findings,
-    list_recon_jobs,
-    mark_recon_job_running,
-)
-from recon_worker import ReconExecutionError, run_recon_scan
-from validation import ValidationError, sanitize_sql_limit
 from proxy_utils import load_proxy_from_env
 from browser_tracker import browser_storage_path_for_login
 
@@ -171,46 +161,6 @@ def _cleanup_old_job_dirs():
                 pass
     except Exception:
         pass
-
-
-def _cleanup_recon_artifacts():
-    try:
-        retention_days = int(_get_config_value("recon_artifact_retention_days", 30) or 30)
-    except Exception:
-        retention_days = 30
-    if retention_days <= 0:
-        return
-
-    cutoff = datetime.now(LOCAL_TZ) - timedelta(days=retention_days)
-    cutoff_iso = cutoff.astimezone(ZoneInfo("UTC")).isoformat()
-    active_recon_ids = {
-        jid
-        for jid, meta in list(RECON_META.items())
-        if meta.get("state") in {"queued", "running"}
-    }
-
-    conn = _get_db()
-    try:
-        rows = conn.execute(
-            """
-            SELECT id
-            FROM recon_jobs
-            WHERE created_at < ?
-              AND status IN ('success', 'error', 'cancelled')
-            """,
-            (cutoff_iso,),
-        ).fetchall()
-        for row in rows:
-            job_id = str(row[0])
-            if job_id in active_recon_ids:
-                continue
-            job_dir = JOB_TMP_DIR / f"recon_{job_id}"
-            shutil.rmtree(job_dir, ignore_errors=True)
-            conn.execute("DELETE FROM recon_artifacts WHERE recon_job_id = ?", (job_id,))
-            conn.execute("UPDATE recon_jobs SET raw_output_path = NULL WHERE id = ?", (job_id,))
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _ensure_cookie_dir():
@@ -299,7 +249,6 @@ SCRAPER_BACKEND_ALIASES = {
     "ingrapi": "private",
     "private_api": "private",
     "private-api": "private",
-    "osintgram": "private",
     "guided_browser": "browser",
     "playwright": "browser",
 }
@@ -351,14 +300,14 @@ RUN_BACKEND_TUNING_PROFILES = {
     "private": {
         "run_http_timeout_seconds": 60.0,
         "run_request_timeout": 60.0,
-        "run_private_request_sleep_seconds": 0.8,
-        "run_item_delay_min": 0.6,
-        "run_item_delay_max": 1.4,
-        "run_initial_fetch_delay_seconds": 6.0,
-        "run_pause_every_min": 120,
-        "run_pause_every_max": 180,
-        "run_pause_seconds_min": 20.0,
-        "run_pause_seconds_max": 45.0,
+        "run_private_request_sleep_seconds": 0.0,
+        "run_item_delay_min": 0.45,
+        "run_item_delay_max": 1.15,
+        "run_initial_fetch_delay_seconds": 2.0,
+        "run_pause_every_min": 0,
+        "run_pause_every_max": 0,
+        "run_pause_seconds_min": 0.0,
+        "run_pause_seconds_max": 0.0,
         "run_rate_limit_cooldown_seconds": 3600,
     },
     # Browser collector can run faster while keeping basic jitter.
@@ -567,11 +516,14 @@ CONFIG_DEFAULTS = {
     "run_item_delay_min": float(os.getenv("RUN_ITEM_DELAY_MIN", "0")),
     "run_item_delay_max": float(os.getenv("RUN_ITEM_DELAY_MAX", "0")),
     "run_fetch_order": str(os.getenv("RUN_FETCH_ORDER", "followers_first")).strip().lower(),
+    "run_followers_order": str(os.getenv("RUN_FOLLOWERS_ORDER", "")).strip().lower(),
     "run_initial_fetch_delay_seconds": float(os.getenv("RUN_INITIAL_FETCH_DELAY_SECONDS", "8")),
     "run_pause_every_min": int(os.getenv("RUN_PAUSE_EVERY_MIN", "0")),
     "run_pause_every_max": int(os.getenv("RUN_PAUSE_EVERY_MAX", "0")),
     "run_pause_seconds_min": float(os.getenv("RUN_PAUSE_SECONDS_MIN", "0")),
     "run_pause_seconds_max": float(os.getenv("RUN_PAUSE_SECONDS_MAX", "0")),
+    "run_completeness_retry_max": int(os.getenv("RUN_COMPLETENESS_RETRY_MAX", "2")),
+    "run_completeness_retry_delay_seconds": float(os.getenv("RUN_COMPLETENESS_RETRY_DELAY_SECONDS", "8")),
     "run_pre_login_flow": os.getenv("RUN_PRE_LOGIN_FLOW", "false").lower() in {"1", "true", "yes", "on"},
     "run_post_login_flow": os.getenv("RUN_POST_LOGIN_FLOW", "false").lower() in {"1", "true", "yes", "on"},
     "run_rate_limit_cooldown_seconds": int(os.getenv("RUN_RATE_LIMIT_COOLDOWN_SECONDS", "900")),
@@ -603,17 +555,6 @@ CONFIG_DEFAULTS = {
     "schedule_default_time1": "09:00",
     "schedule_default_time2": "21:00",
     "schedule_default_weekday": 1,
-    "recon_enabled": os.getenv("RECON_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
-    "recon_max_concurrency": int(os.getenv("RECON_MAX_CONCURRENCY", "2")),
-    "recon_queue_limit": int(os.getenv("RECON_QUEUE_LIMIT", "20")),
-    "recon_timeout_seconds": int(os.getenv("RECON_TIMEOUT_SECONDS", "240")),
-    "recon_artifact_retention_days": int(os.getenv("RECON_ARTIFACT_RETENTION_DAYS", "30")),
-    "recon_blackbird_ai_enabled": os.getenv("RECON_BLACKBIRD_AI_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
-    "recon_blackbird_no_nsfw": os.getenv("RECON_BLACKBIRD_NO_NSFW", "true").lower() in {"1", "true", "yes", "on"},
-    "recon_blackbird_cmd": os.getenv("RECON_BLACKBIRD_CMD", "python /app/scripts/blackbird_proxy.py"),
-    "recon_blackbird_results_dir": os.getenv("RECON_BLACKBIRD_RESULTS_DIR", "/tmp/instalab-blackbird/results"),
-    "recon_phoneinfoga_enabled": os.getenv("RECON_PHONEINFOGA_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
-    "recon_phoneinfoga_cmd": os.getenv("RECON_PHONEINFOGA_CMD", "/usr/local/bin/phoneinfoga"),
     "whatsapp_enabled": os.getenv("INSTALAB_WHATSAPP_ENABLED", "false").lower() in {"1", "true", "yes", "on"},
     "whatsapp_command_enabled": os.getenv("INSTALAB_WHATSAPP_COMMAND_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
     "whatsapp_notify_enabled": os.getenv("INSTALAB_WHATSAPP_NOTIFY_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
@@ -633,11 +574,14 @@ CONFIG_SCHEMA = {
     "run_item_delay_min": {"type": "float", "min": 0.0, "max": 10.0},
     "run_item_delay_max": {"type": "float", "min": 0.0, "max": 10.0},
     "run_fetch_order": {"type": "str", "allowed": {"followers_first", "following_first"}},
+    "run_followers_order": {"type": "str", "allowed": {"", "date_followed_latest", "date_followed_earliest"}},
     "run_initial_fetch_delay_seconds": {"type": "float", "min": 0.0, "max": 120.0},
     "run_pause_every_min": {"type": "int", "min": 0, "max": 1000},
     "run_pause_every_max": {"type": "int", "min": 0, "max": 1000},
     "run_pause_seconds_min": {"type": "float", "min": 0.0, "max": 300.0},
     "run_pause_seconds_max": {"type": "float", "min": 0.0, "max": 300.0},
+    "run_completeness_retry_max": {"type": "int", "min": 0, "max": 5},
+    "run_completeness_retry_delay_seconds": {"type": "float", "min": 0.0, "max": 120.0},
     "run_pre_login_flow": {"type": "bool"},
     "run_post_login_flow": {"type": "bool"},
     "run_rate_limit_cooldown_seconds": {"type": "int", "min": 60, "max": 86400},
@@ -670,17 +614,6 @@ CONFIG_SCHEMA = {
     "schedule_default_time1": {"type": "time"},
     "schedule_default_time2": {"type": "time"},
     "schedule_default_weekday": {"type": "int", "min": 0, "max": 6},
-    "recon_enabled": {"type": "bool"},
-    "recon_max_concurrency": {"type": "int", "min": 1, "max": 8},
-    "recon_queue_limit": {"type": "int", "min": 1, "max": 500},
-    "recon_timeout_seconds": {"type": "int", "min": 15, "max": 1800},
-    "recon_artifact_retention_days": {"type": "int", "min": 0, "max": 3650},
-    "recon_blackbird_ai_enabled": {"type": "bool"},
-    "recon_blackbird_no_nsfw": {"type": "bool"},
-    "recon_blackbird_cmd": {"type": "str"},
-    "recon_blackbird_results_dir": {"type": "str"},
-    "recon_phoneinfoga_enabled": {"type": "bool"},
-    "recon_phoneinfoga_cmd": {"type": "str"},
     "whatsapp_enabled": {"type": "bool"},
     "whatsapp_command_enabled": {"type": "bool"},
     "whatsapp_notify_enabled": {"type": "bool"},
@@ -1206,38 +1139,6 @@ def _health_check_unfollow():
     if state == "error":
         status = "degraded"
     return {"status": status, "details": job}
-
-
-def _health_check_recon():
-    cfg = _get_config()
-    enabled = _parse_bool(cfg.get("recon_enabled", True))
-    blackbird_cmd = str(cfg.get("recon_blackbird_cmd") or "").strip()
-    phoneinfoga_cmd = str(cfg.get("recon_phoneinfoga_cmd") or "").strip()
-    blackbird_exec = shlex.split(blackbird_cmd)[0] if blackbird_cmd else ""
-    phoneinfoga_exec = shlex.split(phoneinfoga_cmd)[0] if phoneinfoga_cmd else ""
-    counts = _recon_state_counts()
-    max_concurrency = int(cfg.get("recon_max_concurrency", 2) or 2)
-    queue_limit = int(cfg.get("recon_queue_limit", 20) or 20)
-    details = {
-        "enabled": enabled,
-        "running_jobs": counts["running"],
-        "queued_jobs": counts["queued"],
-        "pending_jobs": counts["pending"],
-        "max_concurrency": max_concurrency,
-        "queue_limit": queue_limit,
-        "blackbird_executable": bool(shutil.which(blackbird_exec)) if blackbird_exec else False,
-        "phoneinfoga_executable": bool(shutil.which(phoneinfoga_exec)) if phoneinfoga_exec else False,
-    }
-    status = "ok"
-    if not enabled or not details["blackbird_executable"]:
-        status = "degraded"
-    return {"status": status, "details": details}
-
-
-def _blackbird_ai_key_path(cfg: dict) -> Path:
-    results_dir = str(cfg.get("recon_blackbird_results_dir") or "/tmp/instalab-blackbird/results").strip()
-    runtime_dir = Path(results_dir).resolve().parent
-    return runtime_dir / ".ai_key.json"
 
 
 def _init_config_table():
@@ -1843,15 +1744,6 @@ def _init_run_tables():
         conn.close()
 
 
-def _init_recon_tables():
-    conn = _get_db()
-    try:
-        init_recon_tables(conn)
-        conn.commit()
-    finally:
-        conn.close()
-
-
 def _init_login_tables():
     init_login_table()
 
@@ -2298,7 +2190,10 @@ def _account_create_worker(
                     raise
             if not result:
                 raise RuntimeError("signup did not return a result")
-            _log_account_create(f"instagrapi signup completed for @{result.get('username') or login_username}")
+            method = result.get("signup_method") or "unknown_method"
+            _log_account_create(
+                f"instagrapi signup completed for @{result.get('username') or login_username} via {method}"
+            )
         else:
             _log_account_create("opening browser and bootstrapping signup form")
             result = create_account_guided(
@@ -2603,10 +2498,12 @@ def _get_latest_run(conn, target_username):
         SELECT id, target_username, login_username, timestamp, created_at
         FROM runs
         WHERE target_username = ?
+          AND COALESCE(snapshot_complete, 1) = 1
+          AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
         ORDER BY id DESC
         LIMIT 1
         """,
-        (target_username,),
+        (target_username, "%profile_only%"),
     )
     row = cur.fetchone()
     return dict(row) if row else None
@@ -2842,6 +2739,7 @@ def _fetch_count_watch_sample(login_username, target_username, *, config_overrid
     env["RUN_POST_LOGIN_FLOW"] = "true" if _parse_bool(_cfg("run_post_login_flow", False)) else "false"
     env["RUN_ITEM_DELAY_MIN"] = str(float(_cfg("run_item_delay_min", 0.0) or 0.0))
     env["RUN_ITEM_DELAY_MAX"] = str(float(_cfg("run_item_delay_max", 0.0) or 0.0))
+    env["RUN_FOLLOWERS_ORDER"] = str(_cfg("run_followers_order", "") or "").strip().lower()
     http_timeout_seconds = float(_cfg("run_http_timeout_seconds", _cfg("run_request_timeout", 120)))
     request_sleep_seconds = float(_cfg("run_private_request_sleep_seconds", 0))
 
@@ -3035,21 +2933,6 @@ def _restore_schedules():
         )
 
 
-def _schedule_recon_maintenance_job():
-    try:
-        scheduler.remove_job("recon_maintenance")
-    except Exception:
-        pass
-    scheduler.add_job(
-        _cleanup_recon_artifacts,
-        trigger=CronTrigger(hour=3, minute=20),
-        id="recon_maintenance",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
-
-
 def _delete_run(run_id):
     conn = _get_db()
     try:
@@ -3210,6 +3093,11 @@ def _terminate_proc(proc: subprocess.Popen):
         return
     except Exception:
         pass
+    try:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception:
+        pass
 
 
 def _stream_worker_output(proc: subprocess.Popen, out_path: Path, err_path: Path, prefix: str):
@@ -3238,11 +3126,6 @@ def _stream_worker_output(proc: subprocess.Popen, out_path: Path, err_path: Path
     out_thread.start()
     err_thread.start()
     return out_fh, err_fh, out_thread, err_thread
-    try:
-        proc.kill()
-        proc.wait(timeout=5)
-    except Exception:
-        pass
 
 
 def run_snapshot(
@@ -3320,11 +3203,14 @@ def run_snapshot(
     item_delay_min = float(_cfg("run_item_delay_min", 0.25))
     item_delay_max = float(_cfg("run_item_delay_max", 0.75))
     fetch_order = str(_cfg("run_fetch_order", "followers_first") or "followers_first").strip().lower()
+    followers_order = str(_cfg("run_followers_order", "") or "").strip().lower()
     initial_fetch_delay_seconds = float(_cfg("run_initial_fetch_delay_seconds", 8.0))
     pause_every_min = int(_cfg("run_pause_every_min", 0) or 0)
     pause_every_max = int(_cfg("run_pause_every_max", 0) or 0)
     pause_seconds_min = float(_cfg("run_pause_seconds_min", 0) or 0)
     pause_seconds_max = float(_cfg("run_pause_seconds_max", 0) or 0)
+    completeness_retry_max = int(_cfg("run_completeness_retry_max", 2) or 0)
+    completeness_retry_delay_seconds = float(_cfg("run_completeness_retry_delay_seconds", 8) or 0)
     trace_enabled = _parse_bool(_cfg("run_trace_enabled", False))
     profile_only = _parse_bool(_cfg("run_profile_only", False))
     pre_login_flow = _parse_bool(_cfg("run_pre_login_flow", False))
@@ -3334,11 +3220,14 @@ def run_snapshot(
     env["RUN_ITEM_DELAY_MIN"] = str(item_delay_min)
     env["RUN_ITEM_DELAY_MAX"] = str(item_delay_max)
     env["RUN_FETCH_ORDER"] = fetch_order
+    env["RUN_FOLLOWERS_ORDER"] = followers_order
     env["RUN_INITIAL_FETCH_DELAY_SECONDS"] = str(initial_fetch_delay_seconds)
     env["RUN_PAUSE_EVERY_MIN"] = str(pause_every_min)
     env["RUN_PAUSE_EVERY_MAX"] = str(pause_every_max)
     env["RUN_PAUSE_SECONDS_MIN"] = str(pause_seconds_min)
     env["RUN_PAUSE_SECONDS_MAX"] = str(pause_seconds_max)
+    env["RUN_COMPLETENESS_RETRY_MAX"] = str(completeness_retry_max)
+    env["RUN_COMPLETENESS_RETRY_DELAY_SECONDS"] = str(completeness_retry_delay_seconds)
     env["RUN_HTTP_TIMEOUT_SECONDS"] = str(http_timeout_seconds)
     env["RUN_PRIVATE_REQUEST_SLEEP_SECONDS"] = str(request_sleep_seconds)
     env["RUN_TRACE_ENABLED"] = "true" if trace_enabled else "false"
@@ -3422,6 +3311,56 @@ def run_snapshot(
                     job["followers_progress"] = int(count or 0)
                 elif phase == "following":
                     job["following_progress"] = int(count or 0)
+                progress_detail = {
+                    key: payload.get(key)
+                    for key in (
+                        "page_index",
+                        "page_raw_count",
+                        "page_unique_count",
+                        "page_unique_new",
+                        "page_duplicate_count",
+                        "duplicates_total",
+                        "has_more",
+                        "next_max_id",
+                        "last_page_at",
+                        "seconds_since_previous_page",
+                        "attempt",
+                        "attempt_complete",
+                        "streaming",
+                        "retrying",
+                        "retry_complete",
+                        "retry_page_index",
+                        "retry_page_raw_count",
+                        "retry_added",
+                        "expected_total",
+                        "missing_count",
+                        "alternate_endpoint",
+                        "alternate_running",
+                        "alternate_complete",
+                        "alternate_added",
+                        "alternate_page_index",
+                        "alternate_page_raw_count",
+                        "alternate_page_added",
+                        "alternate_duplicates_total",
+                        "alternate_has_more",
+                        "alternate_next_cursor",
+                    )
+                    if key in payload
+                }
+                if progress_detail:
+                    job["progress_detail"] = {
+                        "phase": phase,
+                        "updated_at": payload.get("updated_at"),
+                        **progress_detail,
+                    }
+                    if phase == "followers":
+                        job["followers_pages"] = payload.get("page_index")
+                        job["followers_last_page_at"] = payload.get("last_page_at")
+                        job["followers_duplicates_total"] = payload.get("duplicates_total")
+                    elif phase == "following":
+                        job["following_pages"] = payload.get("page_index")
+                        job["following_last_page_at"] = payload.get("last_page_at")
+                        job["following_duplicates_total"] = payload.get("duplicates_total")
 
         if (login_username, target_username) in CANCEL_REQUESTS or (job and job.get("cancelled")):
             _terminate_proc(proc)
@@ -3534,11 +3473,6 @@ RUN_COOLDOWN_UNTIL = {}
 RUN_COOLDOWN_GUARD = threading.Lock()
 ACTIVE_JOBS = {}
 LAST_JOB_BY_LOGIN = {}
-RECON_FUTURES = {}
-RECON_META = {}
-RECON_PROCESSES = {}
-RECON_CANCEL_EVENTS = {}
-RECON_LOCK = threading.Lock()
 DELETED_RUNS = {}
 CANCEL_REQUESTS = set()
 SCHEMA_HAS_INTERVAL_MINUTES = False
@@ -3584,6 +3518,24 @@ ACCOUNT_CREATE_JOB = {
     "warnings": [],
 }
 ACCOUNT_CREATE_LOG = []
+ACCOUNT_PROFILE_BACKFILL_LOCK = threading.Lock()
+ACCOUNT_PROFILE_BACKFILL_CANCEL = threading.Event()
+ACCOUNT_PROFILE_BACKFILL_JOB = {
+    "state": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "login_username": None,
+    "target_username": None,
+    "limit": 0,
+    "total": 0,
+    "processed": 0,
+    "saved": 0,
+    "errors": 0,
+    "skipped": 0,
+    "last_username": None,
+    "message": None,
+}
+ACCOUNT_PROFILE_BACKFILL_LOG = []
 RUN_WATCHDOG_STOP = threading.Event()
 RUN_DISPATCH_STOP = threading.Event()
 MANUAL_ACTIONS_LOCK = threading.Lock()
@@ -3797,6 +3749,21 @@ def _mark_run_job_running(job_id: str) -> bool:
     return claimed
 
 
+def _finalize_cancelled_run_job(job_id: str, *, message: str = "job cancelled") -> None:
+    finished = datetime.now(LOCAL_TZ).isoformat()
+    _update_run_job_record(
+        job_id,
+        status="cancelled",
+        finished_at=finished,
+        cancel_requested=True,
+        state_reason="cancel_requested",
+        error_code="cancelled",
+        error_message=message,
+    )
+    _record_run_job_event(job_id, "cancelled", {"reason": "cancel_requested", "message": message})
+    _run_state_set(job_id, "cancelled", reason="cancel_requested", finished_at=finished)
+
+
 def _list_run_jobs_by_status(*statuses: str, limit: int = 200) -> list[dict]:
     wanted = [str(s or "").strip().lower() for s in statuses if str(s or "").strip()]
     if not wanted:
@@ -3943,6 +3910,17 @@ def _open_manual_actions() -> list[dict]:
         rows = [dict(v) for v in MANUAL_ACTIONS.values() if str(v.get("state")) == "open"]
     rows.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     return rows
+
+
+def _latest_verification_action(login_username: str) -> dict | None:
+    login_key = str(login_username or "").strip().lower()
+    candidates = [
+        action
+        for action in _open_manual_actions()
+        if str(action.get("login_username") or "").strip().lower() == login_key
+        and str(action.get("action_type") or "").strip().lower() in {"challenge_required", "two_factor_required"}
+    ]
+    return candidates[0] if candidates else None
 
 
 def _classify_terminal_run_state(error_code: str | None, error_message: str | None, cooldown_seconds: int) -> str:
@@ -4121,18 +4099,6 @@ def _acquire_run_slot(source: str, login_username: str, target_username: str, jo
         "followers_total": None,
         "following_total": None,
     }
-    try:
-        conn = _get_db()
-        try:
-            f_total, fe_total = _last_totals(conn, target_username)
-        finally:
-            conn.close()
-        if f_total is not None:
-            ACTIVE_JOBS[login_username]["followers_total"] = f_total
-        if fe_total is not None:
-            ACTIVE_JOBS[login_username]["following_total"] = fe_total
-    except Exception:
-        pass
 
 
 def _release_run_slot(login_username: str):
@@ -4142,254 +4108,12 @@ def _release_run_slot(login_username: str):
         lock.release()
 
 
-def _recon_state_counts() -> dict:
-    running = 0
-    queued = 0
-    for jid, meta in list(RECON_META.items()):
-        fut = RECON_FUTURES.get(jid)
-        if fut and not fut.done():
-            if meta.get("state") == "running":
-                running += 1
-            elif meta.get("state") == "queued":
-                queued += 1
-    return {"running": running, "queued": queued, "pending": running + queued}
-
-
-def _recon_running_count() -> int:
-    return int(_recon_state_counts()["running"])
-
-
-def _recon_queue_snapshot() -> list[dict]:
-    rows = []
-    now = time.time()
-    for jid, meta in list(RECON_META.items()):
-        fut = RECON_FUTURES.get(jid)
-        if not fut or fut.done():
-            continue
-        state = str(meta.get("state") or "queued")
-        if state not in {"queued", "running"}:
-            continue
-        created_raw = str(meta.get("created_at") or "")
-        started_raw = str(meta.get("started_at") or "")
-        elapsed = None
-        if started_raw:
-            try:
-                started_dt = datetime.fromisoformat(started_raw)
-                elapsed = max(0, int((datetime.now(LOCAL_TZ) - started_dt).total_seconds()))
-            except Exception:
-                elapsed = None
-        rows.append(
-            {
-                "job_id": jid,
-                "state": state,
-                "mode": meta.get("mode"),
-                "query_value": meta.get("query_value"),
-                "created_at": created_raw,
-                "started_at": started_raw or None,
-                "timeout_seconds": int(meta.get("timeout_seconds") or 0),
-                "elapsed_seconds": elapsed,
-                "_sort_key": created_raw or str(now),
-            }
-        )
-    rows.sort(key=lambda item: item.get("_sort_key") or "")
-    queue_index = 0
-    for item in rows:
-        if item["state"] == "queued":
-            queue_index += 1
-            item["queue_position"] = queue_index
-        else:
-            item["queue_position"] = 0
-        timeout_seconds = int(item.get("timeout_seconds") or 0)
-        elapsed = item.get("elapsed_seconds")
-        if item["state"] == "running" and timeout_seconds > 0 and elapsed is not None:
-            item["timeout_remaining_seconds"] = max(0, timeout_seconds - int(elapsed))
-        else:
-            item["timeout_remaining_seconds"] = None
-        item.pop("_sort_key", None)
-    return rows
-
-
-def _queue_recon_scan(mode: str, query_value: str, *, requested_by: str | None = None, options: dict | None = None):
-    cfg = _get_config()
-    if not _parse_bool(cfg.get("recon_enabled", True)):
-        raise RuntimeError("recon module disabled")
-    max_concurrency = int(cfg.get("recon_max_concurrency", 2) or 2)
-    queue_limit = int(cfg.get("recon_queue_limit", 20) or 20)
-    counts = _recon_state_counts()
-    if counts["pending"] >= queue_limit:
-        raise RuntimeError("recon queue at capacity")
-
-    options = options or {}
-    job_id = uuid4().hex
-    source_tool = "phoneinfoga" if str(mode).strip().lower() == "phone" else "blackbird"
-    timeout_seconds = int(options.get("timeout_seconds") or cfg.get("recon_timeout_seconds") or 240)
-
-    conn = _get_db()
-    try:
-        recon_query_id = create_recon_query(
-            conn,
-            mode=str(mode).strip().lower(),
-            query_value=(query_value or "").strip(),
-            requested_by=requested_by,
-            source_tool=source_tool,
-        )
-        create_recon_job(
-            conn,
-            job_id=job_id,
-            recon_query_id=recon_query_id,
-            status="queued",
-            command_fingerprint=None,
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    RECON_META[job_id] = {
-        "job_id": job_id,
-        "state": "queued",
-        "mode": mode,
-        "query_value": query_value,
-        "requested_by": requested_by,
-        "created_at": datetime.now(LOCAL_TZ).isoformat(),
-        "started_at": None,
-        "timeout_seconds": timeout_seconds,
-        "error": None,
-    }
-    cancel_event = threading.Event()
-    RECON_CANCEL_EVENTS[job_id] = cancel_event
-    RECON_PROCESSES[job_id] = None
-
-    def _runner():
-        started = time.time()
-        while True:
-            if cancel_event.is_set():
-                raise ReconExecutionError("cancelled by user")
-            if _recon_running_count() < max_concurrency:
-                break
-            time.sleep(0.2)
-
-        RECON_META[job_id]["state"] = "running"
-        RECON_META[job_id]["started_at"] = datetime.now(LOCAL_TZ).isoformat()
-        conn = _get_db()
-        try:
-            mark_recon_job_running(conn, job_id=job_id)
-            conn.commit()
-        finally:
-            conn.close()
-
-        job_dir = JOB_TMP_DIR / f"recon_{job_id}"
-        job_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            payload = run_recon_scan(
-                mode=mode,
-                query_value=query_value,
-                options={
-                    **options,
-                    "timeout_seconds": timeout_seconds,
-                    "_cancel_event": cancel_event,
-                    "_on_process_start": lambda proc: RECON_PROCESSES.__setitem__(job_id, proc),
-                },
-                job_dir=job_dir,
-                cfg=cfg,
-            )
-            duration = int(payload.get("duration_seconds") or round(time.time() - started))
-            conn = _get_db()
-            try:
-                finalize_recon_job(
-                    conn,
-                    job_id=job_id,
-                    status="success",
-                    duration_seconds=duration,
-                    raw_output_path=payload.get("raw_output_path"),
-                    error_message=None,
-                    findings=payload.get("findings") or [],
-                    artifacts=payload.get("artifacts") or [],
-                )
-                conn.commit()
-            finally:
-                conn.close()
-            RECON_META[job_id]["state"] = "done"
-            RECON_META[job_id]["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
-            RECON_META[job_id]["result"] = payload
-            return payload
-        except ReconExecutionError as exc:
-            message = str(exc)
-            cancelled = "cancelled by user" in message.lower()
-            conn = _get_db()
-            try:
-                finalize_recon_job(
-                    conn,
-                    job_id=job_id,
-                    status="cancelled" if cancelled else "error",
-                    duration_seconds=int(round(time.time() - started)),
-                    raw_output_path=None,
-                    error_message=message,
-                    findings=[],
-                    artifacts=[],
-                )
-                conn.commit()
-            finally:
-                conn.close()
-            RECON_META[job_id]["state"] = "cancelled" if cancelled else "error"
-            RECON_META[job_id]["error"] = message
-            RECON_META[job_id]["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
-            return {"status": "cancelled" if cancelled else "error", "error": message}
-        except (ValidationError, RuntimeError, subprocess.TimeoutExpired) as exc:
-            conn = _get_db()
-            try:
-                finalize_recon_job(
-                    conn,
-                    job_id=job_id,
-                    status="error",
-                    duration_seconds=int(round(time.time() - started)),
-                    raw_output_path=None,
-                    error_message=str(exc),
-                    findings=[],
-                    artifacts=[],
-                )
-                conn.commit()
-            finally:
-                conn.close()
-            RECON_META[job_id]["state"] = "error"
-            RECON_META[job_id]["error"] = str(exc)
-            RECON_META[job_id]["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
-            return {"status": "error", "error": str(exc)}
-        except Exception as exc:  # noqa: BLE001
-            conn = _get_db()
-            try:
-                finalize_recon_job(
-                    conn,
-                    job_id=job_id,
-                    status="error",
-                    duration_seconds=int(round(time.time() - started)),
-                    raw_output_path=None,
-                    error_message=str(exc),
-                    findings=[],
-                    artifacts=[],
-                )
-                conn.commit()
-            finally:
-                conn.close()
-            RECON_META[job_id]["state"] = "error"
-            RECON_META[job_id]["error"] = str(exc)
-            RECON_META[job_id]["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
-            return {"status": "error", "error": str(exc)}
-        finally:
-            RECON_PROCESSES.pop(job_id, None)
-            RECON_CANCEL_EVENTS.pop(job_id, None)
-
-    RECON_FUTURES[job_id] = executor.submit(_runner)
-    return job_id
-
-
 _init_schedule_table()
 _init_config_table()
 _init_unfollow_table()
 _init_run_tables()
-_init_recon_tables()
 _init_login_tables()
 _restore_schedules()
-_schedule_recon_maintenance_job()
 threading.Thread(target=_watchdog_loop, daemon=True).start()
 
 app = Flask(__name__)
@@ -4425,6 +4149,10 @@ def api_logins():
                 "private_session_mtime": (path.stat().st_mtime if path.exists() else None),
                 "has_password": bool(entry.get("has_password")),
                 "has_totp_seed": bool(entry.get("has_totp_seed")),
+                "challenge_email_configured": bool(entry.get("challenge_email_configured")),
+                "challenge_email_host": entry.get("challenge_email_host"),
+                "challenge_email_username": entry.get("challenge_email_username"),
+                "challenge_email_mailbox": entry.get("challenge_email_mailbox") or "INBOX",
                 "last_login_at": entry.get("last_login_at"),
                 "last_error": entry.get("last_error"),
                 "session_fail_streak": fail_streak,
@@ -4659,8 +4387,8 @@ def api_logins_add():
     login_password = (data.get("login_password") or "").strip()
     totp_seed = (data.get("totp_seed") or "").strip() or None
     private_session_exists = _private_session_exists(login_username) if login_username else False
-    if not login_username or (not login_password and not private_session_exists and not totp_seed):
-        return jsonify({"error": "login_username and login_password are required (no private session cached)"}), 400
+    if not login_username or (not login_password and not private_session_exists):
+        return jsonify({"error": "login_username and login_password are required unless a private session is already cached"}), 400
     if _is_blocked_login(login_username):
         return jsonify({"error": "login_username is blocked"}), 400
     try:
@@ -4738,15 +4466,165 @@ def api_logins_challenge():
     data = request.get_json(silent=True) or {}
     login_username = (data.get("login_username") or "").strip()
     code = (data.get("code") or data.get("challenge_code") or "").strip()
+    retry_run = _parse_bool(data.get("retry_run", False))
     if not login_username or not code:
         return jsonify({"error": "login_username and code are required"}), 400
     if login_username not in _get_login_lookup():
         return jsonify({"error": "unknown login_username"}), 404
     try:
         set_challenge_code(login_username, code)
-        return jsonify({"ok": True, "login_username": login_username})
+        retry_job_id = None
+        retry_target = None
+        if retry_run:
+            action = _latest_verification_action(login_username)
+            retry_target = (action or {}).get("target_username")
+            if not retry_target:
+                return jsonify(
+                    {
+                        "ok": True,
+                        "login_username": login_username,
+                        "retry_queued": False,
+                        "retry_error": "no open verification action found for this login",
+                    }
+                )
+            cooldown_seconds = _get_run_cooldown_remaining(login_username)
+            if cooldown_seconds > 0:
+                return jsonify(
+                    {
+                        "ok": True,
+                        "login_username": login_username,
+                        "retry_queued": False,
+                        "retry_error": "login is cooling down",
+                        "cooldown_seconds": cooldown_seconds,
+                    }
+                )
+            if _get_run_lock(login_username).locked() or _is_target_busy(str(retry_target)):
+                return jsonify(
+                    {
+                        "ok": True,
+                        "login_username": login_username,
+                        "retry_queued": False,
+                        "retry_error": "login or target is busy",
+                    }
+                )
+            retry_job_id = _queue_run(
+                login_username,
+                str(retry_target),
+                source="verification_retry",
+                two_factor_code=code,
+                challenge_code=code,
+            )
+            _resolve_manual_actions_for(login_username, str(retry_target), note=f"verification retry queued ({retry_job_id})")
+        return jsonify(
+            {
+                "ok": True,
+                "login_username": login_username,
+                "retry_queued": bool(retry_job_id),
+                "retry_job_id": retry_job_id,
+                "retry_target_username": retry_target,
+            }
+        )
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"failed to store challenge code: {exc}"}), 500
+
+
+def _test_challenge_email_settings(*, host, port, use_ssl, username, password, mailbox):
+    mail = None
+    try:
+        if use_ssl:
+            mail = imaplib.IMAP4_SSL(host, port)
+        else:
+            mail = imaplib.IMAP4(host, port)
+        mail.login(username, password)
+        result, data = mail.select(mailbox or "INBOX")
+        if result != "OK":
+            return {"ok": False, "error": f"failed to select mailbox: {result}"}
+        result, data = mail.search(None, "UNSEEN")
+        unseen = 0
+        if result == "OK" and data:
+            unseen = len(data[0].split())
+        return {"ok": True, "unseen_count": unseen}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    finally:
+        if mail is not None:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+
+@app.route("/api/logins/challenge-email", methods=["POST"])
+def api_logins_challenge_email():
+    data = request.get_json(silent=True) or {}
+    login_username = (data.get("login_username") or "").strip()
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    if login_username not in _get_login_lookup():
+        return jsonify({"error": "unknown login_username"}), 404
+    clear = _parse_bool(data.get("clear", False))
+    if clear:
+        try:
+            clear_challenge_email_settings(login_username)
+            _clear_login_cache()
+            return jsonify({"ok": True, "login_username": login_username, "configured": False})
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"error": f"failed to clear challenge email settings: {exc}"}), 500
+
+    host = (data.get("host") or "").strip()
+    username = (data.get("username") or "").strip()
+    password = data.get("password")
+    password = str(password).strip() if password is not None else None
+    mailbox = (data.get("mailbox") or "INBOX").strip() or "INBOX"
+    use_ssl = _parse_bool(data.get("use_ssl", True))
+    try:
+        port = int(data.get("port") or (993 if use_ssl else 143))
+    except Exception:
+        port = 993 if use_ssl else 143
+    test = _parse_bool(data.get("test", True))
+    if not host or not username:
+        return jsonify({"error": "host and username are required"}), 400
+    existing = get_login(login_username, include_secrets=True) or {}
+    effective_password = password or existing.get("challenge_email_password")
+    if not effective_password:
+        return jsonify({"error": "password is required the first time challenge email is configured"}), 400
+    test_result = None
+    if test:
+        test_result = _test_challenge_email_settings(
+            host=host,
+            port=port,
+            use_ssl=use_ssl,
+            username=username,
+            password=effective_password,
+            mailbox=mailbox,
+        )
+        if not test_result.get("ok"):
+            return jsonify({"error": "challenge email test failed", "test": test_result}), 400
+    try:
+        set_challenge_email_settings(
+            login_username,
+            host=host,
+            port=port,
+            use_ssl=use_ssl,
+            username=username,
+            password=password,
+            mailbox=mailbox,
+        )
+        _clear_login_cache()
+        return jsonify(
+            {
+                "ok": True,
+                "login_username": login_username,
+                "configured": True,
+                "host": host,
+                "port": port,
+                "use_ssl": use_ssl,
+                "mailbox": mailbox,
+                "test": test_result,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"failed to save challenge email settings: {exc}"}), 500
 
 
 @app.route("/api/logins/new-password", methods=["POST"])
@@ -4927,9 +4805,12 @@ def api_targets():
             """
             SELECT target_username, MAX(timestamp) as last_run
             FROM runs
+            WHERE COALESCE(snapshot_complete, 1) = 1
+              AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
             GROUP BY target_username
             ORDER BY target_username
-            """
+            """,
+            ("%profile_only%",),
         )
         rows = [dict(r) for r in cur.fetchall()]
         return jsonify(rows)
@@ -4942,6 +4823,7 @@ def api_runs():
     target = request.args.get("target")
     limit = int(request.args.get("limit", 20))
     kind = (request.args.get("kind") or "full").strip().lower()
+    include_incomplete = _parse_bool(request.args.get("include_incomplete", False))
     if not target:
         return jsonify({"error": "target is required"}), 400
     if kind not in {"full", "profile_only", "all"}:
@@ -4953,9 +4835,12 @@ def api_runs():
         if kind == "full":
             where.append("(snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)")
             params.append("%profile_only%")
+            where.append("COALESCE(snapshot_complete, 1) = 1")
         elif kind == "profile_only":
             where.append("LOWER(COALESCE(snapshot_note, '')) LIKE ?")
             params.append("%profile_only%")
+        if not include_incomplete:
+            where.append("COALESCE(snapshot_complete, 1) = 1")
         cur = conn.execute(
             f"""
             SELECT id, timestamp, followers_count, followees_count,
@@ -5005,375 +4890,6 @@ def api_count_watch_samples():
         conn.close()
 
 
-@app.route("/api/recon/run", methods=["POST"])
-def api_recon_run():
-    data = request.get_json(silent=True) or {}
-    mode = (data.get("mode") or "").strip().lower()
-    query_value = (data.get("query_value") or "").strip()
-    requested_by = (data.get("requested_by") or "").strip() or None
-    options = data.get("options") or {}
-    if not mode or not query_value:
-        return jsonify({"error": "mode and query_value are required"}), 400
-    if not isinstance(options, dict):
-        return jsonify({"error": "options must be an object"}), 400
-    try:
-        job_id = _queue_recon_scan(mode, query_value, requested_by=requested_by, options=options)
-        return jsonify({"job_id": job_id, "status": "queued"})
-    except (ValidationError, RuntimeError) as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 500
-
-
-@app.route("/api/recon/run/<job_id>", methods=["GET"])
-def api_recon_run_status(job_id):
-    fut = RECON_FUTURES.get(job_id)
-    meta = RECON_META.get(job_id) or {}
-    conn = _get_db()
-    try:
-        job = get_recon_job(conn, job_id)
-        findings = list_recon_findings(conn, job_id=job_id) if job else []
-        artifacts = list_recon_artifacts(conn, job_id=job_id) if job else []
-    finally:
-        conn.close()
-    if not job:
-        return jsonify({"error": "recon job not found"}), 404
-    done = bool(fut.done()) if fut else job.get("status") in {"success", "error", "cancelled"}
-    return jsonify(
-        {
-            "done": done,
-            "meta": meta,
-            "job": job,
-            "findings": findings,
-            "artifacts": artifacts,
-        }
-    )
-
-
-@app.route("/api/recon/run/<job_id>", methods=["DELETE"])
-def api_recon_run_delete(job_id):
-    fut = RECON_FUTURES.get(job_id)
-    if fut and not fut.done():
-        return jsonify({"error": "cannot delete a running recon job; cancel first"}), 409
-
-    conn = _get_db()
-    deleted = False
-    try:
-        job = get_recon_job(conn, job_id)
-        if not job:
-            return jsonify({"error": "recon job not found"}), 404
-        if job.get("status") in {"queued", "running"}:
-            return jsonify({"error": "cannot delete a queued/running recon job; cancel first"}), 409
-        deleted = delete_recon_job(conn, job_id=job_id)
-        conn.commit()
-    finally:
-        conn.close()
-
-    job_dir = JOB_TMP_DIR / f"recon_{job_id}"
-    shutil.rmtree(job_dir, ignore_errors=True)
-    RECON_FUTURES.pop(job_id, None)
-    RECON_META.pop(job_id, None)
-    return jsonify({"job_id": job_id, "deleted": bool(deleted)})
-
-
-@app.route("/api/recon/run/<job_id>/cancel", methods=["POST"])
-def api_recon_run_cancel(job_id):
-    fut = RECON_FUTURES.get(job_id)
-    meta = RECON_META.get(job_id)
-    conn = _get_db()
-    try:
-        job = get_recon_job(conn, job_id)
-        if not job:
-            return jsonify({"error": "recon job not found"}), 404
-        if job.get("status") in {"success", "error", "cancelled"}:
-            return jsonify({"error": "recon job already finished"}), 409
-
-        if fut and not fut.done():
-            cancelled = fut.cancel()
-            if not cancelled:
-                cancel_event = RECON_CANCEL_EVENTS.get(job_id)
-                if cancel_event:
-                    cancel_event.set()
-                proc = RECON_PROCESSES.get(job_id)
-                if proc and getattr(proc, "poll", lambda: None)() is None:
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
-                if meta is not None:
-                    meta["state"] = "cancelling"
-                return jsonify({"job_id": job_id, "cancel_requested": True, "running": True})
-
-        finalize_recon_job(
-            conn,
-            job_id=job_id,
-            status="cancelled",
-            duration_seconds=int(job.get("duration_seconds") or 0),
-            raw_output_path=None,
-            error_message="cancelled by user",
-            findings=[],
-            artifacts=[],
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    if meta is not None:
-        meta["state"] = "cancelled"
-        meta["error"] = "cancelled by user"
-        meta["finished_at"] = datetime.now(LOCAL_TZ).isoformat()
-    return jsonify({"job_id": job_id, "cancelled": True, "stale_recovered": not bool(fut)})
-
-
-@app.route("/api/recon/history", methods=["GET"])
-def api_recon_history():
-    mode = (request.args.get("mode") or "").strip().lower() or None
-    q = (request.args.get("q") or "").strip() or None
-    status = (request.args.get("status") or "").strip().lower() or None
-    limit = sanitize_sql_limit(request.args.get("limit"), default=30, max_limit=200)
-    conn = _get_db()
-    try:
-        rows = list_recon_jobs(conn, mode=mode, q=q, status=status, limit=limit)
-        return jsonify(rows)
-    finally:
-        conn.close()
-
-
-@app.route("/api/recon/queue", methods=["GET"])
-def api_recon_queue():
-    cfg = _get_config()
-    counts = _recon_state_counts()
-    return jsonify(
-        {
-            "queue": _recon_queue_snapshot(),
-            "running": counts["running"],
-            "queued": counts["queued"],
-            "pending": counts["pending"],
-            "max_concurrency": int(cfg.get("recon_max_concurrency", 2) or 2),
-            "queue_limit": int(cfg.get("recon_queue_limit", 20) or 20),
-        }
-    )
-
-
-@app.route("/api/recon/findings", methods=["GET"])
-def api_recon_findings():
-    job_id = (request.args.get("job_id") or "").strip()
-    if not job_id:
-        return jsonify({"error": "job_id is required"}), 400
-    conn = _get_db()
-    try:
-        job = get_recon_job(conn, job_id)
-        if not job:
-            return jsonify({"error": "recon job not found"}), 404
-        findings = list_recon_findings(conn, job_id=job_id)
-        artifacts = list_recon_artifacts(conn, job_id=job_id)
-        return jsonify({"job": job, "findings": findings, "artifacts": artifacts})
-    finally:
-        conn.close()
-
-
-@app.route("/api/recon/export/<job_id>", methods=["GET"])
-def api_recon_export(job_id):
-    export_format = (request.args.get("format") or "json").strip().lower()
-    if export_format not in {"json", "csv"}:
-        return jsonify({"error": "format must be json or csv"}), 400
-    conn = _get_db()
-    try:
-        job = get_recon_job(conn, job_id)
-        if not job:
-            return jsonify({"error": "recon job not found"}), 404
-        findings = list_recon_findings(conn, job_id=job_id)
-    finally:
-        conn.close()
-
-    filename_base = f"recon_{job_id}"
-    if export_format == "json":
-        payload = {
-            "job": job,
-            "findings": findings,
-        }
-        body = json.dumps(payload, ensure_ascii=False, indent=2)
-        return Response(
-            body,
-            mimetype="application/json",
-            headers={"Content-Disposition": f'attachment; filename=\"{filename_base}.json\"'},
-        )
-
-    lines = ["platform,url,category,tool_status,confidence_tier"]
-    for f in findings:
-        row = [
-            str(f.get("platform") or "").replace(",", " "),
-            str(f.get("url") or "").replace(",", " "),
-            str(f.get("category") or "").replace(",", " "),
-            str(f.get("tool_status") or "").replace(",", " "),
-            str(f.get("confidence_tier") or "").replace(",", " "),
-        ]
-        lines.append(",".join(row))
-    return Response(
-        "\n".join(lines) + "\n",
-        mimetype="text/csv",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename_base}.csv\"'},
-    )
-
-
-@app.route("/api/recon/report/<job_id>", methods=["GET"])
-def api_recon_report_download(job_id):
-    conn = _get_db()
-    try:
-        job = get_recon_job(conn, job_id)
-        if not job:
-            return jsonify({"error": "recon job not found"}), 404
-        artifacts = list_recon_artifacts(conn, job_id=job_id)
-    finally:
-        conn.close()
-
-    priority = {"pdf_instalab": 0, "pdf": 1, "pdf_blackbird": 2}
-    pdf_artifacts = [
-        a
-        for a in artifacts
-        if str(a.get("artifact_type") or "").lower() in priority
-    ]
-    if not pdf_artifacts:
-        return jsonify({"error": "report not found for this recon job"}), 404
-    pdf_artifacts.sort(key=lambda a: priority.get(str(a.get("artifact_type") or "").lower(), 99))
-    path = Path(str(pdf_artifacts[0].get("path") or ""))
-    if not path.exists() or not path.is_file():
-        return jsonify({"error": "report file missing on disk"}), 410
-    return send_from_directory(path.parent, path.name, as_attachment=True, mimetype="application/pdf")
-
-
-@app.route("/api/recon/ai/setup", methods=["POST"])
-def api_recon_ai_setup():
-    cfg = _get_config()
-    blackbird_cmd = str(cfg.get("recon_blackbird_cmd") or "").strip()
-    cmd = shlex.split(blackbird_cmd)
-    if not cmd:
-        return jsonify({"error": "recon_blackbird_cmd is empty"}), 400
-    cmd.append("--setup-ai")
-
-    runtime_key_path = _blackbird_ai_key_path(cfg)
-    runtime_cwd = runtime_key_path.parent
-    runtime_cwd.mkdir(parents=True, exist_ok=True)
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=60,
-            check=False,
-            cwd=runtime_cwd,
-            input="y\n",
-        )
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "blackbird AI setup timed out"}), 504
-
-    if proc.returncode != 0:
-        return jsonify(
-            {
-                "error": "blackbird AI setup failed",
-                "returncode": proc.returncode,
-                "stderr": (proc.stderr or "")[-800:],
-            }
-        ), 500
-
-    return jsonify(
-        {
-            "ok": runtime_key_path.exists(),
-            "key_configured": runtime_key_path.exists(),
-            "stdout_tail": (proc.stdout or "")[-500:],
-        }
-    )
-
-
-@app.route("/api/recon/health", methods=["GET"])
-def api_recon_health():
-    cfg = _get_config()
-    blackbird_cmd = str(cfg.get("recon_blackbird_cmd") or "").strip()
-    phoneinfoga_cmd = str(cfg.get("recon_phoneinfoga_cmd") or "").strip()
-    blackbird_exec = shlex.split(blackbird_cmd)[0] if blackbird_cmd else ""
-    phoneinfoga_exec = shlex.split(phoneinfoga_cmd)[0] if phoneinfoga_cmd else ""
-
-    payload = {
-        "status": "ok",
-        "enabled": bool(cfg.get("recon_enabled", True)),
-        "ai": {
-            "enabled": bool(cfg.get("recon_blackbird_ai_enabled", False)),
-            "key_configured": _blackbird_ai_key_path(cfg).exists(),
-        },
-        "queue": {
-            "running": _recon_state_counts()["running"],
-            "queued": _recon_state_counts()["queued"],
-            "max_concurrency": int(cfg.get("recon_max_concurrency", 2) or 2),
-            "queue_limit": int(cfg.get("recon_queue_limit", 20) or 20),
-        },
-        "tools": {
-            "blackbird": {
-                "command": blackbird_cmd,
-                "executable_exists": bool(shutil.which(blackbird_exec)) if blackbird_exec else False,
-            },
-            "phoneinfoga": {
-                "command": phoneinfoga_cmd,
-                "executable_exists": bool(shutil.which(phoneinfoga_exec)) if phoneinfoga_exec else False,
-            },
-        },
-    }
-    if not payload["enabled"]:
-        payload["status"] = "degraded"
-    elif not payload["tools"]["blackbird"]["executable_exists"]:
-        payload["status"] = "degraded"
-    return jsonify(payload)
-
-
-@app.route("/api/import/osintgraph", methods=["POST"])
-def api_import_osintgraph():
-    data = request.get_json(silent=True) or {}
-    target_username = (data.get("target_username") or "").strip()
-    login_username = (data.get("login_username") or "").strip()
-    followers = data.get("followers") or []
-    followees = data.get("followees") or []
-    if not target_username or not login_username:
-        return jsonify({"error": "target_username and login_username are required"}), 400
-    if not isinstance(followers, list) or not isinstance(followees, list):
-        return jsonify({"error": "followers and followees must be lists"}), 400
-    try:
-        followers = [str(u).strip() for u in followers if str(u).strip()]
-        followees = [str(u).strip() for u in followees if str(u).strip()]
-    except Exception:
-        return jsonify({"error": "invalid follower/followee values"}), 400
-    tz = ZoneInfo("America/New_York")
-    timestamp = (data.get("timestamp") or "").strip() or datetime.now(tz).strftime("%Y-%m-%d_%H-%M-%S")
-    followers_fetch_seconds = data.get("followers_fetch_seconds")
-    followees_fetch_seconds = data.get("followees_fetch_seconds")
-    followers_rate = None
-    followees_rate = None
-    try:
-        if followers_fetch_seconds:
-            followers_rate = round(len(followers) / float(followers_fetch_seconds), 3)
-        if followees_fetch_seconds:
-            followees_rate = round(len(followees) / float(followees_fetch_seconds), 3)
-    except Exception:
-        pass
-    non_followbacks = sorted(set(followees) - set(followers))
-    try:
-        changes, run_id = write_run_metadata(
-            db_path=str(DB_PATH_DEFAULT),
-            login_username=login_username,
-            target_username=target_username,
-            timestamp=timestamp,
-            followers=followers,
-            followees=followees,
-            non_followbacks_count=len(non_followbacks),
-            followers_fetch_seconds=followers_fetch_seconds,
-            followees_fetch_seconds=followees_fetch_seconds,
-            followers_rate=followers_rate,
-            followees_rate=followees_rate,
-        )
-        return jsonify({"ok": True, "run_id": run_id, "changes": changes})
-    except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": str(exc)}), 500
-
-
 @app.route("/api/last_status", methods=["GET"])
 def api_last_status():
     """Return last run per target and overall latest (by id)."""
@@ -5387,6 +4903,8 @@ def api_last_status():
             JOIN (
                 SELECT target_username, MAX(id) AS max_id
                 FROM runs
+                WHERE COALESCE(snapshot_complete, 1) = 1
+                  AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE '%profile_only%')
                 GROUP BY target_username
             ) m ON r.id = m.max_id
             ORDER BY r.id DESC
@@ -5398,6 +4916,8 @@ def api_last_status():
             SELECT id, target_username, login_username, timestamp,
                    followers_count, followees_count, non_followbacks_count, created_at
             FROM runs
+            WHERE COALESCE(snapshot_complete, 1) = 1
+              AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE '%profile_only%')
             ORDER BY id DESC
             LIMIT 1
             """
@@ -5441,6 +4961,8 @@ def api_targets_summary():
                 ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp DESC, id DESC) as rn
             FROM runs
             WHERE target_username IN ({placeholders})
+              AND COALESCE(snapshot_complete, 1) = 1
+              AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
         ) ranked
         WHERE rn <= 2
         """
@@ -5448,7 +4970,7 @@ def api_targets_summary():
         if is_postgres():
             latest_query = latest_query.replace("?", "%s")
         
-        cur = conn.execute(latest_query, tuple(targets))
+        cur = conn.execute(latest_query, tuple(targets) + ("%profile_only%",))
         rows_by_target = {}
         for row in cur.fetchall():
             row_dict = dict(row)
@@ -5467,6 +4989,8 @@ def api_targets_summary():
                 ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp ASC) as rn
             FROM runs
             WHERE target_username IN ({placeholders})
+              AND COALESCE(snapshot_complete, 1) = 1
+              AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
         ) ranked
         WHERE rn <= 30
         ORDER BY target_username, rn
@@ -5475,7 +4999,7 @@ def api_targets_summary():
         if is_postgres():
             history_query = history_query.replace("?", "%s")
         
-        hist_cur = conn.execute(history_query, tuple(targets))
+        hist_cur = conn.execute(history_query, tuple(targets) + ("%profile_only%",))
         history_by_target = {}
         for row in hist_cur.fetchall():
             row_dict = dict(row)
@@ -5496,13 +5020,15 @@ def api_targets_summary():
         FROM runs
         WHERE target_username IN ({placeholders})
           AND timestamp >= ?
+          AND COALESCE(snapshot_complete, 1) = 1
+          AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
         GROUP BY target_username
         """
         
         if is_postgres():
             week_query = week_query.replace("?", "%s")
         
-        week_cur = conn.execute(week_query, tuple(targets) + (cutoff_str,))
+        week_cur = conn.execute(week_query, tuple(targets) + (cutoff_str, "%profile_only%"))
         week_by_target = {}
         for row in week_cur.fetchall():
             row_dict = dict(row)
@@ -5681,6 +5207,8 @@ def api_ui_targets():
                        ROW_NUMBER() OVER (PARTITION BY target_username ORDER BY timestamp DESC, id DESC) as rn
                 FROM runs
                 WHERE target_username IN ({placeholders})
+                  AND COALESCE(snapshot_complete, 1) = 1
+                  AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
             ) ranked
             WHERE rn = 1
         """
@@ -5692,6 +5220,7 @@ def api_ui_targets():
                 FROM runs
                 WHERE target_username IN ({placeholders})
                   AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
+                  AND COALESCE(snapshot_complete, 1) = 1
             ) ranked
             WHERE rn = 1
         """
@@ -5711,7 +5240,10 @@ def api_ui_targets():
             WHERE target_username IN ({placeholders})
             GROUP BY target_username
         """
-        latest_rows = {row["target_username"]: dict(row) for row in conn.execute(latest_query, tuple(targets)).fetchall()}
+        latest_rows = {
+            row["target_username"]: dict(row)
+            for row in conn.execute(latest_query, tuple(targets) + ("%profile_only%",)).fetchall()
+        }
         latest_full_rows = {
             row["target_username"]: dict(row)
             for row in conn.execute(latest_full_query, tuple(targets) + ("%profile_only%",)).fetchall()
@@ -6287,6 +5819,7 @@ def api_run_detail(run_id):
             SELECT id FROM runs
             WHERE target_username = ?
               AND (timestamp < ? OR (timestamp = ? AND id < ?))
+              AND COALESCE(snapshot_complete, 1) = 1
               AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
             ORDER BY timestamp DESC, id DESC
             LIMIT 1
@@ -6328,9 +5861,13 @@ def api_run_detail(run_id):
             target_username=run["target_username"],
             usernames=followee_change_names,
         )
+        profile_map = load_account_profiles(conn, set(follower_change_names) | set(followee_change_names))
+        event_status_map = _load_relationship_event_status_rows(conn, run_id=run_id)
         run["followers_added_details"] = _build_relationship_change_details(
             run["followers_added_list"],
             follower_hist,
+            profile_map,
+            event_status_map,
             relation_type="followers",
             event_type="added",
             observed_at=run["timestamp"],
@@ -6339,6 +5876,8 @@ def api_run_detail(run_id):
         run["followers_removed_details"] = _build_relationship_change_details(
             run["followers_removed_list"],
             follower_hist,
+            profile_map,
+            event_status_map,
             relation_type="followers",
             event_type="removed",
             observed_at=run["timestamp"],
@@ -6347,6 +5886,8 @@ def api_run_detail(run_id):
         run["followees_added_details"] = _build_relationship_change_details(
             run["followees_added_list"],
             followee_hist,
+            profile_map,
+            event_status_map,
             relation_type="following",
             event_type="added",
             observed_at=run["timestamp"],
@@ -6355,6 +5896,8 @@ def api_run_detail(run_id):
         run["followees_removed_details"] = _build_relationship_change_details(
             run["followees_removed_list"],
             followee_hist,
+            profile_map,
+            event_status_map,
             relation_type="following",
             event_type="removed",
             observed_at=run["timestamp"],
@@ -6365,7 +5908,8 @@ def api_run_detail(run_id):
             for r in conn.execute(
                 """
                 SELECT id, target_username, login_username, username,
-                       relation_type, event_type, observed_at, run_id, prev_run_id
+                       relation_type, event_type, observed_at, run_id, prev_run_id,
+                       account_status, account_status_checked_at, account_status_error
                 FROM relationship_events
                 WHERE run_id = ?
                 ORDER BY relation_type, event_type, username
@@ -6395,13 +5939,38 @@ def _load_relationship_history_rows(conn, *, table, target_username, usernames):
     return {row["username"]: dict(row) for row in rows}
 
 
-def _build_relationship_change_details(usernames, history_map, *, relation_type, event_type, observed_at, run_id):
+def _load_relationship_event_status_rows(conn, *, run_id):
+    rows = conn.execute(
+        """
+        SELECT username, relation_type, event_type,
+               account_status, account_status_checked_at, account_status_error
+        FROM relationship_events
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchall()
+    return {
+        (str(row["relation_type"] or ""), str(row["event_type"] or ""), str(row["username"] or "").lower()): dict(row)
+        for row in rows
+    }
+
+
+def _build_relationship_change_details(usernames, history_map, profile_map, event_status_map, *, relation_type, event_type, observed_at, run_id):
     details = []
     for username in usernames:
         row = history_map.get(username) or {}
+        profile = profile_map.get(str(username or "").strip().lower()) or {}
+        event_status = event_status_map.get((relation_type, event_type, str(username or "").strip().lower())) or {}
         details.append(
             {
                 "username": username,
+                "full_name": profile.get("full_name"),
+                "profile_pic_url": profile.get("profile_pic_url"),
+                "profile_pic_url_hd": profile.get("profile_pic_url_hd"),
+                "profile_refreshed_at": profile.get("last_refreshed_at"),
+                "account_status": event_status.get("account_status"),
+                "account_status_checked_at": event_status.get("account_status_checked_at"),
+                "account_status_error": event_status.get("account_status_error"),
                 "relation_type": relation_type,
                 "event_type": event_type,
                 "observed_at": observed_at,
@@ -6764,6 +6333,218 @@ def _queue_run(login_username, target_username, *, source="api", two_factor_code
     return job_id
 
 
+def _profile_backfill_log(event, **payload):
+    entry = {"timestamp": datetime.now(LOCAL_TZ).isoformat(), "event": event, **payload}
+    ACCOUNT_PROFILE_BACKFILL_LOG.append(entry)
+    del ACCOUNT_PROFILE_BACKFILL_LOG[:-200]
+
+
+def _profile_backfill_candidates(*, target_username=None, limit=100):
+    target_username = _sanitize_target_username(target_username or "")
+    limit = max(1, min(int(limit or 100), 1000))
+    target_filter = "AND r.target_username = ?" if target_username else ""
+    query = f"""
+        WITH candidates AS (
+            SELECT LOWER(e.username) AS username, 0 AS priority
+            FROM relationship_events e
+            JOIN runs r ON r.id = e.run_id
+            WHERE COALESCE(r.snapshot_complete, 1) = 1
+              AND (r.snapshot_note IS NULL OR LOWER(r.snapshot_note) NOT LIKE ?)
+              {target_filter}
+            UNION
+            SELECT LOWER(rf.username) AS username, 1 AS priority
+            FROM run_followers rf
+            JOIN runs r ON r.id = rf.run_id
+            WHERE COALESCE(r.snapshot_complete, 1) = 1
+              AND (r.snapshot_note IS NULL OR LOWER(r.snapshot_note) NOT LIKE ?)
+              {target_filter}
+            UNION
+            SELECT LOWER(rfe.username) AS username, 1 AS priority
+            FROM run_followees rfe
+            JOIN runs r ON r.id = rfe.run_id
+            WHERE COALESCE(r.snapshot_complete, 1) = 1
+              AND (r.snapshot_note IS NULL OR LOWER(r.snapshot_note) NOT LIKE ?)
+              {target_filter}
+        ),
+        members AS (
+            SELECT username, MIN(priority) AS priority
+            FROM candidates
+            GROUP BY username
+        )
+        SELECT m.username
+        FROM members m
+        LEFT JOIN account_profiles p ON p.username = m.username
+        WHERE p.username IS NULL
+        ORDER BY m.priority, m.username
+        LIMIT ?
+    """
+    params = ["%profile_only%"]
+    if target_username:
+        params.append(target_username)
+    params.append("%profile_only%")
+    if target_username:
+        params.append(target_username)
+    params.append("%profile_only%")
+    if target_username:
+        params.append(target_username)
+    params.append(limit)
+    conn = get_db()
+    try:
+        _init_run_db(conn)
+        return [row["username"] for row in conn.execute(query, tuple(params)).fetchall()]
+    finally:
+        conn.close()
+
+
+def _account_profile_backfill_worker(*, login_username, target_username=None, limit=100, delay_min=1.5, delay_max=3.5):
+    try:
+        candidates = _profile_backfill_candidates(target_username=target_username, limit=limit)
+        ACCOUNT_PROFILE_BACKFILL_JOB.update(
+            {
+                "state": "running",
+                "total": len(candidates),
+                "processed": 0,
+                "saved": 0,
+                "errors": 0,
+                "skipped": 0,
+                "last_username": None,
+                "message": "running",
+            }
+        )
+        _profile_backfill_log("started", login_username=login_username, target_username=target_username, total=len(candidates))
+        if not candidates:
+            ACCOUNT_PROFILE_BACKFILL_JOB.update(
+                {
+                    "state": "done",
+                    "finished_at": datetime.now(LOCAL_TZ).isoformat(),
+                    "message": "no missing profile metadata found",
+                }
+            )
+            _profile_backfill_log("done", processed=0, saved=0, errors=0)
+            return
+        creds = _get_credentials(login_username)
+        from private_api_tracker import backfill_account_profiles
+
+        def progress(payload):
+            ACCOUNT_PROFILE_BACKFILL_JOB.update(
+                {
+                    "processed": int(payload.get("processed") or 0),
+                    "saved": int(payload.get("saved") or 0),
+                    "errors": int(payload.get("errors") or 0),
+                    "skipped": int(payload.get("skipped") or 0),
+                    "last_username": payload.get("username"),
+                    "message": payload.get("error") or "running",
+                }
+            )
+
+        result = backfill_account_profiles(
+            login_username=login_username,
+            login_password=creds.get("login_password") or "",
+            totp_seed=creds.get("totp_seed"),
+            usernames=candidates,
+            delay_min=delay_min,
+            delay_max=delay_max,
+            cancel_check=lambda: ACCOUNT_PROFILE_BACKFILL_CANCEL.is_set(),
+            progress=progress,
+        )
+        ACCOUNT_PROFILE_BACKFILL_JOB.update(
+            {
+                "state": "cancelled" if result.get("cancelled") else "done",
+                "finished_at": result.get("finished_at") or datetime.now(LOCAL_TZ).isoformat(),
+                "processed": result.get("processed", 0),
+                "saved": result.get("saved", 0),
+                "errors": result.get("errors", 0),
+                "skipped": result.get("skipped", 0),
+                "message": "cancelled" if result.get("cancelled") else "done",
+            }
+        )
+        _profile_backfill_log("finished", **result)
+    except Exception as exc:  # noqa: BLE001
+        ACCOUNT_PROFILE_BACKFILL_JOB.update(
+            {
+                "state": "error",
+                "finished_at": datetime.now(LOCAL_TZ).isoformat(),
+                "message": str(exc),
+            }
+        )
+        _profile_backfill_log("error", error=str(exc))
+    finally:
+        ACCOUNT_PROFILE_BACKFILL_CANCEL.clear()
+        try:
+            ACCOUNT_PROFILE_BACKFILL_LOCK.release()
+        except RuntimeError:
+            pass
+
+
+@app.route("/api/account-profiles/backfill", methods=["GET"])
+def api_account_profiles_backfill_status():
+    return jsonify({"job": ACCOUNT_PROFILE_BACKFILL_JOB, "log": ACCOUNT_PROFILE_BACKFILL_LOG[-50:]})
+
+
+@app.route("/api/account-profiles/backfill", methods=["POST"])
+def api_account_profiles_backfill_start():
+    data = request.get_json(silent=True) or {}
+    login_username = _sanitize_login_username(data.get("login_username") or "")
+    target_username = _sanitize_target_username(data.get("target_username") or "")
+    try:
+        limit = int(data.get("limit") or 100)
+    except Exception:
+        limit = 100
+    limit = max(1, min(limit, 1000))
+    try:
+        delay_min = float(data.get("delay_min") if data.get("delay_min") is not None else 1.5)
+        delay_max = float(data.get("delay_max") if data.get("delay_max") is not None else 3.5)
+    except Exception:
+        delay_min, delay_max = 1.5, 3.5
+    delay_min = max(0.5, min(delay_min, 30.0))
+    delay_max = max(delay_min, min(delay_max, 60.0))
+    if not login_username:
+        return jsonify({"error": "login_username is required"}), 400
+    try:
+        _get_credentials(login_username)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 400
+    if not ACCOUNT_PROFILE_BACKFILL_LOCK.acquire(blocking=False):
+        return jsonify({"error": "profile backfill already running", "job": ACCOUNT_PROFILE_BACKFILL_JOB}), 409
+    ACCOUNT_PROFILE_BACKFILL_CANCEL.clear()
+    ACCOUNT_PROFILE_BACKFILL_JOB.update(
+        {
+            "state": "queued",
+            "started_at": datetime.now(LOCAL_TZ).isoformat(),
+            "finished_at": None,
+            "login_username": login_username,
+            "target_username": target_username or None,
+            "limit": limit,
+            "total": 0,
+            "processed": 0,
+            "saved": 0,
+            "errors": 0,
+            "skipped": 0,
+            "last_username": None,
+            "message": "queued",
+        }
+    )
+    executor.submit(
+        _account_profile_backfill_worker,
+        login_username=login_username,
+        target_username=target_username or None,
+        limit=limit,
+        delay_min=delay_min,
+        delay_max=delay_max,
+    )
+    return jsonify({"started": True, "job": ACCOUNT_PROFILE_BACKFILL_JOB})
+
+
+@app.route("/api/account-profiles/backfill/cancel", methods=["POST"])
+def api_account_profiles_backfill_cancel():
+    if ACCOUNT_PROFILE_BACKFILL_JOB.get("state") not in {"queued", "running"}:
+        return jsonify({"error": "no profile backfill job running"}), 400
+    ACCOUNT_PROFILE_BACKFILL_CANCEL.set()
+    ACCOUNT_PROFILE_BACKFILL_JOB["state"] = "cancelling"
+    ACCOUNT_PROFILE_BACKFILL_JOB["message"] = "cancel requested"
+    return jsonify({"cancelled": True, "job": ACCOUNT_PROFILE_BACKFILL_JOB})
+
+
 @app.route("/api/run", methods=["POST"])
 def api_run():
     data = request.get_json(force=True)
@@ -6881,6 +6662,96 @@ def api_job_detail(job_id):
             "trace_tail": _tail_file(trace_path, lines=40),
         }
     )
+
+
+def _compact_job_summary(job_id: str) -> dict | None:
+    job_dir = JOB_TMP_DIR / f"job_{job_id}"
+    record = _load_run_job_record(job_id)
+    if not job_dir.exists() and not record:
+        return None
+
+    progress = _read_json_file(job_dir / "progress.json") if job_dir.exists() else None
+    result = _read_json_file(job_dir / "result.json") if job_dir.exists() else None
+    progress = progress if isinstance(progress, dict) else {}
+    result = result if isinstance(result, dict) else None
+    meta = _run_record_meta(record) if record else None
+    worker_out = _tail_file(job_dir / "worker.out", lines=8) if job_dir.exists() else ""
+    worker_err = _tail_file(job_dir / "worker.err", lines=8) if job_dir.exists() else ""
+    phase = str(progress.get("phase") or "")
+    last_page_at = progress.get("last_page_at")
+    updated_at = progress.get("updated_at")
+    if not isinstance(last_page_at, (int, float)):
+        last_page_at = None
+    if not isinstance(updated_at, (int, float)):
+        updated_at = None
+
+    following = {
+        "count": progress.get("count") if phase == "following" else progress.get("following_count"),
+        "expected_total": progress.get("expected_total") if phase == "following" else progress.get("following_expected_total"),
+        "missing_count": progress.get("missing_count") if phase == "following" else progress.get("following_missing_count"),
+    }
+    followers = {
+        "count": progress.get("count") if phase == "followers" else progress.get("followers_count"),
+        "expected_total": progress.get("expected_total") if phase == "followers" else progress.get("followers_expected_total"),
+        "missing_count": progress.get("missing_count") if phase == "followers" else progress.get("followers_missing_count"),
+    }
+    alternate = {
+        "running": bool(progress.get("alternate_running")),
+        "endpoint": progress.get("alternate_endpoint"),
+        "page_index": progress.get("alternate_page_index"),
+        "added": progress.get("alternate_added"),
+        "page_added": progress.get("alternate_page_added"),
+        "duplicates_total": progress.get("alternate_duplicates_total"),
+        "has_more": progress.get("alternate_has_more"),
+    }
+    retry = {
+        "running": bool(progress.get("retrying")),
+        "complete": bool(progress.get("retry_complete")),
+        "attempt": progress.get("attempt"),
+        "added": progress.get("retry_added"),
+        "missing_count": progress.get("missing_count"),
+    }
+    now_ts = time.time()
+    return {
+        "job_id": job_id,
+        "state": (meta or {}).get("state") or ("running" if job_dir.exists() else "unknown"),
+        "target_username": (meta or {}).get("target_username"),
+        "login_username": (meta or {}).get("login_username"),
+        "source": (meta or {}).get("source"),
+        "submitted_at": (meta or {}).get("submitted_at"),
+        "started_at": (meta or {}).get("started_at"),
+        "finished_at": (meta or {}).get("finished_at"),
+        "phase": phase or None,
+        "count": progress.get("count"),
+        "expected_total": progress.get("expected_total"),
+        "missing_count": progress.get("missing_count"),
+        "page_index": progress.get("page_index"),
+        "page_raw_count": progress.get("page_raw_count"),
+        "page_unique_count": progress.get("page_unique_count"),
+        "page_unique_new": progress.get("page_unique_new"),
+        "duplicates_total": progress.get("duplicates_total"),
+        "has_more": progress.get("has_more"),
+        "last_page_at": last_page_at,
+        "updated_at": updated_at,
+        "seconds_since_last_page": round(now_ts - last_page_at, 1) if last_page_at else None,
+        "seconds_since_update": round(now_ts - updated_at, 1) if updated_at else None,
+        "followers": followers,
+        "following": following,
+        "alternate": alternate,
+        "retry": retry,
+        "result": result or (record or {}).get("result"),
+        "last_worker_message": worker_err.strip().splitlines()[-1] if worker_err.strip() else (worker_out.strip().splitlines()[-1] if worker_out.strip() else ""),
+        "error": (meta or {}).get("error_message"),
+        "error_code": (meta or {}).get("error_code"),
+    }
+
+
+@app.route("/api/jobs/<job_id>/summary", methods=["GET"])
+def api_job_summary(job_id):
+    summary = _compact_job_summary(job_id)
+    if not summary:
+        return jsonify({"error": "job not found"}), 404
+    return jsonify(summary)
 
 
 @app.route("/api/jobs/latest", methods=["GET"])
@@ -7148,10 +7019,6 @@ def api_config_update():
         updated = _set_config_values(cleaned)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    try:
-        _schedule_recon_maintenance_job()
-    except Exception:
-        pass
     cfg = _get_config(force=True)
     return jsonify(
         {
@@ -7484,6 +7351,7 @@ def api_run_cancel():
     job_id = data.get("job_id")
     worker_pid = None
     queued_cancelled = False
+    stale_running_cancelled = False
     record = None
     if job_id:
         record = _load_run_job_record(str(job_id))
@@ -7499,16 +7367,7 @@ def api_run_cancel():
                     worker_pid = job.get("worker_pid")
                     break
     if record and str(record.get("status") or "") == "queued":
-        _update_run_job_record(
-            str(job_id),
-            status="cancelled",
-            finished_at=datetime.now(LOCAL_TZ).isoformat(),
-            cancel_requested=True,
-            state_reason="cancel_requested",
-            error_message="job cancelled while queued",
-        )
-        _record_run_job_event(str(job_id), "cancelled", {"reason": "cancel_requested", "phase": "queued"})
-        _run_state_set(str(job_id), "cancelled", reason="cancel_requested")
+        _finalize_cancelled_run_job(str(job_id), message="job cancelled while queued")
         queued_cancelled = True
     if not login_username or not target_username:
         return jsonify({"error": "login_username and target_username are required"}), 400
@@ -7529,9 +7388,19 @@ def api_run_cancel():
             os.kill(int(worker_pid), signal.SIGTERM)
         except Exception:
             pass
-    if job_id and (job_id in RUN_META) and queued_cancelled:
-        _run_state_set(job_id, "cancelled", reason="cancel_requested")
-    return jsonify({"cancelled": True, "queued_cancelled": queued_cancelled})
+    if job_id and record and str(record.get("status") or "") == "running":
+        fut = RUN_FUTURES.get(str(job_id))
+        active_for_job = bool(job and str(job.get("job_id") or "") == str(job_id))
+        if not active_for_job and (not fut or fut.done()):
+            _finalize_cancelled_run_job(str(job_id), message="stale running job cancelled")
+            stale_running_cancelled = True
+    return jsonify(
+        {
+            "cancelled": True,
+            "queued_cancelled": queued_cancelled,
+            "stale_running_cancelled": stale_running_cancelled,
+        }
+    )
 
 
 @app.route("/api/run/<int:run_id>", methods=["DELETE"])

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { NavLink, Route, Routes } from "react-router-dom";
+import { NavLink, Route, Routes, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Download, Search, UserMinus, UserPlus, Users, UserCheck, ArrowRightLeft } from "lucide-react";
 import {
   addLogin,
   cancelAccountCreate,
@@ -28,7 +29,7 @@ import {
   getUnfollowStatus,
   getUnfollowPreview,
   getAuthTrace,
-  getRunJobDetail,
+  getRunJobSummary,
   getRunJobStatus,
   resetLogin,
   runAuthPreflight,
@@ -39,6 +40,7 @@ import {
   startAccountCreate,
   startUnfollow,
   setLoginNewPassword,
+  setChallengeEmail,
   submitChallengeCode,
   testProxy,
   undoRun,
@@ -62,11 +64,42 @@ function formatTime(value?: string): string {
   }).format(d);
 }
 
+function formatEpochTime(value?: number | null): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return formatTime(new Date(value * 1000).toISOString());
+}
+
+function formatSecondsAge(value?: number | null): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return `${Math.max(0, Math.round(value))}s ago`;
+}
+
 function formatDateSpan(start?: string | null, end?: string | null): string {
   if (!start && !end) return "-";
   if (start && end) return `${formatTime(start)} -> ${formatTime(end)}`;
   if (start) return `Since ${formatTime(start)}`;
   return `Until ${formatTime(end || undefined)}`;
+}
+
+function formatRelativeAge(value?: string | null): string {
+  if (!value) return "No full run yet";
+  let normalized = value;
+  const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})$/);
+  if (m) {
+    normalized = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`;
+  }
+  const then = new Date(normalized);
+  if (Number.isNaN(then.getTime())) return formatTime(value || undefined);
+  const diffMs = Date.now() - then.getTime();
+  if (diffMs < 0) return "Just now";
+  const hours = Math.floor(diffMs / (1000 * 60 * 60));
+  if (hours < 1) {
+    const minutes = Math.max(1, Math.floor(diffMs / (1000 * 60)));
+    return `${minutes}m ago`;
+  }
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
 }
 
 function instagramProfileUrl(username?: string): string {
@@ -85,14 +118,38 @@ function usernameKey(value?: string): string {
 
 const targetHandleInputProps = {
   type: "text" as const,
-  inputMode: "url" as const,
-  autoComplete: "off",
+  inputMode: "text" as const,
+  autoComplete: "new-password",
   autoCorrect: "off" as const,
   autoCapitalize: "none" as const,
   spellCheck: false,
+  name: "target_handle",
+  enterKeyHint: "go" as const,
+  "data-1p-ignore": "true",
+  "data-lpignore": "true",
 };
 
 type LaunchSchedulePreset = "once_daily" | "twice_daily" | "weekly" | "every_n_days";
+type RunChangeDetail = {
+  username?: string;
+  full_name?: string | null;
+  profile_pic_url?: string | null;
+  profile_pic_url_hd?: string | null;
+  avatar_url?: string | null;
+  account_status?: string | null;
+  account_status_checked_at?: string | null;
+  account_status_error?: string | null;
+  relation_type?: string;
+  event_type?: string;
+  observed_at?: string;
+  first_seen?: string | null;
+  last_seen?: string | null;
+  first_seen_run_id?: number | null;
+  last_seen_run_id?: number | null;
+  first_seen_known?: number | boolean | null;
+  active?: number | boolean | null;
+  unfollowed_at?: string | null;
+};
 
 const WEEKDAY_OPTIONS = [
   { value: "0", label: "Sunday" },
@@ -116,6 +173,39 @@ function formatClockLabel(value?: string): string {
     hour: "numeric",
     minute: "2-digit",
   }).format(stamp);
+}
+
+function changeHistoryLabel(item: RunChangeDetail): string {
+  if (item.event_type === "removed") {
+    if (item.first_seen && item.first_seen_known) return `First seen ${formatTime(item.first_seen)}`;
+    if (item.first_seen) return `Seen since first saved run`;
+    return "First seen unavailable";
+  }
+  if (item.first_seen && item.first_seen === item.observed_at) return "First seen in this run";
+  if (item.first_seen) return `First seen ${formatTime(item.first_seen)}`;
+  return "History unavailable";
+}
+
+function changeAvatarUrl(item: RunChangeDetail): string | null {
+  return item.profile_pic_url_hd || item.profile_pic_url || item.avatar_url || null;
+}
+
+function accountStatusLabel(item: RunChangeDetail): string {
+  if (item.event_type !== "removed") return "Present in this run";
+  switch (item.account_status) {
+    case "active":
+      return "Account active; true list removal";
+    case "not_found":
+      return "Account unavailable";
+    case "check_failed_auth":
+      return "Status check needs login";
+    case "check_failed_rate_limited":
+      return "Status check rate limited";
+    case "check_failed":
+      return "Status check failed";
+    default:
+      return "Account status not checked";
+  }
 }
 
 function parseLegacyCronSchedule(interval?: string): Partial<{
@@ -367,39 +457,51 @@ function AppShell({ children }: { children: React.ReactNode }) {
     window.localStorage.setItem("instalab-theme", theme);
   }, [theme]);
 
+  const navItems = [
+    { to: "/", label: "Home", helper: "Overview", end: true },
+    { to: "/targets", label: "Targets", helper: "Tracked profiles" },
+    { to: "/activity", label: "Activity", helper: "Run history" },
+    { to: "/operations", label: "Operations", helper: "Launch queue" },
+    { to: "/accounts", label: "Accounts", helper: "Collectors" },
+    { to: "/settings", label: "Settings", helper: "Runtime" },
+  ];
+
   return (
     <div className="app-shell">
-      <header className="shell-header">
+      <aside className="shell-header" aria-label="Primary navigation">
         <div className="shell-brand-block">
           <div className="brand">InstaLab</div>
+          <div className="shell-kicker">Operations console</div>
         </div>
         <nav className="shell-nav">
-          <NavLink to="/">
-            Home
-          </NavLink>
-          <NavLink to="/targets">Targets</NavLink>
-          <NavLink to="/activity">Activity</NavLink>
-          <NavLink to="/operations">Operations</NavLink>
-          <NavLink to="/settings">Settings</NavLink>
+          {navItems.map((item) => (
+            <NavLink key={item.to} to={item.to} end={item.end}>
+              <span>{item.label}</span>
+              <small>{item.helper}</small>
+            </NavLink>
+          ))}
         </nav>
-      </header>
+        <button
+          className="theme-toggle theme-toggle--rail"
+          type="button"
+          onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+        >
+          <span aria-hidden="true">{theme === "dark" ? "Light" : "Dark"}</span>
+          <span className="sr-only">
+            {theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          </span>
+        </button>
+      </aside>
 
       <main className="content">{children}</main>
 
       <nav className="mobile-nav">
-        <NavLink to="/">
-          Home
-        </NavLink>
-        <NavLink to="/targets">Targets</NavLink>
-        <NavLink to="/activity" aria-label="Activity">
-          Changes
-        </NavLink>
-        <NavLink to="/operations" aria-label="Operations">
-          Queue
-        </NavLink>
-        <NavLink to="/settings" aria-label="Settings">
-          Prefs
-        </NavLink>
+        {navItems.map((item) => (
+          <NavLink key={item.to} to={item.to} end={item.end}>
+            {item.label}
+          </NavLink>
+        ))}
       </nav>
       <button
         className="theme-toggle"
@@ -719,9 +821,9 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
     enabled: Boolean(launchJobId),
     refetchInterval: 3000,
   });
-  const runJobDetailQ = useQuery({
-    queryKey: ["run-job-detail", launchJobId],
-    queryFn: () => getRunJobDetail(launchJobId),
+  const runJobSummaryQ = useQuery({
+    queryKey: ["run-job-summary", launchJobId],
+    queryFn: () => getRunJobSummary(launchJobId),
     enabled: Boolean(launchJobId),
     refetchInterval: 4000,
   });
@@ -787,7 +889,7 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
   const runMeta = runJobQ.data?.meta;
   const runDone = Boolean(runJobQ.data?.done);
   const runErrorCode = String(runPayload?.error_code || "").toLowerCase();
-  const promptHint = (runJobDetailQ.data?.worker_out_tail || "").toLowerCase().includes("waiting for code");
+  const promptHint = (runJobSummaryQ.data?.last_worker_message || "").toLowerCase().includes("waiting for code");
   const interactiveChallenge =
     runErrorCode === "two_factor_required" ||
     runErrorCode === "challenge_required" ||
@@ -802,22 +904,24 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
   const summaryMetrics = (
     <div className="summary-lineup targets-kpis">
       <div className="summary-pill">
-        <span>Current counts</span>
+        <span>Followers</span>
+        <strong>{selectedSummary?.followers_count ?? "-"}</strong>
+      </div>
+      <div className="summary-pill">
+        <span>Following</span>
+        <strong>{selectedSummary?.following_count ?? "-"}</strong>
+      </div>
+      <div className="summary-pill">
+        <span>Latest update</span>
         <strong>
-          {selectedSummary?.followers_count ?? "-"} / {selectedSummary?.following_count ?? "-"}
+          {latestBatch
+            ? `${latestBatch.event_count ?? 0} change${latestBatch.event_count === 1 ? "" : "s"}`
+            : "No changes yet"}
         </strong>
       </div>
       <div className="summary-pill">
-        <span>Last full run</span>
-        <strong>{formatTime(selectedSummary?.last_full_run_at || undefined)}</strong>
-      </div>
-      <div className="summary-pill">
-        <span>Last change</span>
-        <strong>{formatTime(selectedSummary?.last_change_at || undefined)}</strong>
-      </div>
-      <div className="summary-pill">
-        <span>People loaded</span>
-        <strong>{peopleRows.length}</strong>
+        <span>Freshness</span>
+        <strong>{formatRelativeAge(selectedSummary?.last_full_run_at || undefined)}</strong>
       </div>
     </div>
   );
@@ -1090,7 +1194,7 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
                     </div>
                     {!hasTrackedTarget ? (
                       <label style={{ display: "block", marginBottom: "0.9rem" }}>
-                        Target username
+                        Target handle
                         <input
                           {...targetHandleInputProps}
                           value={selectedTarget}
@@ -1234,6 +1338,10 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
                         <p className="hint">
                           Job {launchJobId} · {runDone ? (runPayload?.status || runMeta?.state || "done") : (runMeta?.state || "running")}
                           {runPayload?.error ? ` · ${runPayload.error}` : ""}
+                          {" · "}
+                          <NavLink to={`/jobs/${encodeURIComponent(launchJobId)}`} className="text-link">
+                            clean status
+                          </NavLink>
                         </p>
                         {runPayload?.result ? (
                           <p className="hint">
@@ -1243,7 +1351,7 @@ function TargetsPage({ initialView = "overview" }: { initialView?: "overview" | 
                         {submitChallengeMutation.error ? <p className="error">{(submitChallengeMutation.error as Error).message}</p> : null}
                         <div className="table-wrap">
                           <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
-                            {(runJobDetailQ.data?.worker_out_tail || runJobDetailQ.data?.worker_err_tail || "").trim() || "(waiting for run logs)"}
+                            {runJobSummaryQ.data?.last_worker_message || "(waiting for run logs)"}
                           </pre>
                         </div>
                       </div>
@@ -1765,6 +1873,8 @@ function ExplorerPage() {
   const [eventsType, setEventsType] = useState<"" | "added" | "removed">("");
   const [eventsUsername, setEventsUsername] = useState("");
   const [eventsWindowDays, setEventsWindowDays] = useState("7");
+  const [activeChangeGroup, setActiveChangeGroup] = useState("followers-added");
+  const [changeSearch, setChangeSearch] = useState("");
 
   useEffect(() => {
     if (!selectedTarget && (targetsQ.data?.length || 0) > 0) {
@@ -1848,202 +1958,286 @@ function ExplorerPage() {
   const targetSlug = (selectedTarget || "target").replace(/[^a-zA-Z0-9._-]+/g, "_");
   const runs = runsQ.data ?? [];
   const selectedRun = runs.find((r) => r.id === selectedRunId) ?? null;
-  const detailGroups = detail
+  const previousRun = selectedRun ? runs.find((run) => (run.id ?? 0) < (selectedRun.id ?? 0)) ?? null : null;
+  const changeGroups = detail
     ? [
-        { key: "followers-added", title: "Followers Added", items: detail.followers_added_list ?? [], tone: "good" },
-        { key: "followers-removed", title: "Followers Removed", items: detail.followers_removed_list ?? [], tone: "bad" },
-        { key: "following-added", title: "Following Added", items: detail.followees_added_list ?? [], tone: "info" },
-        { key: "following-removed", title: "Following Removed", items: detail.followees_removed_list ?? [], tone: "neutral" },
+        {
+          key: "followers-added",
+          label: "Started following",
+          description: "Accounts that newly follow the target.",
+          items: detail.followers_added_list ?? [],
+          details: ((detail.followers_added_details as RunChangeDetail[] | undefined) ?? []),
+          relation: "followers",
+          eventType: "added",
+          tone: "good",
+        },
+        {
+          key: "followers-removed",
+          label: "Stopped following",
+          description: "Accounts that no longer follow the target.",
+          items: detail.followers_removed_list ?? [],
+          details: ((detail.followers_removed_details as RunChangeDetail[] | undefined) ?? []),
+          relation: "followers",
+          eventType: "removed",
+          tone: "bad",
+        },
+        {
+          key: "following-added",
+          label: "Target started following",
+          description: "Accounts the target started following.",
+          items: detail.followees_added_list ?? [],
+          details: ((detail.followees_added_details as RunChangeDetail[] | undefined) ?? []),
+          relation: "following",
+          eventType: "added",
+          tone: "info",
+        },
+        {
+          key: "following-removed",
+          label: "Target stopped following",
+          description: "Accounts the target stopped following.",
+          items: detail.followees_removed_list ?? [],
+          details: ((detail.followees_removed_details as RunChangeDetail[] | undefined) ?? []),
+          relation: "following",
+          eventType: "removed",
+          tone: "neutral",
+        },
       ]
     : [];
+  const activeGroup = changeGroups.find((group) => group.key === activeChangeGroup) ?? changeGroups[0] ?? null;
+  const activeChangeRows: RunChangeDetail[] = activeGroup
+    ? activeGroup.details.length
+      ? activeGroup.details
+      : activeGroup.items.map((username) => ({
+          username,
+          relation_type: activeGroup.relation,
+          event_type: activeGroup.eventType,
+          observed_at: detail?.timestamp,
+        }))
+    : [];
+  const filteredChangeRows = activeChangeRows.filter((item) =>
+    `${item.username || ""} ${item.full_name || ""}`.toLowerCase().includes(changeSearch.trim().toLowerCase())
+  );
 
   return (
     <section className="explorer-shell">
       <header className="page-header">
         <h1>Activity</h1>
       </header>
-      <div className="explorer-kpis">
-        <article className="explorer-kpi">
-          <span>Target</span>
-          <strong>@{selectedTarget || "-"}</strong>
-        </article>
-        <article className="explorer-kpi">
-          <span>Full runs</span>
-          <strong>{runsQ.data?.length ?? 0}</strong>
-        </article>
-        <article className="explorer-kpi">
-          <span>Log rows</span>
-          <strong>{eventsQ.data?.length ?? 0}</strong>
-        </article>
-      </div>
-      <div className="explorer-main-grid">
-        <article className="card">
-          <h3>Full Runs</h3>
-          <div className="form-grid">
-            <label>
-              Target
-              <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)}>
-                {(targetsQ.data ?? []).map((t, idx) => (
-                  <option key={`${t.target_username || "target"}-${idx}`} value={t.target_username || ""}>
-                    {t.target_username || "-"}
+      <div className="activity-dashboard">
+        <section className="activity-controls">
+          <label>
+            Target
+            <select value={selectedTarget} onChange={(e) => setSelectedTarget(e.target.value)}>
+              {(targetsQ.data ?? []).map((t, idx) => (
+                <option key={`${t.target_username || "target"}-${idx}`} value={t.target_username || ""}>
+                  {t.target_username || "-"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Complete run
+            <select
+              value={selectedRunId ?? ""}
+              onChange={(e) => setSelectedRunId(e.target.value ? Number(e.target.value) : null)}
+              className="run-selector-input"
+            >
+              {runs.map((run, idx) => {
+                const followerDelta = (run.followers_added ?? 0) - (run.followers_removed ?? 0);
+                const followingDelta = (run.followees_added ?? 0) - (run.followees_removed ?? 0);
+                return (
+                  <option key={`${run.id || "run"}-${idx}`} value={run.id ?? ""}>
+                    #{run.id ?? "-"} · {formatTime(run.timestamp || undefined)} · followers {followerDelta >= 0 ? "+" : ""}{followerDelta} · following {followingDelta >= 0 ? "+" : ""}{followingDelta}
                   </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <p className="hint">Choose a full follower/following snapshot run. Profile-only and count-watch evidence stay separate.</p>
-          {runs.length ? (
-            <>
-              <label>
-                Full run
-                <select
-                  value={selectedRunId ?? ""}
-                  onChange={(e) => setSelectedRunId(e.target.value ? Number(e.target.value) : null)}
-                  className="run-selector-input"
+                );
+              })}
+            </select>
+          </label>
+        </section>
+
+        {!detail ? (
+          <section className="activity-empty-state">
+            <Users size={28} aria-hidden="true" />
+            <h3>Select a complete run</h3>
+            <p>Complete target runs will show follower and following additions/removals here.</p>
+          </section>
+        ) : (
+          <>
+            <section className="activity-hero">
+              <div>
+                <div className="activity-eyebrow">Complete run #{detail.id ?? selectedRunId ?? "-"}</div>
+                <h2>@{detail.target_username || selectedTarget || "-"}</h2>
+                <p>
+                  Changed on {formatTime(detail.timestamp || undefined)} · compared with {previousRun ? `run #${previousRun.id}` : "the previous complete run"}.
+                </p>
+              </div>
+              <div className="activity-actions">
+                <button
+                  className="btn-secondary icon-button-text"
+                  onClick={() =>
+                    downloadCsvRows(
+                      `${targetSlug}-run-${detail.id || selectedRunId || "selected"}-changes.csv`,
+                      ["change_group", "username", "changed_on", "first_seen", "first_seen_known", "account_status"],
+                      changeGroups.flatMap((group) => {
+                        const rows: RunChangeDetail[] = group.details.length
+                          ? group.details
+                          : group.items.map((username) => ({
+                              username,
+                              observed_at: detail.timestamp,
+                              event_type: group.eventType,
+                            }));
+                        return rows.map((item) => [
+                          group.label,
+                          item.username || "",
+                          item.observed_at || "",
+                          item.first_seen || "",
+                          item.first_seen_known ? "yes" : "no",
+                          item.event_type === "removed" ? "not checked" : "active in snapshot",
+                        ]);
+                      })
+                    )
+                  }
                 >
-                  {runs.map((run, idx) => {
-                    const followerDelta = (run.followers_added ?? 0) - (run.followers_removed ?? 0);
+                  <Download size={16} aria-hidden="true" />
+                  Export changes
+                </button>
+              </div>
+            </section>
+
+            <section className="activity-metrics">
+              <div className="activity-metric">
+                <span>Started following</span>
+                <strong>{detail.followers_added ?? 0}</strong>
+                <em>new followers</em>
+              </div>
+              <div className="activity-metric">
+                <span>Stopped following</span>
+                <strong>{detail.followers_removed ?? 0}</strong>
+                <em>removed followers</em>
+              </div>
+              <div className="activity-metric">
+                <span>Target started following</span>
+                <strong>{detail.followees_added ?? 0}</strong>
+                <em>new following</em>
+              </div>
+              <div className="activity-metric">
+                <span>Target stopped following</span>
+                <strong>{detail.followees_removed ?? 0}</strong>
+                <em>removed following</em>
+              </div>
+            </section>
+
+            <section className="activity-change-board">
+              <div className="activity-change-tabs" role="tablist" aria-label="Run change groups">
+                {changeGroups.map((group) => {
+                  const Icon = group.key.includes("followers")
+                    ? group.eventType === "added"
+                      ? UserPlus
+                      : UserMinus
+                    : group.eventType === "added"
+                      ? UserCheck
+                      : ArrowRightLeft;
+                  return (
+                    <button
+                      key={group.key}
+                      className={`activity-change-tab ${activeGroup?.key === group.key ? "active" : ""}`}
+                      onClick={() => {
+                        setActiveChangeGroup(group.key);
+                        setChangeSearch("");
+                        setEventsScope("run");
+                        setEventsRelation(group.relation as "followers" | "following");
+                        setEventsType(group.eventType as "added" | "removed");
+                      }}
+                    >
+                      <Icon size={18} aria-hidden="true" />
+                      <span>{group.label}</span>
+                      <strong>{group.items.length}</strong>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="activity-review-panel">
+                <div className="activity-review-head">
+                  <div>
+                    <h3>{activeGroup?.label || "Changes"}</h3>
+                    <p>{activeGroup?.description || "Select a change group."}</p>
+                  </div>
+                  <button
+                    className="btn-secondary icon-button-text"
+                    disabled={!activeGroup}
+                    onClick={() =>
+                      activeGroup &&
+                      downloadCsvRows(
+                      `${targetSlug}-run-${detail.id || selectedRunId || "selected"}-${activeGroup.key}.csv`,
+                        ["username", "full_name", "change", "changed_on", "first_seen", "first_seen_known", "account_status"],
+                        activeChangeRows.map((item) => [
+                          item.username || "",
+                          item.full_name || "",
+                          activeGroup.label,
+                          item.observed_at || "",
+                          item.first_seen || "",
+                          item.first_seen_known ? "yes" : "no",
+                          accountStatusLabel(item),
+                        ])
+                      )
+                    }
+                  >
+                    <Download size={16} aria-hidden="true" />
+                    Export list
+                  </button>
+                </div>
+                <label className="activity-search">
+                  <Search size={16} aria-hidden="true" />
+                  <input value={changeSearch} onChange={(e) => setChangeSearch(e.target.value)} placeholder="Search usernames" />
+                </label>
+                <div className="activity-change-list">
+                  {filteredChangeRows.slice(0, 240).map((item, idx) => {
+                    const avatarUrl = changeAvatarUrl(item);
                     return (
-                      <option key={`${run.id || "run"}-${idx}`} value={run.id ?? ""}>
-                        #{run.id ?? "-"} · {formatTime(run.timestamp || undefined)} · {followerDelta >= 0 ? "+" : ""}{followerDelta}
-                      </option>
+                    <div key={`${activeGroup?.key || "change"}-${item.username || idx}-${idx}`} className="activity-change-row">
+                      <div className={`activity-change-person${avatarUrl ? " has-avatar" : ""}`}>
+                        {avatarUrl ? (
+                          <span className="activity-avatar" aria-hidden="true">
+                            <img src={avatarUrl} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                          </span>
+                        ) : null}
+                        <span className="activity-person-copy">
+                        {item.username ? (
+                          <a
+                            className="activity-username"
+                            href={instagramProfileUrl(item.username)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title={`Open @${item.username} on Instagram`}
+                          >
+                            @{item.username}
+                          </a>
+                        ) : (
+                          <span className="activity-username">-</span>
+                        )}
+                        {item.full_name ? <span className="activity-full-name">{item.full_name}</span> : null}
+                        <span className="activity-change-context">{changeHistoryLabel(item)}</span>
+                        </span>
+                      </div>
+                      <div className="activity-change-meta">
+                        <span>Changed {formatTime(item.observed_at || detail.timestamp || undefined)}</span>
+                        <span>{accountStatusLabel(item)}</span>
+                      </div>
+                    </div>
                     );
                   })}
-                </select>
-              </label>
-              {selectedRun ? (
-                <div className="run-selector-summary">
-                  <div className="list-title">Run #{selectedRun.id ?? "-"} · {formatTime(selectedRun.timestamp || undefined)}</div>
-                  <div className="list-meta">via @{selectedRun.login_username || "-"} · duration {typeof selectedRun.duration_seconds === "number" ? `${selectedRun.duration_seconds}s` : "-"}</div>
-                  <div className="list-meta">
-                    followers {selectedRun.followers_count ?? "-"} · change {((selectedRun.followers_added ?? 0) - (selectedRun.followers_removed ?? 0)) >= 0 ? "+" : ""}
-                    {(selectedRun.followers_added ?? 0) - (selectedRun.followers_removed ?? 0)} ({selectedRun.followers_added ?? 0} new / {selectedRun.followers_removed ?? 0} lost)
-                  </div>
-                  <div className="list-meta">
-                    following {selectedRun.followees_count ?? "-"} · change {((selectedRun.followees_added ?? 0) - (selectedRun.followees_removed ?? 0)) >= 0 ? "+" : ""}
-                    {(selectedRun.followees_added ?? 0) - (selectedRun.followees_removed ?? 0)} ({selectedRun.followees_added ?? 0} new / {selectedRun.followees_removed ?? 0} lost) · NF {selectedRun.non_followbacks_count ?? "-"}
-                  </div>
-                  <div className="row gap" style={{ marginTop: "0.55rem" }}>
-                    <button
-                      className="btn-secondary"
-                      onClick={() => selectedRun.id && deleteRunMutation.mutate(selectedRun.id)}
-                      disabled={deleteRunMutation.isPending || !selectedRun.id}
-                    >
-                      Delete
-                    </button>
-                    <button
-                      className="btn-secondary"
-                      onClick={() => selectedRun.id && undoRunMutation.mutate(selectedRun.id)}
-                      disabled={undoRunMutation.isPending || !selectedRun.id}
-                    >
-                      Undo
-                    </button>
-                  </div>
+                  {!filteredChangeRows.length ? <p className="hint">No usernames match this filter.</p> : null}
                 </div>
-              ) : null}
-            </>
-          ) : (
-            <div className="explorer-empty">
-              <h4>No full runs yet</h4>
-              <p>Run a full follower/following collection first. Profile-only checks and count-watch samples stay separate.</p>
-            </div>
-          )}
-          {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
-          {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}
-        </article>
-        <article className="card explorer-panel">
-          <h3>Full Run {selectedRunId ? `#${selectedRunId}` : ""}</h3>
-          {!detail ? (
-            <div className="explorer-empty detail-empty">
-              <h4>Select a full run</h4>
-              <p>Pick a full follower/following run to inspect exact adds and removals.</p>
-            </div>
-          ) : null}
-          {detail ? (
-            <>
-              <p className="hint">
-                @{detail.target_username || "-"} via @{detail.login_username || "-"} · {formatTime(detail.timestamp || undefined)}
-              </p>
-              <p className="hint">
-                Followers {detail.followers_count ?? "-"} · change {(detail.followers_added ?? 0) - (detail.followers_removed ?? 0) >= 0 ? "+" : ""}
-                {(detail.followers_added ?? 0) - (detail.followers_removed ?? 0)} ({detail.followers_added ?? 0} new / {detail.followers_removed ?? 0} lost)
-              </p>
-              <p className="hint">
-                Following {detail.followees_count ?? "-"} · change {(detail.followees_added ?? 0) - (detail.followees_removed ?? 0) >= 0 ? "+" : ""}
-                {(detail.followees_added ?? 0) - (detail.followees_removed ?? 0)} ({detail.followees_added ?? 0} new / {detail.followees_removed ?? 0} lost)
-              </p>
-              <div className="row gap">
-                <button
-                  className="btn-secondary"
-                  onClick={() =>
-                    downloadCsvRows(
-                      `${targetSlug}-followers.csv`,
-                      ["username"],
-                      (detail.followers ?? []).map((u) => [u])
-                    )
-                  }
-                >
-                  Export followers CSV
-                </button>
-                <button
-                  className="btn-secondary"
-                  onClick={() =>
-                    downloadCsvRows(
-                      `${targetSlug}-following.csv`,
-                      ["username"],
-                      (detail.followees ?? []).map((u) => [u])
-                    )
-                  }
-                >
-                  Export following CSV
-                </button>
-                <button
-                  className="btn-secondary"
-                  onClick={() =>
-                    downloadCsvRows(
-                      `${targetSlug}-no-follow-back.csv`,
-                      ["username"],
-                      (detail.non_followbacks ?? []).map((u) => [u])
-                    )
-                  }
-                >
-                  Export non-followbacks CSV
-                </button>
+                {filteredChangeRows.length > 240 ? (
+                  <p className="hint run-detail-truncation">Showing first 240 of {filteredChangeRows.length} usernames.</p>
+                ) : null}
               </div>
-              <div className="run-detail-grid">
-                {detailGroups.map((group) => (
-                  <section className={`run-detail-card run-detail-card--${group.key}`} key={group.key}>
-                    <div className="run-detail-head">
-                      <h4>{group.title}</h4>
-                      <span className={`pill ${group.tone}`}>{group.items.length}</span>
-                    </div>
-                    <div className="run-detail-list">
-                      {group.items.length ? (
-                        <div className="run-detail-plain-list">
-                          {group.items.slice(0, 100).map((u, idx) => (
-                            <a
-                              key={`${group.key}-${u}-${idx}`}
-                              className="run-detail-plain-item"
-                              href={instagramProfileUrl(u)}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              title={`Open @${u} on Instagram`}
-                            >
-                              @{u}
-                            </a>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="hint">No changes in this group.</p>
-                      )}
-                      {group.items.length > 100 ? <p className="hint run-detail-truncation">Showing first 100 of {group.items.length} usernames.</p> : null}
-                    </div>
-                  </section>
-                ))}
-              </div>
-            </>
-          ) : null}
-        </article>
+            </section>
+          </>
+        )}
+        {deleteRunMutation.error ? <p className="error">{(deleteRunMutation.error as Error).message}</p> : null}
+        {undoRunMutation.error ? <p className="error">{(undoRunMutation.error as Error).message}</p> : null}
       </div>
       <article className="card explorer-panel">
         <h3>Event log</h3>
@@ -2221,9 +2415,9 @@ function OperationsPage() {
     enabled: Boolean(manualJobId),
     refetchInterval: 3000,
   });
-  const runJobDetailQ = useQuery({
-    queryKey: ["run-job-detail", manualJobId],
-    queryFn: () => getRunJobDetail(manualJobId),
+  const runJobSummaryQ = useQuery({
+    queryKey: ["run-job-summary", manualJobId],
+    queryFn: () => getRunJobSummary(manualJobId),
     enabled: Boolean(manualJobId),
     refetchInterval: 4000,
   });
@@ -2286,7 +2480,7 @@ function OperationsPage() {
   const runMeta = runJobQ.data?.meta;
   const runDone = Boolean(runJobQ.data?.done);
   const runErrorCode = String(runPayload?.error_code || "").toLowerCase();
-  const promptHint = (runJobDetailQ.data?.worker_out_tail || "").toLowerCase().includes("waiting for code");
+  const promptHint = (runJobSummaryQ.data?.last_worker_message || "").toLowerCase().includes("waiting for code");
   const interactiveChallenge =
     runErrorCode === "two_factor_required" ||
     runErrorCode === "challenge_required" ||
@@ -2300,6 +2494,23 @@ function OperationsPage() {
 
   const activeJobs = runStatusQ.data?.active_jobs?.length ?? 0;
   const queuedJobs = runStatusQ.data?.queued_jobs?.length ?? 0;
+  const liveJobs = runStatusQ.data?.active_jobs ?? [];
+  const controllableJobs = [
+    ...(runStatusQ.data?.active_jobs ?? []).map((job) => ({
+      state: "running",
+      job_id: String(job.job_id || ""),
+      login_username: String(job.login_username || ""),
+      target_username: String(job.target_username || ""),
+      elapsed_seconds: job.elapsed_seconds,
+    })),
+    ...(runStatusQ.data?.queued_jobs ?? []).map((job) => ({
+      state: "queued",
+      job_id: String(job.job_id || ""),
+      login_username: String(job.meta?.login_username || ""),
+      target_username: String(job.meta?.target_username || ""),
+      elapsed_seconds: undefined,
+    })),
+  ].filter((job) => job.job_id || (job.login_username && job.target_username));
   const manualActionCount = manualActionsQ.data?.actions?.length ?? 0;
   const totalSchedules = schedulesQ.data?.length ?? 0;
 
@@ -2335,6 +2546,132 @@ function OperationsPage() {
         <NavLink to="/targets" className="text-link">
           Return to targets
         </NavLink>
+      </article>
+      <article className="card">
+        <h3>Live Progress Telemetry</h3>
+        <p className="hint">Page-level collection status for active runs.</p>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Job</th>
+                <th>Phase</th>
+                <th>Followers</th>
+                <th>Following</th>
+                <th>Pages</th>
+                <th>Last page</th>
+                <th>Duplicates</th>
+                <th>Retry</th>
+                <th>Worker</th>
+              </tr>
+            </thead>
+            <tbody>
+              {liveJobs.map((job, idx) => {
+                const detail = job.progress_detail || {};
+                const phase = String(job.phase || detail.phase || "-");
+                const lastPageAt =
+                  typeof detail.last_page_at === "number"
+                    ? detail.last_page_at
+                    : phase === "followers"
+                      ? job.followers_last_page_at
+                      : job.following_last_page_at;
+                const lastPageAge =
+                  typeof lastPageAt === "number"
+                    ? `${Math.max(0, Math.round(Date.now() / 1000 - lastPageAt))}s ago`
+                    : "-";
+                const pages =
+                  phase === "followers"
+                    ? job.followers_pages
+                    : phase === "following"
+                      ? job.following_pages
+                      : detail.page_index;
+                const duplicates =
+                  phase === "followers"
+                    ? job.followers_duplicates_total
+                    : phase === "following"
+                      ? job.following_duplicates_total
+                      : detail.duplicates_total;
+                const retryText = detail.retrying
+                  ? `attempt ${String(detail.attempt || "-")} · missing ${String(detail.missing_count ?? "-")}`
+                  : detail.alternate_endpoint
+                    ? `gql added ${String(detail.alternate_added ?? "-")} · missing ${String(detail.missing_count ?? "-")}`
+                  : detail.retry_complete
+                    ? `added ${String(detail.retry_added ?? 0)} · missing ${String(detail.missing_count ?? "-")}`
+                    : "-";
+                return (
+                  <tr key={`${job.job_id || job.target_username || "live"}-${idx}`}>
+                    <td>
+                      {job.job_id ? (
+                        <NavLink to={`/jobs/${encodeURIComponent(String(job.job_id))}`} className="text-link">
+                          {String(job.job_id).slice(0, 8)}
+                        </NavLink>
+                      ) : "-"}
+                    </td>
+                    <td>{phase}</td>
+                    <td>{String(job.followers_progress ?? "-")} / {String(job.followers_total ?? "-")}</td>
+                    <td>{String(job.following_progress ?? "-")} / {String(job.following_total ?? "-")}</td>
+                    <td>{String(pages ?? "-")}</td>
+                    <td>{lastPageAge}</td>
+                    <td>{String(duplicates ?? "-")}</td>
+                    <td>{retryText}</td>
+                    <td>{String(job.worker_pid ?? "-")}</td>
+                  </tr>
+                );
+              })}
+              {!liveJobs.length ? (
+                <tr><td colSpan={9} className="hint">No active run telemetry.</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      <article className="card">
+        <h3>Run Control</h3>
+        <p className="hint">Cancel any active or queued collector job.</p>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>State</th>
+                <th>Login</th>
+                <th>Target</th>
+                <th>Job</th>
+                <th>Elapsed</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {controllableJobs.map((job, idx) => (
+                <tr key={`${job.job_id || job.login_username}-${idx}`}>
+                  <td>{job.state}</td>
+                  <td>{job.login_username || "-"}</td>
+                  <td>{job.target_username || "-"}</td>
+                  <td>{job.job_id || "-"}</td>
+                  <td>{typeof job.elapsed_seconds === "number" ? `${job.elapsed_seconds}s` : "-"}</td>
+                  <td>
+                    <button
+                      className="btn-secondary"
+                      onClick={() =>
+                        cancelRunMutation.mutate({
+                          job_id: job.job_id || undefined,
+                          login_username: job.login_username || undefined,
+                          target_username: job.target_username || undefined,
+                        })
+                      }
+                      disabled={cancelRunMutation.isPending}
+                    >
+                      {cancelRunMutation.isPending ? "Cancelling..." : "Cancel"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!controllableJobs.length ? (
+                <tr><td colSpan={6} className="hint">No active or queued jobs.</td></tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+        {cancelRunMutation.error ? <p className="error">{(cancelRunMutation.error as Error).message}</p> : null}
       </article>
       <article className="card">
         <h3>Manual Action Queue</h3>
@@ -2398,7 +2735,7 @@ function OperationsPage() {
               </select>
             </label>
             <label>
-              Target username
+              Target handle
               <input
                 {...targetHandleInputProps}
                 placeholder="e.g. davidjones.tv"
@@ -2482,7 +2819,7 @@ function OperationsPage() {
               </select>
             </label>
             <label>
-              Target username
+              Target handle
               <input
                 {...targetHandleInputProps}
                 placeholder="e.g. davidjones.tv"
@@ -2520,6 +2857,14 @@ function OperationsPage() {
               <p className="hint">
                 Live: {runDone ? (runPayload?.status || runMeta?.state || "done") : (runMeta?.state || "running")}
                 {runPayload?.error ? ` · ${runPayload.error}` : ""}
+                {manualJobId ? (
+                  <>
+                    {" · "}
+                    <NavLink to={`/jobs/${encodeURIComponent(manualJobId)}`} className="text-link">
+                      clean status
+                    </NavLink>
+                  </>
+                ) : null}
               </p>
               {runPayload?.result ? (
                 <p className="hint">
@@ -2529,7 +2874,7 @@ function OperationsPage() {
               {submitChallengeMutation.error ? <p className="error">{(submitChallengeMutation.error as Error).message}</p> : null}
               <div className="table-wrap">
                 <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
-                  {(runJobDetailQ.data?.worker_out_tail || runJobDetailQ.data?.worker_err_tail || "").trim() || "(waiting for run logs)"}
+                  {runJobSummaryQ.data?.last_worker_message || "(waiting for run logs)"}
                 </pre>
               </div>
             </>
@@ -2739,6 +3084,13 @@ function AccountsPage() {
   const [queueWarmupRun, setQueueWarmupRun] = useState(false);
   const [scheduleInterval, setScheduleInterval] = useState("");
   const [selectedAuthLogin, setSelectedAuthLogin] = useState("");
+  const [accountVerificationCode, setAccountVerificationCode] = useState("");
+  const [challengeEmailHost, setChallengeEmailHost] = useState("imap.gmail.com");
+  const [challengeEmailPort, setChallengeEmailPort] = useState("993");
+  const [challengeEmailUseSsl, setChallengeEmailUseSsl] = useState(true);
+  const [challengeEmailUsername, setChallengeEmailUsername] = useState("");
+  const [challengeEmailPassword, setChallengeEmailPassword] = useState("");
+  const [challengeEmailMailbox, setChallengeEmailMailbox] = useState("INBOX");
   const [activePanel, setActivePanel] = useState<"setup" | "factory" | "maintenance" | "diagnostics">("setup");
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [passwordModalLogin, setPasswordModalLogin] = useState("");
@@ -2792,12 +3144,63 @@ function AccountsPage() {
   const authPreflightMutation = useMutation({
     mutationFn: runAuthPreflight,
   });
+  const submitAccountChallengeMutation = useMutation({
+    mutationFn: ({ login, code, retry }: { login: string; code: string; retry?: boolean }) =>
+      submitChallengeCode(login, code, { retry_run: Boolean(retry) }),
+    onSuccess: async () => {
+      setAccountVerificationCode("");
+      await qc.invalidateQueries({ queryKey: ["auth-trace", selectedAuthLogin] });
+      await qc.invalidateQueries({ queryKey: ["logins"] });
+      if (selectedAuthLogin) authPreflightMutation.mutate(selectedAuthLogin);
+    },
+  });
+  const setChallengeEmailMutation = useMutation({
+    mutationFn: (payload: Parameters<typeof setChallengeEmail>[0]) => setChallengeEmail(payload),
+    onSuccess: async () => {
+      setChallengeEmailPassword("");
+      await qc.invalidateQueries({ queryKey: ["logins"] });
+      if (selectedAuthLogin) authPreflightMutation.mutate(selectedAuthLogin);
+    },
+  });
   const authTraceQ = useQuery({
     queryKey: ["auth-trace", selectedAuthLogin],
     queryFn: () => getAuthTrace(selectedAuthLogin, 30),
     enabled: Boolean(selectedAuthLogin),
     refetchInterval: 8000,
   });
+  const manualActionsQ = useQuery({
+    queryKey: ["manual-actions"],
+    queryFn: getManualActions,
+    refetchInterval: 8000,
+  });
+  const selectedVerificationActions = useMemo(
+    () =>
+      (manualActionsQ.data?.actions ?? []).filter(
+        (action) =>
+          String(action.login_username || "") === selectedAuthLogin &&
+          ["challenge_required", "two_factor_required"].includes(String(action.action_type || ""))
+      ),
+    [manualActionsQ.data, selectedAuthLogin]
+  );
+  const selectedLogin = useMemo(
+    () => (loginsQ.data ?? []).find((login) => String(login.login_username || "") === selectedAuthLogin),
+    [loginsQ.data, selectedAuthLogin]
+  );
+  useEffect(() => {
+    if (!selectedLogin) return;
+    setChallengeEmailHost(selectedLogin.challenge_email_host || "imap.gmail.com");
+    setChallengeEmailPort("993");
+    setChallengeEmailUseSsl(true);
+    setChallengeEmailUsername(selectedLogin.challenge_email_username || "");
+    setChallengeEmailMailbox(selectedLogin.challenge_email_mailbox || "INBOX");
+    setChallengeEmailPassword("");
+  }, [selectedLogin]);
+  const accountSections = [
+    { id: "setup" as const, label: "Setup", helper: "Add collector credentials" },
+    { id: "factory" as const, label: "Factory", helper: "Create and warm up accounts" },
+    { id: "maintenance" as const, label: "Maintenance", helper: "Sessions and password actions" },
+    { id: "diagnostics" as const, label: "Diagnostics", helper: "Preflight and challenges" },
+  ];
 
   const onAddLogin = () => {
     if (!newLoginUsername.trim()) return;
@@ -2879,23 +3282,29 @@ function AccountsPage() {
           <strong>{selectedAuthLogin ? `@${selectedAuthLogin}` : "-"}</strong>
         </article>
       </div>
-      <div className="section-switcher">
-        <button className={`system-tab ${activePanel === "setup" ? "active" : ""}`} onClick={() => setActivePanel("setup")}>
-          Setup
-        </button>
-        <button className={`system-tab ${activePanel === "factory" ? "active" : ""}`} onClick={() => setActivePanel("factory")}>
-          Factory
-        </button>
-        <button className={`system-tab ${activePanel === "maintenance" ? "active" : ""}`} onClick={() => setActivePanel("maintenance")}>
-          Maintenance
-        </button>
-        <button className={`system-tab ${activePanel === "diagnostics" ? "active" : ""}`} onClick={() => setActivePanel("diagnostics")}>
-          Diagnostics
-        </button>
-      </div>
+      <div className="console-layout accounts-console">
+        <aside className="console-rail">
+          <div className="console-rail-title">Account workspace</div>
+          {accountSections.map((item) => (
+            <button
+              key={item.id}
+              className={`console-rail-item ${activePanel === item.id ? "active" : ""}`}
+              onClick={() => setActivePanel(item.id)}
+            >
+              <strong>{item.label}</strong>
+              <span>{item.helper}</span>
+            </button>
+          ))}
+        </aside>
+        <div className="console-main">
       {activePanel === "setup" ? (
-      <article className="card">
-        <h3>Account Setup Wizard</h3>
+      <article className="card panel-flat">
+        <div className="panel-head">
+          <div>
+            <h3>Add Collector Account</h3>
+            <p className="hint">Store the minimum credentials needed for session creation and target runs.</p>
+          </div>
+        </div>
         <div className="wizard-steps">
           <div className="wizard-step">
             <strong>1. Add collector account</strong>
@@ -2945,8 +3354,13 @@ function AccountsPage() {
       </article>
       ) : null}
       {activePanel === "factory" ? (
-      <article className="card">
-        <h3>Account Factory (automated signup)</h3>
+      <article className="card panel-flat">
+        <div className="panel-head">
+          <div>
+            <h3>Account Factory</h3>
+            <p className="hint">Create a collector and optionally queue first-run warmup after signup.</p>
+          </div>
+        </div>
         <div className="form-grid">
           <label>
             Signup mode
@@ -2978,6 +3392,10 @@ function AccountsPage() {
               <option value="false">false</option>
             </select>
           </label>
+        </div>
+        <details className="settings-detail advanced-detail">
+          <summary>Warmup and schedule options</summary>
+          <div className="form-grid">
           <label>
             Warmup target (optional)
             <input
@@ -3001,7 +3419,8 @@ function AccountsPage() {
               placeholder="e.g. 0 */6 * * *"
             />
           </label>
-        </div>
+          </div>
+        </details>
         <div className="row gap">
           <button onClick={onStartAccountCreate} disabled={startAccountCreateMutation.isPending}>
             {startAccountCreateMutation.isPending ? "Starting..." : "Start account creation"}
@@ -3029,7 +3448,7 @@ function AccountsPage() {
             </pre>
           </div>
         ) : null}
-        <p className="hint">For private API mode, submit email/SMS verification code in the legacy Account Vault challenge field if prompted.</p>
+        <p className="hint">For private API mode, use Diagnostics to submit email, SMS, challenge, or backup codes when prompted.</p>
         <div className="table-wrap">
           <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
             {(accountCreateQ.data?.log ?? []).join("\n") || "(no account factory logs yet)"}
@@ -3038,7 +3457,13 @@ function AccountsPage() {
       </article>
       ) : null}
       {activePanel === "maintenance" ? (
-      <article className="card">
+      <article className="card panel-flat">
+        <div className="panel-head">
+          <div>
+            <h3>Session Maintenance</h3>
+            <p className="hint">Review collector readiness and run focused account actions.</p>
+          </div>
+        </div>
         <p className="hint">Ready sessions {readyCount} / {loginsQ.data?.length ?? 0}</p>
         <div className="table-wrap desktop-only">
           <table>
@@ -3149,8 +3574,13 @@ function AccountsPage() {
       </article>
       ) : null}
       {activePanel === "diagnostics" ? (
-      <article className="card">
-        <h3>Auth Diagnostics</h3>
+      <article className="card panel-flat">
+        <div className="panel-head">
+          <div>
+            <h3>Auth Diagnostics</h3>
+            <p className="hint">Select one collector for preflight checks, challenge codes, and trace review.</p>
+          </div>
+        </div>
         {requestResetMutation.data ? (
           <p className="hint">
             Reset request sent for @{requestResetMutation.data.login_username} via proxy:{" "}
@@ -3203,6 +3633,153 @@ function AccountsPage() {
             )}
           </div>
         ) : null}
+        <div className="form-grid">
+          <label>
+            Verification or challenge code
+            <input
+              value={accountVerificationCode}
+              onChange={(e) => setAccountVerificationCode(e.target.value)}
+              placeholder="6-digit code or backup code"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+            />
+          </label>
+        </div>
+        <div className="row gap">
+          <button
+            className="btn-secondary"
+            disabled={submitAccountChallengeMutation.isPending || !selectedAuthLogin || !accountVerificationCode.trim()}
+            onClick={() =>
+              submitAccountChallengeMutation.mutate({
+                login: selectedAuthLogin,
+                code: accountVerificationCode.trim(),
+              })
+            }
+          >
+            {submitAccountChallengeMutation.isPending ? "Submitting..." : "Submit code only"}
+          </button>
+          <button
+            disabled={submitAccountChallengeMutation.isPending || !selectedAuthLogin || !accountVerificationCode.trim()}
+            onClick={() =>
+              submitAccountChallengeMutation.mutate({
+                login: selectedAuthLogin,
+                code: accountVerificationCode.trim(),
+                retry: true,
+              })
+            }
+          >
+            {submitAccountChallengeMutation.isPending ? "Submitting..." : "Submit code and retry"}
+          </button>
+        </div>
+        {submitAccountChallengeMutation.error ? <p className="error">{(submitAccountChallengeMutation.error as Error).message}</p> : null}
+        {submitAccountChallengeMutation.data ? (
+          <p className="hint">
+            Code submitted for @{submitAccountChallengeMutation.data.login_username}
+            {submitAccountChallengeMutation.data.retry_queued
+              ? ` · retry queued for @${submitAccountChallengeMutation.data.retry_target_username} (${submitAccountChallengeMutation.data.retry_job_id})`
+              : submitAccountChallengeMutation.data.retry_error
+                ? ` · retry not queued: ${submitAccountChallengeMutation.data.retry_error}`
+                : ""}
+          </p>
+        ) : null}
+        <div className="panel-head compact-head">
+          <div>
+            <h3>Email code retrieval</h3>
+            <p className="hint">
+              {selectedLogin?.challenge_email_configured
+                ? `Configured for ${selectedLogin.challenge_email_host || "IMAP"}`
+                : "Configure IMAP so email challenge codes can be pulled automatically."}
+            </p>
+          </div>
+        </div>
+        <div className="form-grid">
+          <label>
+            IMAP host
+            <input value={challengeEmailHost} onChange={(e) => setChallengeEmailHost(e.target.value)} placeholder="imap.gmail.com" />
+          </label>
+          <label>
+            Port
+            <input value={challengeEmailPort} onChange={(e) => setChallengeEmailPort(e.target.value)} placeholder="993" inputMode="numeric" />
+          </label>
+          <label>
+            Mailbox
+            <input value={challengeEmailMailbox} onChange={(e) => setChallengeEmailMailbox(e.target.value)} placeholder="INBOX" />
+          </label>
+          <label>
+            Email username
+            <input value={challengeEmailUsername} onChange={(e) => setChallengeEmailUsername(e.target.value)} placeholder="account@gmail.com" />
+          </label>
+          <label>
+            Email app password
+            <input
+              type="password"
+              value={challengeEmailPassword}
+              onChange={(e) => setChallengeEmailPassword(e.target.value)}
+              placeholder={selectedLogin?.challenge_email_configured ? "stored (leave blank to keep)" : "app password"}
+              autoComplete="new-password"
+            />
+          </label>
+          <label className="checkbox-line">
+            <input type="checkbox" checked={challengeEmailUseSsl} onChange={(e) => setChallengeEmailUseSsl(e.target.checked)} />
+            Use SSL
+          </label>
+        </div>
+        <div className="row gap">
+          <button
+            disabled={
+              setChallengeEmailMutation.isPending ||
+              !selectedAuthLogin ||
+              !challengeEmailHost.trim() ||
+              !challengeEmailUsername.trim() ||
+              (!selectedLogin?.challenge_email_configured && !challengeEmailPassword.trim())
+            }
+            onClick={() =>
+              setChallengeEmailMutation.mutate({
+                login_username: selectedAuthLogin,
+                host: challengeEmailHost.trim(),
+                port: Number(challengeEmailPort || (challengeEmailUseSsl ? 993 : 143)),
+                use_ssl: challengeEmailUseSsl,
+                username: challengeEmailUsername.trim(),
+                password: challengeEmailPassword.trim() || undefined,
+                mailbox: challengeEmailMailbox.trim() || "INBOX",
+                test: true,
+              })
+            }
+          >
+            {setChallengeEmailMutation.isPending ? "Testing..." : "Save and test email"}
+          </button>
+          <button
+            className="btn-secondary"
+            disabled={setChallengeEmailMutation.isPending || !selectedAuthLogin || !selectedLogin?.challenge_email_configured}
+            onClick={() => setChallengeEmailMutation.mutate({ login_username: selectedAuthLogin, clear: true })}
+          >
+            Clear email settings
+          </button>
+        </div>
+        {setChallengeEmailMutation.error ? <p className="error">{(setChallengeEmailMutation.error as Error).message}</p> : null}
+        {setChallengeEmailMutation.data ? (
+          <p className="hint">
+            Email challenge settings {setChallengeEmailMutation.data.configured ? "saved" : "cleared"}
+            {setChallengeEmailMutation.data.test?.ok
+              ? ` · IMAP ok · ${setChallengeEmailMutation.data.test.unseen_count ?? 0} unread`
+              : ""}
+          </p>
+        ) : null}
+        {selectedVerificationActions.length ? (
+          <div className="table-wrap">
+            <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
+              {selectedVerificationActions
+                .map((action) => {
+                  const target = action.target_username ? `@${String(action.target_username)}` : "unknown target";
+                  const reason = action.error_code || action.reason || action.action_type || "verification";
+                  return `${target} · ${reason} · job ${action.job_id || "-"}`;
+                })
+                .join("\n")}
+            </pre>
+          </div>
+        ) : (
+          <p className="hint">No open verification retry actions for this login.</p>
+        )}
         <p className="hint">Auth trace (latest)</p>
         <div className="table-wrap">
           <pre className="hint" style={{ whiteSpace: "pre-wrap", margin: 0 }}>
@@ -3220,6 +3797,56 @@ function AccountsPage() {
         </div>
       </article>
       ) : null}
+        </div>
+        <aside className="console-inspector">
+          <h3>Selected Collector</h3>
+          <label>
+            Login
+            <select value={selectedAuthLogin} onChange={(e) => setSelectedAuthLogin(e.target.value)}>
+              {(loginsQ.data ?? []).map((login, idx) => (
+                <option key={`inspector-${login.login_username || "login"}-${idx}`} value={login.login_username || ""}>
+                  {login.login_username || "-"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="inspector-facts">
+            <div>
+              <span>Session</span>
+              <strong>{selectedLogin?.private_session_exists ? "ready" : "missing"}</strong>
+            </div>
+            <div>
+              <span>Password</span>
+              <strong>{selectedLogin?.has_password ? "stored" : "missing"}</strong>
+            </div>
+            <div>
+              <span>2FA</span>
+              <strong>{selectedLogin?.two_factor_method || "unknown"}</strong>
+            </div>
+            <div>
+              <span>Open challenges</span>
+              <strong>{selectedVerificationActions.length}</strong>
+            </div>
+          </div>
+          {selectedLogin?.last_error ? <p className="error">{selectedLogin.last_error}</p> : <p className="hint">No current account error selected.</p>}
+          <div className="row gap inspector-actions">
+            <button
+              className="btn-secondary"
+              onClick={() => selectedAuthLogin && authPreflightMutation.mutate(selectedAuthLogin)}
+              disabled={authPreflightMutation.isPending || !selectedAuthLogin}
+            >
+              {authPreflightMutation.isPending ? "Checking..." : "Preflight"}
+            </button>
+            <button
+              className="btn-secondary"
+              onClick={() => selectedAuthLogin && openPasswordModal(selectedAuthLogin)}
+              disabled={!selectedAuthLogin}
+            >
+              Password
+            </button>
+          </div>
+        </aside>
+      </div>
       {passwordModalOpen ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setPasswordModalOpen(false)}>
           <div className="modal-card" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
@@ -3262,19 +3889,22 @@ function SettingsPage() {
   const [draft, setDraft] = useState<Record<string, string | number | boolean>>({});
   const [proxyPassword, setProxyPassword] = useState("");
   const [loadedBackend, setLoadedBackend] = useState<string>("");
+  const [activeSettingsSection, setActiveSettingsSection] = useState("Run");
 
   const backendProfiles: Record<string, Record<string, string | number | boolean>> = {
     private: {
       run_http_timeout_seconds: 60,
       run_request_timeout: 60,
-      run_private_request_sleep_seconds: 0.8,
-      run_item_delay_min: 0.6,
-      run_item_delay_max: 1.4,
-      run_initial_fetch_delay_seconds: 6,
-      run_pause_every_min: 120,
-      run_pause_every_max: 180,
-      run_pause_seconds_min: 20,
-      run_pause_seconds_max: 45,
+      run_private_request_sleep_seconds: 0,
+      run_item_delay_min: 0.45,
+      run_item_delay_max: 1.15,
+      run_initial_fetch_delay_seconds: 2,
+      run_pause_every_min: 0,
+      run_pause_every_max: 0,
+      run_pause_seconds_min: 0,
+      run_pause_seconds_max: 0,
+      run_completeness_retry_max: 2,
+      run_completeness_retry_delay_seconds: 8,
       run_rate_limit_cooldown_seconds: 3600,
     },
     browser: {
@@ -3297,7 +3927,6 @@ function SettingsPage() {
     if (!c) return;
     const nextDraft: Record<string, string | number | boolean> = {};
     for (const [key, value] of Object.entries(c)) {
-      if (key.startsWith("recon_")) continue;
       if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
         nextDraft[key] = value;
       }
@@ -3333,6 +3962,14 @@ function SettingsPage() {
         run_scraper_backend: "Collector Family",
         run_browser_collection_method: "Browser Collection Method",
         run_login_mode: "Login Mode",
+        run_fetch_order: "Collection Order",
+        run_followers_order: "Follower Sort Order",
+        run_private_request_sleep_seconds: "Private Request Sleep",
+        run_initial_fetch_delay_seconds: "Initial Fetch Delay",
+        run_pre_login_flow: "Pre-login Warmup",
+        run_post_login_flow: "Post-login Warmup",
+        private_device_settings_json: "Private API Device Profile",
+        private_user_agent: "Private API User Agent",
       };
       if (customLabels[key]) return customLabels[key];
       return key
@@ -3345,7 +3982,6 @@ function SettingsPage() {
   const onSaveConfig = () => {
     const payload: Partial<ConfigValues> & { proxy_password?: string; _apply_backend_profile?: boolean } = {};
     for (const [key, value] of Object.entries(draft)) {
-      if (key.startsWith("recon_")) continue;
       if (key.endsWith("_set")) continue;
       (payload as Record<string, string | number | boolean>)[key] = value;
     }
@@ -3369,8 +4005,137 @@ function SettingsPage() {
       .map((section) => ({ section, keys: (grouped.get(section) || []).sort() }))
       .filter((x) => x.keys.length > 0);
   }, [draft]);
+  const activeSettings = sections.find((item) => item.section === activeSettingsSection) || sections[0];
   const booleanCount = Object.values(draft).filter((value) => typeof value === "boolean").length;
   const numericCount = Object.values(draft).filter((value) => typeof value === "number").length;
+
+  useEffect(() => {
+    if (sections.length && !sections.some((item) => item.section === activeSettingsSection)) {
+      setActiveSettingsSection(sections[0].section);
+    }
+  }, [activeSettingsSection, sections]);
+
+  const renderSettingControl = (key: string) => {
+    const value = draft[key];
+    if (typeof value === "undefined") return null;
+    if (key === "run_login_mode") {
+      return (
+        <label key={key}>
+          {labelForKey(key)}
+          <select value={String(value)} onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}>
+            <option value="auto">auto</option>
+            <option value="session_only">session_only</option>
+            <option value="password">password</option>
+            <option value="anonymous">anonymous</option>
+          </select>
+        </label>
+      );
+    }
+    if (key === "run_scraper_backend") {
+      return (
+        <label key={key}>
+          {labelForKey(key)}
+          <select
+            value={String(value)}
+            onChange={(e) =>
+              setDraft((prev) => {
+                const nextBackend = e.target.value === "private" ? "private" : "browser";
+                const profile = backendProfiles[nextBackend] || {};
+                return { ...prev, run_scraper_backend: nextBackend, ...profile };
+              })
+            }
+          >
+            <option value="browser">browser - web session collectors</option>
+            <option value="private">private_api - instagrapi</option>
+          </select>
+          <span className="hint">Switching families auto-loads the tuned delay and rate profile.</span>
+        </label>
+      );
+    }
+    if (key === "run_browser_collection_method") {
+      return (
+        <label key={key}>
+          {labelForKey(key)}
+          <select
+            value={String(value)}
+            onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
+          >
+            <option value="browser_native">browser_native - live browser collection</option>
+            <option value="instaloader_session">instaloader_session - dedicated session</option>
+          </select>
+          <span className="hint">Used only when Collector Family is set to browser.</span>
+        </label>
+      );
+    }
+    if (key === "run_fetch_order") {
+      return (
+        <label key={key}>
+          {labelForKey(key)}
+          <select
+            value={String(value)}
+            onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
+          >
+            <option value="followers_first">followers_first</option>
+            <option value="following_first">following_first</option>
+          </select>
+        </label>
+      );
+    }
+    if (key === "run_followers_order") {
+      return (
+        <label key={key}>
+          {labelForKey(key)}
+          <select
+            value={String(value)}
+            onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
+          >
+            <option value="">default</option>
+            <option value="date_followed_latest">date_followed_latest</option>
+            <option value="date_followed_earliest">date_followed_earliest</option>
+          </select>
+          <span className="hint">Used by the private_api collector when fetching followers through instagrapi.</span>
+        </label>
+      );
+    }
+    if (typeof value === "boolean") {
+      return (
+        <label key={key}>
+          {labelForKey(key)}
+          <select
+            value={value ? "true" : "false"}
+            onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value === "true" }))}
+          >
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        </label>
+      );
+    }
+    if (typeof value === "number") {
+      return (
+        <label key={key}>
+          {labelForKey(key)}
+          <input
+            type="number"
+            value={String(value)}
+            onChange={(e) => {
+              const num = e.target.value === "" ? 0 : Number(e.target.value);
+              setDraft((prev) => ({ ...prev, [key]: Number.isFinite(num) ? num : value }));
+            }}
+          />
+        </label>
+      );
+    }
+    return (
+      <label key={key}>
+        {labelForKey(key)}
+        <input
+          value={String(value)}
+          onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
+        />
+      </label>
+    );
+  };
 
   return (
     <section>
@@ -3399,110 +4164,40 @@ function SettingsPage() {
       {!cfgQ.data?.config ? (
         <article className="card"><p className="hint">Loading settings…</p></article>
       ) : null}
-      {sections.map(({ section, keys }) => (
-        <article className="card settings-group" key={section}>
-          <details className="settings-detail" open={section === "Run"}>
-            <summary>{section} Settings</summary>
-            <p className="hint settings-summary">{sectionSummary(section, keys)}</p>
-            <div className="settings-grid">
-              {keys.map((key) => {
-                const value = draft[key];
-                if (typeof value === "undefined") return null;
-                if (key === "run_login_mode") {
-                  return (
-                    <label key={key}>
-                      {labelForKey(key)}
-                      <select value={String(value)} onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}>
-                        <option value="auto">auto</option>
-                        <option value="session_only">session_only</option>
-                        <option value="password">password</option>
-                        <option value="anonymous">anonymous</option>
-                      </select>
-                    </label>
-                  );
-                }
-                if (key === "run_scraper_backend") {
-                  return (
-                    <label key={key}>
-                      {labelForKey(key)}
-                      <select
-                        value={String(value)}
-                        onChange={(e) =>
-                          setDraft((prev) => {
-                            const nextBackend = e.target.value === "private" ? "private" : "browser";
-                            const profile = backendProfiles[nextBackend] || {};
-                            return { ...prev, run_scraper_backend: nextBackend, ...profile };
-                          })
-                        }
-                      >
-                        <option value="browser">browser - web session collectors</option>
-                        <option value="private">private_api - instagrapi</option>
-                      </select>
-                      <span className="hint">This chooses the collector family. Switching families auto-loads the tuned delay and rate profile.</span>
-                    </label>
-                  );
-                }
-                if (key === "run_browser_collection_method") {
-                  return (
-                    <label key={key}>
-                      {labelForKey(key)}
-                      <select
-                        value={String(value)}
-                        onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
-                      >
-                        <option value="browser_native">browser_native - live browser dialog plus web top-off</option>
-                        <option value="instaloader_session">instaloader_session - dedicated logged-in session</option>
-                      </select>
-                      <span className="hint">Used only when Collector Family is set to browser.</span>
-                    </label>
-                  );
-                }
-                if (typeof value === "boolean") {
-                  return (
-                    <label key={key}>
-                      {labelForKey(key)}
-                      <select
-                        value={value ? "true" : "false"}
-                        onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value === "true" }))}
-                      >
-                        <option value="true">true</option>
-                        <option value="false">false</option>
-                      </select>
-                    </label>
-                  );
-                }
-                if (typeof value === "number") {
-                  return (
-                    <label key={key}>
-                      {labelForKey(key)}
-                      <input
-                        type="number"
-                        value={String(value)}
-                        onChange={(e) => {
-                          const num = e.target.value === "" ? 0 : Number(e.target.value);
-                          setDraft((prev) => ({ ...prev, [key]: Number.isFinite(num) ? num : value }));
-                        }}
-                      />
-                    </label>
-                  );
-                }
-                return (
-                  <label key={key}>
-                    {labelForKey(key)}
-                    <input
-                      value={String(value)}
-                      onChange={(e) => setDraft((prev) => ({ ...prev, [key]: e.target.value }))}
-                    />
-                  </label>
-                );
-              })}
+      <div className="console-layout settings-console">
+        <aside className="console-rail">
+          <div className="console-rail-title">Settings groups</div>
+          {sections.map(({ section, keys }) => (
+            <button
+              key={section}
+              className={`console-rail-item ${activeSettings?.section === section ? "active" : ""}`}
+              onClick={() => setActiveSettingsSection(section)}
+            >
+              <strong>{section}</strong>
+              <span>{keys.length} setting{keys.length === 1 ? "" : "s"}</span>
+            </button>
+          ))}
+        </aside>
+        <article className="card panel-flat console-main">
+          <div className="panel-head">
+            <div>
+              <h3>{activeSettings?.section || "Settings"} Settings</h3>
+              <p className="hint settings-summary">
+                {activeSettings ? sectionSummary(activeSettings.section, activeSettings.keys) : "Loading settings."}
+              </p>
             </div>
-          </details>
+            <span className="pill neutral">{activeSettings?.keys.length || 0} controls</span>
+          </div>
+          <div className="settings-grid">{(activeSettings?.keys || []).slice(0, 8).map(renderSettingControl)}</div>
+          {(activeSettings?.keys.length || 0) > 8 ? (
+            <details className="settings-detail advanced-detail">
+              <summary>Advanced {activeSettings?.section} controls</summary>
+              <div className="settings-grid">{(activeSettings?.keys || []).slice(8).map(renderSettingControl)}</div>
+            </details>
+          ) : null}
         </article>
-      ))}
-      <article className="card">
-        <h3>Secrets And Actions</h3>
-        <div className="settings-grid">
+        <aside className="console-inspector">
+          <h3>Save And Proxy</h3>
           <label>
             Proxy password
             <input
@@ -3512,26 +4207,157 @@ function SettingsPage() {
               placeholder={cfgQ.data?.config?.proxy_password_set ? "stored (leave blank to keep)" : "set proxy password"}
             />
           </label>
+          <div className="inspector-facts">
+            <div>
+              <span>Collector</span>
+              <strong>{collectorFamilyLabel(String(draft.run_scraper_backend || "-"))}</strong>
+            </div>
+            <div>
+              <span>Login mode</span>
+              <strong>{String(draft.run_login_mode || "auto")}</strong>
+            </div>
+            <div>
+              <span>Proxy</span>
+              <strong>{draft.proxy_enabled ? "enabled" : "disabled"}</strong>
+            </div>
+          </div>
+          <div className="row gap inspector-actions">
+            <button onClick={onSaveConfig} disabled={updateCfgMutation.isPending}>
+              {updateCfgMutation.isPending ? "Saving..." : "Save config"}
+            </button>
+            <button
+              className="btn-secondary"
+              onClick={() => proxyTestMutation.mutate()}
+              disabled={proxyTestMutation.isPending}
+            >
+              {proxyTestMutation.isPending ? "Testing..." : "Test proxy"}
+            </button>
+          </div>
+          {updateCfgMutation.error ? <p className="error">{(updateCfgMutation.error as Error).message}</p> : null}
+          {proxyTestMutation.error ? <p className="error">{(proxyTestMutation.error as Error).message}</p> : null}
+          {proxyTestMutation.data ? (
+            <p className={`pill ${proxyTestMutation.data.ok ? "good" : "bad"}`}>
+              {proxyTestMutation.data.ok
+                ? `Proxy OK (${proxyTestMutation.data.status || 200}, ${proxyTestMutation.data.latency_ms || 0}ms)`
+                : `Proxy failed: ${proxyTestMutation.data.error || "unknown error"}`}
+            </p>
+          ) : null}
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+function JobStatusPage() {
+  const { jobId = "" } = useParams();
+  const jobQ = useQuery({
+    queryKey: ["run-job-summary", jobId],
+    queryFn: () => getRunJobSummary(jobId),
+    enabled: Boolean(jobId),
+    refetchInterval: 4000,
+  });
+  const job = jobQ.data;
+  const alternate = (job?.alternate || {}) as Record<string, unknown>;
+  const retry = (job?.retry || {}) as Record<string, unknown>;
+  const result = (job?.result || {}) as Record<string, unknown>;
+  const followers = (job?.followers || {}) as Record<string, unknown>;
+  const following = (job?.following || {}) as Record<string, unknown>;
+  const activeRecovery = Boolean(alternate.running || retry.running);
+
+  return (
+    <section>
+      <header className="page-header">
+        <h1>Job Status</h1>
+        <p>{jobId || "No job selected"}</p>
+      </header>
+      {jobQ.error ? <p className="error">{(jobQ.error as Error).message}</p> : null}
+      <article className="card job-status-card">
+        <div className="job-status-head">
+          <div>
+            <h3>
+              @{job?.target_username || "-"} <span className="hint">via @{job?.login_username || "-"}</span>
+            </h3>
+            <p className="hint">
+              {job?.state || (jobQ.isLoading ? "loading" : "-")} · {job?.phase || "no active phase"}
+              {activeRecovery ? " · recovery pass active" : ""}
+            </p>
+          </div>
+          <NavLink to="/operations" className="text-link">
+            Operations
+          </NavLink>
         </div>
-        <div className="row gap">
-          <button onClick={onSaveConfig} disabled={updateCfgMutation.isPending}>
-            {updateCfgMutation.isPending ? "Saving..." : "Save config"}
-          </button>
-          <button
-            className="btn-secondary"
-            onClick={() => proxyTestMutation.mutate()}
-            disabled={proxyTestMutation.isPending}
-          >
-            {proxyTestMutation.isPending ? "Testing..." : "Test proxy"}
-          </button>
+        <div className="dossier-strip job-status-kpis">
+          <article className="dossier-cell">
+            <span>Collected</span>
+            <strong>{String(job?.count ?? "-")}</strong>
+          </article>
+          <article className="dossier-cell">
+            <span>Expected</span>
+            <strong>{String(job?.expected_total ?? "-")}</strong>
+          </article>
+          <article className="dossier-cell">
+            <span>Missing</span>
+            <strong>{String(job?.missing_count ?? "-")}</strong>
+          </article>
+          <article className="dossier-cell">
+            <span>Last update</span>
+            <strong>{formatSecondsAge(job?.seconds_since_update)}</strong>
+          </article>
         </div>
-        {updateCfgMutation.error ? <p className="error">{(updateCfgMutation.error as Error).message}</p> : null}
-        {proxyTestMutation.error ? <p className="error">{(proxyTestMutation.error as Error).message}</p> : null}
-        {proxyTestMutation.data ? (
-          <p className={`pill ${proxyTestMutation.data.ok ? "good" : "bad"}`}>
-            {proxyTestMutation.data.ok
-              ? `Proxy OK (${proxyTestMutation.data.status || 200}, ${proxyTestMutation.data.latency_ms || 0}ms)`
-              : `Proxy failed: ${proxyTestMutation.data.error || "unknown error"}`}
+        <div className="job-status-grid">
+          <div>
+            <span>Following</span>
+            <strong>{String(following.count ?? "-")} / {String(following.expected_total ?? "-")}</strong>
+          </div>
+          <div>
+            <span>Followers</span>
+            <strong>{String(followers.count ?? "-")} / {String(followers.expected_total ?? "-")}</strong>
+          </div>
+          <div>
+            <span>Page</span>
+            <strong>{String(job?.page_index ?? "-")}</strong>
+          </div>
+          <div>
+            <span>Page yield</span>
+            <strong>{String(job?.page_unique_new ?? job?.page_unique_count ?? "-")} new</strong>
+          </div>
+          <div>
+            <span>Duplicates</span>
+            <strong>{String(job?.duplicates_total ?? "-")}</strong>
+          </div>
+          <div>
+            <span>Last page</span>
+            <strong>{formatSecondsAge(job?.seconds_since_last_page)}</strong>
+          </div>
+          <div>
+            <span>Alternate pass</span>
+            <strong>
+              {alternate.running
+                ? `${String(alternate.endpoint || "-")} page ${String(alternate.page_index ?? "-")} · added ${String(alternate.added ?? "-")}`
+                : "-"}
+            </strong>
+          </div>
+          <div>
+            <span>Retry pass</span>
+            <strong>
+              {retry.running || retry.complete
+                ? `attempt ${String(retry.attempt ?? "-")} · added ${String(retry.added ?? "-")} · missing ${String(retry.missing_count ?? "-")}`
+                : "-"}
+            </strong>
+          </div>
+          <div>
+            <span>Last page time</span>
+            <strong>{formatEpochTime(job?.last_page_at)}</strong>
+          </div>
+          <div>
+            <span>Worker</span>
+            <strong>{job?.last_worker_message || "-"}</strong>
+          </div>
+        </div>
+        {job?.error ? <p className="error">{job.error}</p> : null}
+        {result.run_id || result.followers_count || result.followees_count ? (
+          <p className="hint">
+            Result: run {String(result.run_id ?? "-")} · followers {String(result.followers_count ?? "-")} · following {String(result.followees_count ?? "-")}
           </p>
         ) : null}
       </article>
@@ -3559,6 +4385,7 @@ export default function App() {
         <Route path="/unfollow" element={<UnfollowPage />} />
         <Route path="/accounts" element={<AccountsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/jobs/:jobId" element={<JobStatusPage />} />
       </Routes>
     </AppShell>
   );

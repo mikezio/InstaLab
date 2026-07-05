@@ -3,7 +3,6 @@ import logging
 import os
 import re
 from pathlib import Path
-from datetime import datetime
 from urllib.parse import urljoin
 
 import requests
@@ -12,7 +11,6 @@ from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_http_methods
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +24,6 @@ except Exception as e:
     logger.warning(f"Failed to load environment variables: {e}")
 
 FLASK_BASE = os.getenv("INSTALAB_API_BASE", "http://127.0.0.1:5000/")
-SECRET_DROP_DIR = Path(os.getenv("INSTALAB_SECRET_DROP_DIR", "/srv/secrets/secret-drop"))
 
 
 def index(request):
@@ -53,96 +50,6 @@ def modern_shortcut(request, subpath: str = ""):
 
 def healthz(request):
     return JsonResponse({"status": "ok"})
-
-
-@require_http_methods(["GET", "POST"])
-@csrf_exempt
-def secret_drop(request):
-    status = None
-    error = None
-    if request.method == "POST":
-        secret = (request.POST.get("secret") or "").strip()
-        uploads = request.FILES.getlist("secret_file")
-        filename_raw = ""
-        package_raw = ""
-        context_text = (request.POST.get("file_context") or "").strip()
-        context_map_raw = (request.POST.get("file_context_map") or "").strip()
-        if not secret and not uploads:
-            error = "Provide text or upload a file."
-        else:
-            safe_name = ""
-            safe_package = ""
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            try:
-                SECRET_DROP_DIR.mkdir(parents=True, exist_ok=True)
-                saved = []
-                if secret:
-                    filename = safe_name or f"secret_{ts}.txt"
-                    path = SECRET_DROP_DIR / filename
-                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                        handle.write(secret)
-                    saved.append({"path": str(path), "bytes": len(secret)})
-
-                for upload in uploads or []:
-                    raw_name = re.sub(r"[^a-zA-Z0-9._-]+", "", upload.name)[:80] or f"upload_{ts}"
-                    filename = safe_name if (safe_name and len(uploads or []) == 1 and not secret) else raw_name
-                    path = SECRET_DROP_DIR / filename
-                    suffix = 1
-                    while path.exists():
-                        path = SECRET_DROP_DIR / f"{path.stem}_{suffix}{path.suffix}"
-                        suffix += 1
-                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                    with os.fdopen(fd, "wb") as handle:
-                        for chunk in upload.chunks():
-                            handle.write(chunk)
-                    size = getattr(upload, "size", None)
-                    saved.append({"path": str(path), "bytes": size if size is not None else path.stat().st_size})
-
-                package_path = None
-                context_lines = []
-                if context_map_raw:
-                    try:
-                        parsed = json.loads(context_map_raw)
-                        if isinstance(parsed, list):
-                            for entry in parsed:
-                                if not isinstance(entry, dict):
-                                    continue
-                                name = (entry.get("name") or "").strip()
-                                ctx = (entry.get("context") or "").strip()
-                                size = entry.get("size")
-                                if not name or not ctx:
-                                    continue
-                                suffix = f" ({size} bytes)" if isinstance(size, int) else ""
-                                context_lines.append(f"{name}{suffix}: {ctx}")
-                    except Exception:
-                        pass
-                if context_text:
-                    context_lines.append(context_text)
-                if (uploads or secret) and context_lines:
-                    package_name = safe_package or f"package_{ts}.zip"
-                    package_path = SECRET_DROP_DIR / package_name
-                    import zipfile
-                    with zipfile.ZipFile(package_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                        for item in saved:
-                            src = Path(item["path"])
-                            zf.write(src, arcname=src.name)
-                        zf.writestr("context.txt", "\n".join(context_lines).strip() + "\n")
-
-                status = {
-                    "files": saved,
-                    "package": str(package_path) if package_path else None,
-                }
-            except FileExistsError:
-                error = "That filename already exists. Choose another name."
-            except Exception as exc:
-                logger.error("Secret drop failed: %s", exc)
-                error = "Could not store secret. Check server logs for details."
-    return render(
-        request,
-        "dashboard/secret_drop.html",
-        {"status": status, "error": error, "drop_dir": str(SECRET_DROP_DIR)},
-    )
 
 
 @csrf_exempt  # Note: CSRF exemption required for API proxy; Flask backend should validate requests

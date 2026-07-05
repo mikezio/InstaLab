@@ -211,9 +211,9 @@ def test_rebuild_target_relationship_state_recomputes_remaining_runs_after_delet
             ).fetchone()
             assert third_run["prev_run_id"] == first_run_id
             assert third_run["followers_added"] == 2
-            assert third_run["followers_removed"] == 1
+            assert third_run["followers_removed"] == 2
             assert third_run["followees_added"] == 2
-            assert third_run["followees_removed"] == 1
+            assert third_run["followees_removed"] == 2
 
             events = {
                 (row["run_id"], row["relation_type"], row["event_type"], row["username"])
@@ -231,9 +231,111 @@ def test_rebuild_target_relationship_state_recomputes_remaining_runs_after_delet
             assert (third_run_id, "followers", "added", "dana") in events
             assert (third_run_id, "followers", "added", "charlie") in events
             assert (third_run_id, "followers", "removed", "alice") in events
+            assert (third_run_id, "followers", "removed", "bob") in events
             assert (third_run_id, "following", "added", "quinn") in events
             assert (third_run_id, "following", "added", "zara") in events
+            assert (third_run_id, "following", "removed", "xavier") in events
             assert (third_run_id, "following", "removed", "yuki") in events
+        finally:
+            _cleanup_target(conn, target)
+            conn.close()
+    except Exception:
+        conn = get_db()
+        try:
+            _cleanup_target(conn, target)
+        finally:
+            conn.close()
+        raise
+
+
+def test_incomplete_runs_are_audit_only_and_not_delta_baselines():
+    suffix = uuid4().hex[:10]
+    target = f"pytest_partial_{suffix}"
+    login = f"pytest_login_{suffix}"
+    t1 = "2026-02-11_10-00-00"
+    t2 = "2026-02-11_11-00-00"
+    t3 = "2026-02-11_12-00-00"
+
+    conn = get_db()
+    try:
+        _cleanup_target(conn, target)
+    finally:
+        conn.close()
+
+    try:
+        _, first_run_id = write_run_metadata(
+            db_path="/tmp/instalab_runs.db",
+            login_username=login,
+            target_username=target,
+            timestamp=t1,
+            followers=["alice", "bob"],
+            followees=["xavier", "yuki"],
+            non_followbacks_count=2,
+        )
+        incomplete_changes, incomplete_run_id = write_run_metadata(
+            db_path="/tmp/instalab_runs.db",
+            login_username=login,
+            target_username=target,
+            timestamp=t2,
+            followers=["alice", "bob"],
+            followees=["xavier"],
+            non_followbacks_count=1,
+            followees_total_hint=10,
+        )
+        complete_changes, complete_run_id = write_run_metadata(
+            db_path="/tmp/instalab_runs.db",
+            login_username=login,
+            target_username=target,
+            timestamp=t3,
+            followers=["bob", "charlie"],
+            followees=["xavier", "zara"],
+            non_followbacks_count=2,
+        )
+
+        assert incomplete_changes["snapshot_complete"] is False
+        assert incomplete_changes["relationship_events_recorded"] == 0
+        assert complete_changes["snapshot_complete"] is True
+
+        conn = get_db()
+        try:
+            summary = rebuild_target_relationship_state(conn, target_username=target)
+            conn.commit()
+            assert summary["runs_seen"] == 3
+            assert summary["runs_replayed"] == 2
+
+            incomplete_run = conn.execute(
+                """
+                SELECT prev_run_id, followers_added, followers_removed, followees_added, followees_removed
+                FROM runs
+                WHERE id = ?
+                """,
+                (incomplete_run_id,),
+            ).fetchone()
+            assert incomplete_run["prev_run_id"] is None
+            assert incomplete_run["followers_added"] == 0
+            assert incomplete_run["followers_removed"] == 0
+            assert incomplete_run["followees_added"] == 0
+            assert incomplete_run["followees_removed"] == 0
+
+            complete_run = conn.execute(
+                """
+                SELECT prev_run_id, followers_added, followers_removed, followees_added, followees_removed
+                FROM runs
+                WHERE id = ?
+                """,
+                (complete_run_id,),
+            ).fetchone()
+            assert complete_run["prev_run_id"] == first_run_id
+            assert complete_run["followers_added"] == 1
+            assert complete_run["followers_removed"] == 1
+            assert complete_run["followees_added"] == 1
+            assert complete_run["followees_removed"] == 1
+
+            incomplete_event_count = conn.execute(
+                "SELECT COUNT(*) FROM relationship_events WHERE run_id = ?",
+                (incomplete_run_id,),
+            ).fetchone()[0]
+            assert incomplete_event_count == 0
         finally:
             _cleanup_target(conn, target)
             conn.close()

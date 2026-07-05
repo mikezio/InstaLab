@@ -7,9 +7,13 @@ the actively maintained instagrapi client.
 from __future__ import annotations
 
 import json
+import email
+import imaplib
 import os
 import random
 import re
+import secrets
+import string
 import threading
 import time
 import urllib.request
@@ -29,6 +33,7 @@ from instagrapi.exceptions import (
     BadPassword,
     ChallengeRequired,
     ChallengeError,
+    ClientLoginRequired,
     FeedbackRequired,
     ClientThrottledError,
     EmailInvalidError,
@@ -39,13 +44,24 @@ from instagrapi.exceptions import (
     PleaseWaitFewMinutes,
     RateLimitError,
     TwoFactorRequired,
+    UserNotFound,
+    NotFoundError,
+    ClientNotFoundError,
 )
 from instagrapi import utils as instagrapi_utils
+from instagrapi.mixins.user import MAX_USER_COUNT, extract_user_short
 from instagrapi.mixins.totp import TOTP
 from requests.exceptions import ProxyError as RequestsProxyError
 from requests.exceptions import SSLError as RequestsSSLError
 
-from tracker_db import write_run_metadata, write_run_profile_counts
+from tracker_db import (
+    normalize_account_profile,
+    update_relationship_event_account_statuses,
+    upsert_account_profiles,
+    write_run_metadata,
+    write_run_profile_counts,
+)
+from db import get_db
 from login_store import (
     clear_session_settings,
     consume_challenge_code,
@@ -72,6 +88,8 @@ TWO_FACTOR_POLL_SECONDS = int(os.getenv("RUN_2FA_POLL_SECONDS", "180") or 180)
 TWO_FACTOR_POLL_INTERVAL = float(os.getenv("RUN_2FA_POLL_INTERVAL", "5") or 5)
 REQUEST_SLEEP_MAX = float(os.getenv("INSTALAB_PRIVATE_REQUEST_SLEEP_MAX", "2.0") or 2.0)
 REQUEST_SLEEP_FALLBACK = float(os.getenv("INSTALAB_PRIVATE_REQUEST_SLEEP", "1.0") or 1.0)
+COMPLETENESS_RETRY_MAX = int(os.getenv("RUN_COMPLETENESS_RETRY_MAX", "2") or 2)
+COMPLETENESS_RETRY_DELAY_SECONDS = float(os.getenv("RUN_COMPLETENESS_RETRY_DELAY_SECONDS", "8") or 8)
 PRE_LOGIN_FLOW_ENABLED = str(os.getenv("RUN_PRE_LOGIN_FLOW", "false")).strip().lower() in {"1", "true", "yes", "on"}
 POST_LOGIN_FLOW_ENABLED = str(os.getenv("RUN_POST_LOGIN_FLOW", "false")).strip().lower() in {"1", "true", "yes", "on"}
 ANONYMOUS_LOGIN_MODES = {"anonymous", "public", "no_login", "no-login", "anon"}
@@ -341,6 +359,9 @@ def _summarize_last_json(last_json):
     if not isinstance(last_json, dict):
         return last_json
     summary = {k: last_json.get(k) for k in ("status", "message", "error_type", "checkpoint_url")}
+    for key in ("challenge", "step_name", "step_data", "challenge_type_enum_str"):
+        if key in last_json:
+            summary[key] = last_json.get(key)
     if "two_factor_info" in last_json:
         summary["two_factor_info"] = last_json.get("two_factor_info")
     summary["keys"] = sorted(list(last_json.keys()))[:40]
@@ -397,22 +418,60 @@ def _emit_paginated_progress(client: Client, endpoint) -> None:
         return
 
     kind = match.group("kind")
+    now = time.time()
     seen_key = f"{kind}_seen"
+    page_key = f"{kind}_pages"
+    duplicate_key = f"{kind}_duplicates"
+    last_at_key = f"{kind}_last_page_at"
     seen = state.get(seen_key)
     if not isinstance(seen, set):
         seen = set()
         state[seen_key] = seen
 
-    user_ids = _extract_progress_user_ids(getattr(client, "last_json", None))
-    if not user_ids:
-        return
+    last_json = getattr(client, "last_json", None)
+    user_ids = _extract_progress_user_ids(last_json)
+    page_index = int(state.get(page_key) or 0) + 1
+    state[page_key] = page_index
+    page_raw_count = 0
+    has_more = None
+    next_max_id = None
+    if isinstance(last_json, dict):
+        users = last_json.get("users")
+        if isinstance(users, list):
+            page_raw_count = len(users)
+        has_more = last_json.get("has_more")
+        next_max_id = last_json.get("next_max_id")
 
     before = len(seen)
     seen.update(user_ids)
-    if len(seen) <= before:
-        return
+    page_unique_new = len(seen) - before
+    page_duplicates = max(len(user_ids) - page_unique_new, 0)
+    total_duplicates = int(state.get(duplicate_key) or 0) + page_duplicates
+    state[duplicate_key] = total_duplicates
+    previous_page_at = state.get(last_at_key)
+    state[last_at_key] = now
+    seconds_since_previous_page = None
+    if previous_page_at:
+        try:
+            seconds_since_previous_page = round(now - float(previous_page_at), 3)
+        except Exception:
+            seconds_since_previous_page = None
+
+    payload = {
+        "count": len(seen),
+        "page_index": page_index,
+        "page_raw_count": page_raw_count,
+        "page_unique_count": len(user_ids),
+        "page_unique_new": page_unique_new,
+        "page_duplicate_count": page_duplicates,
+        "duplicates_total": total_duplicates,
+        "has_more": has_more,
+        "next_max_id": next_max_id,
+        "last_page_at": now,
+        "seconds_since_previous_page": seconds_since_previous_page,
+    }
     try:
-        callback(kind, len(seen))
+        callback(kind, payload)
     except Exception:
         pass
 
@@ -647,6 +706,10 @@ def _challenge_code_handler_factory(login_username: str, code: str | None):
         if normalized:
             print("Challenge code supplied (env)", flush=True)
             return normalized
+        email_code = _get_challenge_code_from_email(login_username, username, choice)
+        if email_code:
+            print("Challenge code supplied (email)", flush=True)
+            return email_code
         try:
             db_code = consume_challenge_code(login_username)
         except Exception:
@@ -654,9 +717,150 @@ def _challenge_code_handler_factory(login_username: str, code: str | None):
         if db_code:
             print("Challenge code supplied (store)", flush=True)
             return _normalize_two_factor_code(db_code)
+        print(f"Waiting for challenge code for {username} ({choice})", flush=True)
+        polled_code = _poll_two_factor_code(login_username)
+        if polled_code:
+            print("Challenge code supplied (poll)", flush=True)
+            return polled_code
         return False
 
     return _handler
+
+
+def _message_text_parts(message):
+    if message.is_multipart():
+        for part in message.walk():
+            content_type = part.get_content_type()
+            if content_type not in {"text/plain", "text/html"}:
+                continue
+            try:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    yield payload.decode(part.get_content_charset() or "utf-8", errors="ignore")
+            except Exception:
+                continue
+    else:
+        try:
+            payload = message.get_payload(decode=True)
+            if payload:
+                yield payload.decode(message.get_content_charset() or "utf-8", errors="ignore")
+        except Exception:
+            return
+
+
+def _extract_instagram_code_from_email(raw_message: bytes, username: str) -> str | None:
+    try:
+        message = email.message_from_bytes(raw_message)
+    except Exception:
+        return None
+    sender = str(message.get("From") or "").lower()
+    subject = str(message.get("Subject") or "")
+    subject_lower = subject.lower()
+    bodies = "\n".join(_message_text_parts(message))
+    if not bodies:
+        return None
+    body_lower = bodies.lower()
+    from_instagram = "instagram" in sender or "instagram" in subject_lower
+    from_google_voice = "voice-noreply@google.com" in sender or "google voice" in sender or "new text message from" in subject_lower
+    mentions_instagram_code = "instagram code" in body_lower or ("instagram" in body_lower and "code" in body_lower)
+    if not from_instagram and not (from_google_voice and mentions_instagram_code):
+        return None
+    username_key = str(username or "").strip().lower().lstrip("@")
+    if username_key and username_key not in bodies.lower():
+        # Some Instagram emails omit the username, so do not reject solely on this.
+        pass
+    patterns = [
+        r"\b(\d{6})\s+is\s+your\s+instagram\s+code\b",
+        r"\b(\d{6})\b",
+        r">\s*(\d{6})\s*<",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, bodies)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _get_challenge_code_from_email(login_username: str, username: str, choice) -> str | None:
+    choice_key = str(getattr(choice, "name", choice)).lower()
+    if choice_key not in {"email", "sms", "challengechoice.email", "challengechoice.sms"}:
+        return None
+    entry = get_login(login_username, include_secrets=True) or {}
+    if not entry.get("challenge_email_configured"):
+        return None
+    host = str(entry.get("challenge_email_host") or "").strip()
+    port = int(entry.get("challenge_email_port") or (993 if int(entry.get("challenge_email_ssl") or 1) else 143))
+    mailbox = str(entry.get("challenge_email_mailbox") or "INBOX").strip() or "INBOX"
+    email_username = entry.get("challenge_email_username")
+    email_password = entry.get("challenge_email_password")
+    if not host or not email_username or not email_password:
+        return None
+    try:
+        if int(entry.get("challenge_email_ssl") if entry.get("challenge_email_ssl") is not None else 1):
+            mail = imaplib.IMAP4_SSL(host, port)
+        else:
+            mail = imaplib.IMAP4(host, port)
+        try:
+            mail.login(email_username, email_password)
+            result, _ = mail.select(mailbox)
+            if result != "OK":
+                return None
+            result, data = mail.search(None, "UNSEEN")
+            if result != "OK" or not data:
+                return None
+            ids = data[0].split()
+            for msg_id in reversed(ids[-20:]):
+                result, fetched = mail.fetch(msg_id, "(RFC822)")
+                if result != "OK" or not fetched:
+                    continue
+                raw = None
+                for item in fetched:
+                    if isinstance(item, tuple) and item[1]:
+                        raw = item[1]
+                        break
+                if not raw:
+                    continue
+                code = _extract_instagram_code_from_email(raw, username)
+                if code:
+                    mail.store(msg_id, "+FLAGS", "\\Seen")
+                    return code
+        finally:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+    except Exception as exc:
+        _auth_trace(login_username, "challenge_email_lookup_failed", error=str(exc))
+        return None
+    return None
+
+
+def _poll_new_password(login_username: str) -> str:
+    if TWO_FACTOR_POLL_SECONDS <= 0:
+        return ""
+    deadline = time.time() + TWO_FACTOR_POLL_SECONDS
+    while time.time() < deadline:
+        try:
+            pwd = consume_new_password(login_username)
+        except Exception:
+            pwd = None
+        if pwd:
+            return pwd
+        time.sleep(TWO_FACTOR_POLL_INTERVAL)
+    return ""
+
+
+def _generate_challenge_password(length: int = 18) -> str:
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    while True:
+        password = "".join(secrets.choice(alphabet) for _ in range(length))
+        if (
+            any(ch.islower() for ch in password)
+            and any(ch.isupper() for ch in password)
+            and any(ch.isdigit() for ch in password)
+            and any(ch in "!@#$%^&*" for ch in password)
+        ):
+            return password
 
 
 def _poll_two_factor_code(login_username: str) -> str:
@@ -664,6 +868,10 @@ def _poll_two_factor_code(login_username: str) -> str:
         return ""
     deadline = time.time() + TWO_FACTOR_POLL_SECONDS
     while time.time() < deadline:
+        email_code = _get_challenge_code_from_email(login_username, login_username, "sms")
+        if email_code:
+            _auth_trace(login_username, "two_factor_email_code_found")
+            return email_code
         try:
             db_code = consume_challenge_code(login_username)
         except Exception:
@@ -832,7 +1040,10 @@ def _apply_device_settings(
     if needs_device_upgrade:
         merged = dict(current or {})
         merged.update({k: v for k, v in (desired or {}).items() if v is not None and v != ""})
-        client.set_device(merged)
+        try:
+            client.set_device(merged, hydrate_app_profile=True)
+        except TypeError:
+            client.set_device(merged)
         changed = True
     normalized_user_agent = (user_agent or "").strip()
     if normalized_user_agent:
@@ -984,9 +1195,31 @@ def _build_client(
                     client._instalab_device_upgrade = True
                     _login_with_password()
                     return
-            # Do not auto-resolve unknown challenge flows here.
-            # Repeated resolver attempts can amplify risk signals.
-            raise exc
+            if getattr(client, "_instalab_challenge_resolve_attempted", False):
+                raise exc
+            client._instalab_challenge_resolve_attempted = True
+            _auth_trace(
+                login_username,
+                "challenge_resolve_start",
+                challenge=_summarize_last_json(getattr(client, "last_json", None)),
+            )
+            client.challenge_resolve(client.last_json)
+            try:
+                _save_settings(login_username, client.get_settings())
+            except Exception:
+                pass
+            if new_password_used["value"]:
+                try:
+                    set_login_password(login_username, new_password_used["value"])
+                    _auth_trace(login_username, "challenge_password_saved")
+                except Exception:
+                    pass
+            _auth_trace(
+                login_username,
+                "challenge_resolve_ok",
+                challenge=_summarize_last_json(getattr(client, "last_json", None)),
+            )
+            return
         if isinstance(exc, LoginRequired):
             if mode == "session_only":
                 raise exc
@@ -1046,6 +1279,12 @@ def _build_client(
             pwd = consume_new_password(login_username)
         except Exception:
             pwd = None
+        if not pwd:
+            print(f"Waiting for new password for {username}", flush=True)
+            pwd = _poll_new_password(login_username)
+        if not pwd:
+            pwd = _generate_challenge_password()
+            _auth_trace(login_username, "challenge_password_generated")
         if pwd:
             new_password_used["value"] = pwd
         return pwd or False
@@ -1230,11 +1469,13 @@ def _build_client(
                     if mode == "session_only":
                         raise
                     _login_with_password()
-                except Exception:
+                except Exception as exc:
                     _auth_trace(
                         login_username,
                         "session_validation_failed",
                         error_code="session_probe_error",
+                        error=str(exc),
+                        challenge=_summarize_last_json(getattr(cl, "last_json", None)),
                     )
                     raise
         else:
@@ -1277,6 +1518,51 @@ def _sleep_jitter(delay_min: float, delay_max: float) -> None:
     if delay_max and delay_min > delay_max:
         delay_min, delay_max = delay_max, delay_min
     time.sleep(random.uniform(delay_min, max(delay_min, delay_max)))
+
+
+def _merge_usernames(primary, secondary):
+    merged = []
+    seen = set()
+    for value in list(primary or []) + list(secondary or []):
+        username = str(value or "").strip()
+        key = username.lower()
+        if not username or key in seen:
+            continue
+        seen.add(key)
+        merged.append(username)
+    return merged
+
+
+def _remember_profile(profile_cache: dict, item) -> None:
+    profile = normalize_account_profile(item)
+    if not profile:
+        return
+    profile_cache[profile["username"]] = profile
+
+
+def _remember_profiles(profile_cache: dict, items) -> None:
+    for item in items or []:
+        _remember_profile(profile_cache, item)
+
+
+def _collect_iter_usernames(iterator, *, progress=None, kind: str, attempt: int, profile_cache=None) -> list[str]:
+    values = []
+    seen = set()
+    for item in iterator:
+        if profile_cache is not None:
+            _remember_profile(profile_cache, item)
+        username = str(getattr(item, "username", "") or "").strip()
+        key = username.lower()
+        if not username or key in seen:
+            continue
+        seen.add(key)
+        values.append(username)
+        if progress and (len(values) == 1 or len(values) % 25 == 0):
+            try:
+                progress(kind, {"count": len(values), "attempt": attempt, "streaming": True})
+            except Exception:
+                pass
+    return values
 
 
 def _user_info_private_first(client: Client, username: str):
@@ -1418,7 +1704,10 @@ def disable_totp(
 
 
 def generate_totp_code(seed: str) -> str:
-    return _totp_code_for_timestamp(seed)
+    normalized_seed = _normalize_totp_seed(seed)
+    if hasattr(Client, "totp_generate_code"):
+        return Client.totp_generate_code(normalized_seed)
+    return _totp_code_for_timestamp(normalized_seed)
 
 
 def request_password_reset(
@@ -1438,30 +1727,18 @@ def request_password_reset(
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_6) "
         "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/11.1.2 Safari/605.1.15"
     )
-    headers = {
-        "x-requested-with": "XMLHttpRequest",
-        "x-csrftoken": instagrapi_utils.gen_token(),
-        "Connection": "Keep-Alive",
-        "Accept": "*/*",
-        "Accept-Encoding": "gzip,deflate",
-        "Accept-Language": "en-US",
-        "User-Agent": effective_user_agent,
-    }
-    proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-    response = requests.post(
-        "https://www.instagram.com/accounts/account_recovery_send_ajax/",
-        data={"email_or_username": identifier, "recaptcha_challenge_field": ""},
-        headers=headers,
-        proxies=proxies,
-        timeout=timeout_seconds,
+    client = _build_public_client(
+        proxy_url,
+        http_timeout_seconds=timeout_seconds,
+        request_sleep_seconds=0,
     )
     try:
-        payload = response.json()
+        client.set_user_agent(effective_user_agent)
     except Exception:
-        payload = {"raw": (response.text or "")[:500]}
-    if response.status_code >= 400:
-        raise RuntimeError(f"password reset request failed: http {response.status_code} payload={payload}")
-    return {"http_status": response.status_code, "payload": payload}
+        pass
+    payload = client.send_password_reset(identifier)
+    status_code = getattr(getattr(client, "last_response", None), "status_code", None) or 200
+    return {"http_status": status_code, "payload": payload}
 
 
 def signup_account_private_api(
@@ -1513,18 +1790,46 @@ def signup_account_private_api(
         return base_challenge_handler(username, choice)
 
     client.challenge_code_handler = _timed_handler
+    signup_method = "legacy_signup"
 
     try:
-        user = client.signup(
-            username=login_username,
-            password=login_password,
-            email=email,
-            phone_number=phone_number or "",
-            full_name=full_name or "",
-            year=year,
-            month=month,
-            day=day,
-        )
+        if email and not phone_number and hasattr(client, "signup_caa_email"):
+            try:
+                signup_method = "caa_email"
+                user = client.signup_caa_email(
+                    username=login_username,
+                    password=login_password,
+                    email=email,
+                    full_name=full_name or "",
+                    year=year,
+                    month=month,
+                    day=day,
+                    attempts=max(1, int(poll_seconds / max(1.0, poll_interval))),
+                    wait_seconds=max(1, int(poll_interval or 5.0)),
+                )
+            except Exception:
+                signup_method = "legacy_signup_after_caa_fallback"
+                user = client.signup(
+                    username=login_username,
+                    password=login_password,
+                    email=email,
+                    phone_number="",
+                    full_name=full_name or "",
+                    year=year,
+                    month=month,
+                    day=day,
+                )
+        else:
+            user = client.signup(
+                username=login_username,
+                password=login_password,
+                email=email,
+                phone_number=phone_number or "",
+                full_name=full_name or "",
+                year=year,
+                month=month,
+                day=day,
+            )
     except EmailInvalidError as exc:
         raise PrivateAPIError("email_invalid", str(exc))
     except EmailNotAvailableError as exc:
@@ -1563,6 +1868,7 @@ def signup_account_private_api(
     return {
         "username": getattr(user, "username", login_username),
         "pk": getattr(user, "pk", None),
+        "signup_method": signup_method,
     }
 
 
@@ -1636,6 +1942,203 @@ def fetch_counts(
     }
 
 
+def backfill_account_profiles(
+    *,
+    login_username,
+    login_password,
+    usernames,
+    http_timeout_seconds=None,
+    request_sleep_seconds=None,
+    request_timeout=120.0,
+    login_mode="auto",
+    two_factor_code=None,
+    challenge_code=None,
+    totp_seed=None,
+    delay_min=1.5,
+    delay_max=3.5,
+    device_settings_json=None,
+    user_agent=None,
+    progress=None,
+    cancel_check=None,
+):
+    mode = _normalize_login_mode(login_mode)
+    if _is_anonymous_login_mode(mode):
+        raise ValueError("profile backfill requires an authenticated private API login")
+    proxy = load_proxy_from_env()
+    proxy_url = proxy.get("url") if proxy else None
+    client = _build_client(
+        login_username,
+        login_password or "",
+        proxy_url,
+        http_timeout_seconds=http_timeout_seconds,
+        request_sleep_seconds=request_sleep_seconds,
+        request_timeout=request_timeout,
+        two_factor_code=two_factor_code,
+        challenge_code=challenge_code,
+        totp_seed=totp_seed,
+        login_mode=mode,
+        delay_min=delay_min,
+        delay_max=delay_max,
+        device_settings_json=device_settings_json,
+        user_agent=user_agent,
+    )
+    ordered_usernames = []
+    seen = set()
+    for username in usernames or []:
+        normalized = str(username or "").strip().lower()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            ordered_usernames.append(normalized)
+
+    processed = 0
+    saved = 0
+    errors = 0
+    skipped = 0
+    batch = []
+    started_at = datetime.now(ZoneInfo("America/New_York")).isoformat()
+
+    def flush():
+        nonlocal saved, batch
+        if not batch:
+            return
+        conn = get_db()
+        try:
+            saved += upsert_account_profiles(
+                conn,
+                batch,
+                source="backfill",
+                refreshed_at=datetime.now(ZoneInfo("America/New_York")).isoformat(),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        batch = []
+
+    for username in ordered_usernames:
+        if cancel_check and cancel_check():
+            break
+        try:
+            user = _user_info_private_first(client, username)
+            profile = normalize_account_profile(user)
+            if profile:
+                batch.append(profile)
+            else:
+                skipped += 1
+        except Exception as exc:  # noqa: BLE001
+            errors += 1
+            if progress:
+                try:
+                    progress(
+                        {
+                            "username": username,
+                            "processed": processed,
+                            "saved": saved,
+                            "errors": errors,
+                            "error": str(exc),
+                        }
+                    )
+                except Exception:
+                    pass
+        processed += 1
+        if len(batch) >= 10:
+            flush()
+        if progress:
+            try:
+                progress(
+                    {
+                        "username": username,
+                        "processed": processed,
+                        "total": len(ordered_usernames),
+                        "saved": saved + len(batch),
+                        "errors": errors,
+                        "skipped": skipped,
+                    }
+                )
+            except Exception:
+                pass
+        _sleep_jitter(delay_min, delay_max)
+    flush()
+    return {
+        "started_at": started_at,
+        "finished_at": datetime.now(ZoneInfo("America/New_York")).isoformat(),
+        "requested": len(ordered_usernames),
+        "processed": processed,
+        "saved": saved,
+        "errors": errors,
+        "skipped": skipped,
+        "cancelled": bool(cancel_check and cancel_check()),
+    }
+
+
+def _removed_account_status_from_error(exc):
+    if isinstance(exc, (UserNotFound, NotFoundError, ClientNotFoundError)):
+        return "not_found"
+    if isinstance(exc, (LoginRequired, ClientLoginRequired)):
+        return "check_failed_auth"
+    if isinstance(exc, (RateLimitError, ClientThrottledError, PleaseWaitFewMinutes)):
+        return "check_failed_rate_limited"
+    return "check_failed"
+
+
+def _check_removed_account_statuses(client, *, followers_removed, followees_removed, profile_cache, progress=None, cancel_check=None):
+    checks = []
+    seen = set()
+    for relation_type, usernames in (("followers", followers_removed), ("following", followees_removed)):
+        for username in usernames or []:
+            normalized = str(username or "").strip().lower()
+            key = (relation_type, normalized)
+            if not normalized or key in seen:
+                continue
+            seen.add(key)
+            checks.append((relation_type, normalized))
+    statuses = []
+    total = len(checks)
+    if progress and total:
+        try:
+            progress("removed_status", {"count": 0, "total": total, "running": True})
+        except Exception:
+            pass
+    for idx, (relation_type, username) in enumerate(checks, start=1):
+        if cancel_check and cancel_check():
+            break
+        try:
+            user = _user_info_private_first(client, username)
+            _remember_profile(profile_cache, user)
+            statuses.append(
+                {
+                    "username": username,
+                    "relation_type": relation_type,
+                    "account_status": "active",
+                    "account_status_error": None,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            statuses.append(
+                {
+                    "username": username,
+                    "relation_type": relation_type,
+                    "account_status": _removed_account_status_from_error(exc),
+                    "account_status_error": str(exc)[:500],
+                }
+            )
+        if progress:
+            try:
+                progress(
+                    "removed_status",
+                    {
+                        "count": idx,
+                        "total": total,
+                        "username": username,
+                        "relation_type": relation_type,
+                        "running": idx < total,
+                    },
+                )
+            except Exception:
+                pass
+        _sleep_jitter(0.8, 2.0)
+    return statuses
+
+
 def snapshot_profile(
     *,
     login_username,
@@ -1653,6 +2156,7 @@ def snapshot_profile(
     item_delay_min=0.0,
     item_delay_max=0.0,
     fetch_order="followers_first",
+    followers_order="",
     initial_fetch_delay_seconds=0.0,
     pause_every_min=0,
     pause_every_max=0,
@@ -1665,10 +2169,15 @@ def snapshot_profile(
     totp_seed=None,
     device_settings_json=None,
     user_agent=None,
+    artifact_dir=None,
 ):
+    del artifact_dir
     tz = ZoneInfo("America/New_York")
     mode = _normalize_login_mode(login_mode)
     anonymous_mode = _is_anonymous_login_mode(mode)
+    normalized_followers_order = str(followers_order or "").strip().lower()
+    if normalized_followers_order not in {"", "date_followed_latest", "date_followed_earliest"}:
+        normalized_followers_order = ""
 
     proxy = load_proxy_from_env()
     proxy_url = proxy.get("url") if proxy else None
@@ -1729,6 +2238,8 @@ def snapshot_profile(
 
     followers_total = int(getattr(user, "follower_count", 0) or 0)
     following_total = int(getattr(user, "following_count", 0) or 0)
+    profile_cache = {}
+    _remember_profile(profile_cache, user)
 
     if progress:
         try:
@@ -1737,6 +2248,32 @@ def snapshot_profile(
             pass
 
     timestamp = datetime.now(tz).strftime("%Y-%m-%d_%H-%M-%S")
+
+    def _refresh_profile_totals():
+        nonlocal followers_total, following_total
+        try:
+            if anonymous_mode:
+                refreshed = client.user_info_by_username_gql(target_username)
+            else:
+                refreshed = _user_info_private_first(client, target_username)
+        except Exception:
+            return followers_total, following_total
+        _remember_profile(profile_cache, refreshed)
+        followers_total = int(getattr(refreshed, "follower_count", followers_total) or followers_total or 0)
+        following_total = int(getattr(refreshed, "following_count", following_total) or following_total or 0)
+        if progress:
+            try:
+                progress(
+                    "totals",
+                    {
+                        "followers_total": followers_total,
+                        "following_total": following_total,
+                        "refreshed": True,
+                    },
+                )
+            except Exception:
+                pass
+        return followers_total, following_total
 
     if profile_only:
         changes = None
@@ -1793,11 +2330,11 @@ def snapshot_profile(
         if order not in {"followers_first", "following_first"}:
             order = "followers_first"
 
-        def _fetch_followers():
+        def _fetch_followers(*, use_cache=True, attempt=1):
             t0 = time.time()
             if progress:
                 try:
-                    progress("followers", 0)
+                    progress("followers", {"count": 0, "attempt": attempt})
                 except Exception:
                     pass
             if anonymous_mode:
@@ -1808,6 +2345,7 @@ def snapshot_profile(
                     target_id=target_id,
                 ):
                     follower_items = client.user_followers_gql(str(target_id), amount=0)
+                _remember_profiles(profile_cache, follower_items)
                 vals = [u.username for u in follower_items if getattr(u, "username", None)]
             else:
                 with _trace_span(
@@ -1815,28 +2353,52 @@ def snapshot_profile(
                     login_username=login_username,
                     target_username=target_username,
                     target_id=target_id,
+                    attempt=attempt,
+                    use_cache=use_cache,
                 ):
                     try:
-                        followers_map = client.user_followers(target_id, amount=0)
+                        if hasattr(client, "iter_user_followers_v1"):
+                            iter_kwargs = {"amount": 0, "page_size": MAX_USER_COUNT}
+                            if normalized_followers_order:
+                                iter_kwargs["order"] = normalized_followers_order
+                            follower_items = client.iter_user_followers_v1(target_id, **iter_kwargs)
+                            vals = _collect_iter_usernames(
+                                follower_items,
+                                progress=progress,
+                                kind="followers",
+                                attempt=attempt,
+                                profile_cache=profile_cache,
+                            )
+                        else:
+                            kwargs = {"amount": 0, "use_cache": use_cache}
+                            if normalized_followers_order:
+                                kwargs["order"] = normalized_followers_order
+                            try:
+                                followers_map = client.user_followers(target_id, **kwargs)
+                            except TypeError:
+                                kwargs.pop("order", None)
+                                followers_map = client.user_followers(target_id, **kwargs)
+                            follower_items = list(followers_map.values())
+                            _remember_profiles(profile_cache, follower_items)
+                            vals = [u.username for u in follower_items if getattr(u, "username", None)]
                     except Exception as exc:
                         _raise_login_error(exc, getattr(client, "last_json", None))
                     message = _visibility_limited_message(getattr(client, "last_json", None), "followers")
                     if message:
                         raise PrivateAPIError("visibility_limited", message)
-                vals = [u.username for u in followers_map.values() if getattr(u, "username", None)]
             secs = int(time.time() - t0)
             if progress:
                 try:
-                    progress("followers", len(vals))
+                    progress("followers", {"count": len(vals), "attempt": attempt, "attempt_complete": True})
                 except Exception:
                     pass
             return vals, secs
 
-        def _fetch_following():
+        def _fetch_following(*, use_cache=True, attempt=1):
             t0 = time.time()
             if progress:
                 try:
-                    progress("following", 0)
+                    progress("following", {"count": 0, "attempt": attempt})
                 except Exception:
                     pass
             if anonymous_mode:
@@ -1847,6 +2409,7 @@ def snapshot_profile(
                     target_id=target_id,
                 ):
                     followee_items = client.user_following_gql(str(target_id), amount=0)
+                _remember_profiles(profile_cache, followee_items)
                 vals = [u.username for u in followee_items if getattr(u, "username", None)]
             else:
                 with _trace_span(
@@ -1854,38 +2417,271 @@ def snapshot_profile(
                     login_username=login_username,
                     target_username=target_username,
                     target_id=target_id,
+                    attempt=attempt,
+                    use_cache=use_cache,
                 ):
                     try:
-                        followees_map = client.user_following(target_id, amount=0)
+                        if hasattr(client, "iter_user_following_v1"):
+                            followee_items = client.iter_user_following_v1(
+                                target_id,
+                                amount=0,
+                                page_size=MAX_USER_COUNT,
+                            )
+                            vals = _collect_iter_usernames(
+                                followee_items,
+                                progress=progress,
+                                kind="following",
+                                attempt=attempt,
+                                profile_cache=profile_cache,
+                            )
+                        else:
+                            followees_map = client.user_following(target_id, use_cache=use_cache, amount=0)
+                            followee_items = list(followees_map.values())
+                            _remember_profiles(profile_cache, followee_items)
+                            vals = [u.username for u in followee_items if getattr(u, "username", None)]
                     except Exception as exc:
                         _raise_login_error(exc, getattr(client, "last_json", None))
                     message = _visibility_limited_message(getattr(client, "last_json", None), "following")
                     if message:
                         raise PrivateAPIError("visibility_limited", message)
-                vals = [u.username for u in followees_map.values() if getattr(u, "username", None)]
             secs = int(time.time() - t0)
             if progress:
                 try:
-                    progress("following", len(vals))
+                    progress("following", {"count": len(vals), "attempt": attempt, "attempt_complete": True})
                 except Exception:
                     pass
             return vals, secs
 
+        def _retry_page(kind, max_id):
+            endpoint = f"friendships/{target_id}/{kind}/"
+            result = client.private_request(
+                endpoint,
+                params={
+                    "max_id": max_id,
+                    "count": MAX_USER_COUNT,
+                    "rank_token": client.rank_token,
+                    "search_surface": "follow_list_page",
+                    "query": "",
+                    "enable_groups": "true",
+                },
+            )
+            message = _visibility_limited_message(result, kind)
+            if message:
+                raise PrivateAPIError("visibility_limited", message)
+            values = []
+            for raw_user in result.get("users") or []:
+                try:
+                    user = extract_user_short(raw_user)
+                except Exception:
+                    continue
+                _remember_profile(profile_cache, user)
+                username = str(getattr(user, "username", "") or "").strip()
+                if username:
+                    values.append(username)
+            return values, result.get("next_max_id")
+
+        def _stream_retry_missing(kind, values, total_hint, elapsed_seconds):
+            values = _merge_usernames(values, [])
+            if anonymous_mode:
+                return values, elapsed_seconds, False
+            retried = False
+            total_elapsed = int(elapsed_seconds or 0)
+            max_retries = max(0, int(COMPLETENESS_RETRY_MAX or 0))
+            for attempt in range(2, max_retries + 2):
+                before_attempt = len(values)
+                max_id = ""
+                page_index = 0
+                while len(values) < total_hint:
+                    if cancel_check and cancel_check():
+                        raise RuntimeError("cancelled")
+                    if page_index == 0:
+                        delay = max(0.0, float(COMPLETENESS_RETRY_DELAY_SECONDS or 0))
+                        if delay:
+                            time.sleep(delay)
+                            total_elapsed += int(delay)
+                    page_t0 = time.time()
+                    retry_page_values, next_max_id = _retry_page(kind, max_id)
+                    total_elapsed += int(time.time() - page_t0)
+                    page_index += 1
+                    before_page = len(values)
+                    values = _merge_usernames(values, retry_page_values)
+                    retry_added = len(values) - before_page
+                    retried = True
+                    if progress:
+                        try:
+                            progress(kind, {
+                                "count": len(values),
+                                "retrying": True,
+                                "attempt": attempt,
+                                "retry_page_index": page_index,
+                                "expected_total": total_hint,
+                                "missing_count": max(total_hint - len(values), 0),
+                                "retry_added": retry_added,
+                                "retry_page_raw_count": len(retry_page_values),
+                                "next_max_id": next_max_id,
+                            })
+                        except Exception:
+                            pass
+                    if len(values) >= total_hint or not next_max_id or retry_added <= 0:
+                        break
+                    max_id = str(next_max_id)
+                if len(values) >= total_hint or len(values) <= before_attempt:
+                    break
+                refreshed_followers_total, refreshed_following_total = _refresh_profile_totals()
+                total_hint = refreshed_followers_total if kind == "followers" else refreshed_following_total
+                try:
+                    total_hint = int(total_hint or 0)
+                except Exception:
+                    total_hint = 0
+                if total_hint <= 0 or len(values) >= total_hint:
+                    break
+            if progress:
+                try:
+                    progress(kind, {
+                        "count": len(values),
+                        "retry_complete": retried,
+                        "expected_total": total_hint,
+                        "missing_count": max(total_hint - len(values), 0) if total_hint else None,
+                    })
+                except Exception:
+                    pass
+            return values, total_elapsed, retried
+
+        def _try_alternate_gql(kind, values, total_hint, elapsed_seconds):
+            if anonymous_mode:
+                return values, elapsed_seconds, False
+            if total_hint <= 0 or len(values) >= total_hint:
+                return values, elapsed_seconds, False
+            if cancel_check and cancel_check():
+                raise RuntimeError("cancelled")
+            if progress:
+                try:
+                    progress(kind, {
+                        "count": len(values),
+                        "alternate_endpoint": "gql",
+                        "expected_total": total_hint,
+                        "missing_count": max(total_hint - len(values), 0),
+                    })
+                except Exception:
+                    pass
+            t0 = time.time()
+            page_index = 0
+            total_raw_seen = 0
+            added_total = 0
+            cursor = None
+            merged = values
+            try:
+                chunk_fn = client.user_followers_gql_chunk if kind == "followers" else client.user_following_gql_chunk
+                page_size = 12 if kind == "followers" else 24
+                while len(merged) < total_hint:
+                    if cancel_check and cancel_check():
+                        raise RuntimeError("cancelled")
+                    page_t0 = time.time()
+                    items, cursor = chunk_fn(str(target_id), page_size, cursor)
+                    page_seconds = time.time() - page_t0
+                    _remember_profiles(profile_cache, items)
+                    page_values = [
+                        getattr(item, "username", "")
+                        for item in items
+                        if getattr(item, "username", None)
+                    ]
+                    page_index += 1
+                    total_raw_seen += len(page_values)
+                    before_page = len(merged)
+                    merged = _merge_usernames(merged, page_values)
+                    page_added = len(merged) - before_page
+                    added_total += page_added
+                    if progress:
+                        try:
+                            progress(kind, {
+                                "count": len(merged),
+                                "alternate_endpoint": "gql",
+                                "alternate_running": True,
+                                "alternate_page_index": page_index,
+                                "alternate_page_raw_count": len(page_values),
+                                "alternate_page_added": page_added,
+                                "alternate_added": added_total,
+                                "alternate_duplicates_total": max(total_raw_seen - added_total, 0),
+                                "alternate_has_more": bool(cursor),
+                                "alternate_next_cursor": cursor,
+                                "expected_total": total_hint,
+                                "missing_count": max(total_hint - len(merged), 0),
+                                "seconds_since_previous_page": round(page_seconds, 3),
+                            })
+                        except Exception:
+                            pass
+                    if not cursor:
+                        break
+            except Exception:
+                return values, elapsed_seconds, False
+            added = len(merged) - len(values)
+            elapsed_seconds = int(elapsed_seconds or 0) + int(time.time() - t0)
+            if progress:
+                try:
+                    progress(kind, {
+                        "count": len(merged),
+                        "alternate_endpoint": "gql",
+                        "alternate_running": False,
+                        "alternate_complete": True,
+                        "alternate_added": added,
+                        "alternate_page_index": page_index,
+                        "alternate_duplicates_total": max(total_raw_seen - added, 0),
+                        "alternate_has_more": bool(cursor),
+                        "expected_total": total_hint,
+                        "missing_count": max(total_hint - len(merged), 0),
+                    })
+                except Exception:
+                    pass
+            return merged, elapsed_seconds, added > 0
+
+        def _retry_incomplete(kind, values, total_hint, fetch_fn, elapsed_seconds):
+            if anonymous_mode:
+                return values, elapsed_seconds, False
+            refreshed_followers_total, refreshed_following_total = _refresh_profile_totals()
+            if kind == "followers":
+                total_hint = refreshed_followers_total or total_hint
+            elif kind == "following":
+                total_hint = refreshed_following_total or total_hint
+            try:
+                total_hint = int(total_hint or 0)
+            except Exception:
+                total_hint = 0
+            values = _merge_usernames(values, [])
+            if total_hint <= 0 or len(values) >= total_hint:
+                return values, elapsed_seconds, False
+            values, elapsed_seconds, retried = _stream_retry_missing(kind, values, total_hint, elapsed_seconds)
+            if len(values) < total_hint:
+                values, elapsed_seconds, used_alternate = _try_alternate_gql(kind, values, total_hint, elapsed_seconds)
+                retried = retried or used_alternate
+            return values, elapsed_seconds, retried
+
         try:
             if order == "following_first":
                 followees, followees_fetch_seconds = _fetch_following()
+                followees, followees_fetch_seconds, _ = _retry_incomplete(
+                    "following", followees, following_total, _fetch_following, followees_fetch_seconds
+                )
                 _sleep_jitter(item_delay_min, item_delay_max)
                 _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
                 if cancel_check and cancel_check():
                     raise RuntimeError("cancelled")
                 followers, followers_fetch_seconds = _fetch_followers()
+                followers, followers_fetch_seconds, _ = _retry_incomplete(
+                    "followers", followers, followers_total, _fetch_followers, followers_fetch_seconds
+                )
             else:
                 followers, followers_fetch_seconds = _fetch_followers()
+                followers, followers_fetch_seconds, _ = _retry_incomplete(
+                    "followers", followers, followers_total, _fetch_followers, followers_fetch_seconds
+                )
                 _sleep_jitter(item_delay_min, item_delay_max)
                 _maybe_pause(1, pause_every_min, pause_every_max, pause_seconds_min, pause_seconds_max)
                 if cancel_check and cancel_check():
                     raise RuntimeError("cancelled")
                 followees, followees_fetch_seconds = _fetch_following()
+                followees, followees_fetch_seconds, _ = _retry_incomplete(
+                    "following", followees, following_total, _fetch_following, followees_fetch_seconds
+                )
         except PrivateAPIError:
             raise
 
@@ -1910,7 +2706,36 @@ def snapshot_profile(
                 followees_rate=followees_rate,
                 followers_total_hint=followers_total,
                 followees_total_hint=following_total,
+                user_profiles=list(profile_cache.values()),
             )
+            if run_id and changes and not anonymous_mode:
+                removed_statuses = _check_removed_account_statuses(
+                    client,
+                    followers_removed=(changes.get("followers") or {}).get("removed") or [],
+                    followees_removed=(changes.get("followees") or {}).get("removed") or [],
+                    profile_cache=profile_cache,
+                    progress=progress,
+                    cancel_check=cancel_check,
+                )
+                if removed_statuses:
+                    conn = get_db()
+                    try:
+                        updated_statuses = update_relationship_event_account_statuses(
+                            conn,
+                            run_id=run_id,
+                            statuses=removed_statuses,
+                        )
+                        upsert_account_profiles(
+                            conn,
+                            list(profile_cache.values()),
+                            source="collection",
+                            refreshed_at=datetime.now(ZoneInfo("America/New_York")).isoformat(),
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                    if changes is not None:
+                        changes["removed_account_statuses_recorded"] = updated_statuses
 
         return {
             "timestamp": timestamp,

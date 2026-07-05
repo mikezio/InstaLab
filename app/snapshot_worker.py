@@ -12,7 +12,7 @@ from contextlib import contextmanager
 
 def _select_backend():
     name = (os.getenv("INSTALAB_SCRAPER_BACKEND") or os.getenv("SCRAPER_BACKEND") or "browser").strip().lower()
-    if name in {"private", "private_api", "private-api", "osintgram"}:
+    if name in {"private", "private_api", "private-api"}:
         from private_api_tracker import has_session, snapshot_profile  # type: ignore
         return has_session, snapshot_profile
     if name in {"browser", "guided_browser", "playwright"}:
@@ -146,6 +146,7 @@ def main():
     delay_min = float(os.environ.get("RUN_ITEM_DELAY_MIN", "0") or 0)
     delay_max = float(os.environ.get("RUN_ITEM_DELAY_MAX", "0") or 0)
     fetch_order = (os.environ.get("RUN_FETCH_ORDER") or "followers_first").strip().lower()
+    followers_order = (os.environ.get("RUN_FOLLOWERS_ORDER") or "").strip().lower()
     initial_fetch_delay_seconds = float(os.environ.get("RUN_INITIAL_FETCH_DELAY_SECONDS", "0") or 0)
     pause_every_min = int(os.environ.get("RUN_PAUSE_EVERY_MIN", "0") or 0)
     pause_every_max = int(os.environ.get("RUN_PAUSE_EVERY_MAX", "0") or 0)
@@ -182,6 +183,7 @@ def main():
                     item_delay_min=delay_min,
                     item_delay_max=delay_max,
                     fetch_order=fetch_order,
+                    followers_order=followers_order,
                     initial_fetch_delay_seconds=initial_fetch_delay_seconds,
                     pause_every_min=pause_every_min,
                     pause_every_max=pause_every_max,

@@ -94,6 +94,9 @@ def _init_db(conn):
             observed_at TEXT NOT NULL,
             run_id INTEGER NOT NULL,
             prev_run_id INTEGER,
+            account_status TEXT,
+            account_status_checked_at TEXT,
+            account_status_error TEXT,
             UNIQUE(run_id, relation_type, event_type, username)
         )
         """
@@ -112,6 +115,21 @@ def _init_db(conn):
             triggered_run_id INTEGER,
             schedule_id INTEGER,
             trigger_delta INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_profiles (
+            username TEXT PRIMARY KEY,
+            full_name TEXT,
+            profile_pic_url TEXT,
+            profile_pic_url_hd TEXT,
+            instagram_pk TEXT,
+            is_private INTEGER,
+            is_verified INTEGER,
+            source TEXT,
+            last_refreshed_at TEXT NOT NULL
         )
         """
     )
@@ -149,6 +167,7 @@ def _init_db(conn):
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_relationship_events_run ON relationship_events(run_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_account_profiles_refreshed ON account_profiles(last_refreshed_at)")
     cols = get_columns(conn, "followers_history")
     if "first_seen_known" not in cols:
         conn.execute("ALTER TABLE followers_history ADD COLUMN first_seen_known INTEGER DEFAULT 1")
@@ -178,6 +197,158 @@ def _init_db(conn):
         conn.execute("ALTER TABLE runs ADD COLUMN snapshot_complete INTEGER NOT NULL DEFAULT 1")
     if "snapshot_note" not in cols:
         conn.execute("ALTER TABLE runs ADD COLUMN snapshot_note TEXT")
+    cols = get_columns(conn, "relationship_events")
+    if "account_status" not in cols:
+        conn.execute("ALTER TABLE relationship_events ADD COLUMN account_status TEXT")
+    if "account_status_checked_at" not in cols:
+        conn.execute("ALTER TABLE relationship_events ADD COLUMN account_status_checked_at TEXT")
+    if "account_status_error" not in cols:
+        conn.execute("ALTER TABLE relationship_events ADD COLUMN account_status_error TEXT")
+    cols = get_columns(conn, "account_profiles")
+    for name, ddl_type in {
+        "full_name": "TEXT",
+        "profile_pic_url": "TEXT",
+        "profile_pic_url_hd": "TEXT",
+        "instagram_pk": "TEXT",
+        "is_private": "INTEGER",
+        "is_verified": "INTEGER",
+        "source": "TEXT",
+        "last_refreshed_at": "TEXT",
+    }.items():
+        if name not in cols:
+            default = " NOT NULL DEFAULT ''" if name == "last_refreshed_at" else ""
+            conn.execute(f"ALTER TABLE account_profiles ADD COLUMN {name} {ddl_type}{default}")
+
+
+def _profile_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _profile_bool(value):
+    if value is None:
+        return None
+    return 1 if bool(value) else 0
+
+
+def normalize_account_profile(profile):
+    if not profile:
+        return None
+    if isinstance(profile, dict):
+        getter = profile.get
+    else:
+        getter = lambda key, default=None: getattr(profile, key, default)
+    username = _profile_text(getter("username"))
+    if not username:
+        return None
+    return {
+        "username": username.lower(),
+        "full_name": _profile_text(getter("full_name")),
+        "profile_pic_url": _profile_text(getter("profile_pic_url")),
+        "profile_pic_url_hd": _profile_text(getter("profile_pic_url_hd")),
+        "instagram_pk": _profile_text(getter("pk")),
+        "is_private": _profile_bool(getter("is_private")),
+        "is_verified": _profile_bool(getter("is_verified")),
+    }
+
+
+def upsert_account_profiles(conn, profiles, *, source="collection", refreshed_at=None):
+    _init_db(conn)
+    refreshed_at = refreshed_at or datetime.now(ZoneInfo("America/New_York")).isoformat()
+    rows = []
+    seen = set()
+    for profile in profiles or []:
+        normalized = normalize_account_profile(profile)
+        if not normalized or normalized["username"] in seen:
+            continue
+        seen.add(normalized["username"])
+        rows.append(
+            (
+                normalized["username"],
+                normalized.get("full_name"),
+                normalized.get("profile_pic_url"),
+                normalized.get("profile_pic_url_hd"),
+                normalized.get("instagram_pk"),
+                normalized.get("is_private"),
+                normalized.get("is_verified"),
+                source,
+                refreshed_at,
+            )
+        )
+    if not rows:
+        return 0
+    conn.executemany(
+        """
+        INSERT INTO account_profiles (
+            username, full_name, profile_pic_url, profile_pic_url_hd, instagram_pk,
+            is_private, is_verified, source, last_refreshed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (username) DO UPDATE SET
+            full_name = COALESCE(EXCLUDED.full_name, account_profiles.full_name),
+            profile_pic_url = COALESCE(EXCLUDED.profile_pic_url, account_profiles.profile_pic_url),
+            profile_pic_url_hd = COALESCE(EXCLUDED.profile_pic_url_hd, account_profiles.profile_pic_url_hd),
+            instagram_pk = COALESCE(EXCLUDED.instagram_pk, account_profiles.instagram_pk),
+            is_private = COALESCE(EXCLUDED.is_private, account_profiles.is_private),
+            is_verified = COALESCE(EXCLUDED.is_verified, account_profiles.is_verified),
+            source = EXCLUDED.source,
+            last_refreshed_at = EXCLUDED.last_refreshed_at
+        """,
+        rows,
+    )
+    return len(rows)
+
+
+def load_account_profiles(conn, usernames):
+    _init_db(conn)
+    names = sorted({str(u or "").strip().lower() for u in usernames or [] if str(u or "").strip()})
+    if not names:
+        return {}
+    placeholders = ",".join(["?"] * len(names))
+    rows = conn.execute(
+        f"""
+        SELECT username, full_name, profile_pic_url, profile_pic_url_hd,
+               instagram_pk, is_private, is_verified, source, last_refreshed_at
+        FROM account_profiles
+        WHERE username IN ({placeholders})
+        """,
+        tuple(names),
+    ).fetchall()
+    return {row["username"]: dict(row) for row in rows}
+
+
+def update_relationship_event_account_statuses(conn, *, run_id, statuses, checked_at=None):
+    _init_db(conn)
+    checked_at = checked_at or datetime.now(ZoneInfo("America/New_York")).isoformat()
+    updated = 0
+    for item in statuses or []:
+        username = str(item.get("username") or "").strip().lower()
+        relation_type = str(item.get("relation_type") or "").strip().lower()
+        if not username or relation_type not in {"followers", "following"}:
+            continue
+        cur = conn.execute(
+            """
+            UPDATE relationship_events
+            SET account_status = ?,
+                account_status_checked_at = ?,
+                account_status_error = ?
+            WHERE run_id = ?
+              AND username = ?
+              AND relation_type = ?
+              AND event_type = 'removed'
+            """,
+            (
+                str(item.get("account_status") or "unknown"),
+                checked_at,
+                _profile_text(item.get("account_status_error")),
+                run_id,
+                username,
+                relation_type,
+            ),
+        )
+        updated += int(cur.rowcount or 0)
+    return updated
 
 
 def _update_history_table(
@@ -260,6 +431,7 @@ def _get_previous_run(conn, target_username):
         FROM runs
         WHERE target_username = ?
           AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
+          AND COALESCE(snapshot_complete, 1) = 1
         ORDER BY timestamp DESC, id DESC
         LIMIT 1
         """,
@@ -286,6 +458,23 @@ def _get_run_members(conn, run_id):
         r[0] for r in conn.execute("SELECT username FROM run_followees WHERE run_id = ?", (run_id,))
     }
     return followers, followees
+
+
+def _is_material_collection_gap(total_hint, collected_count):
+    if total_hint is None:
+        return False
+    try:
+        expected = int(total_hint)
+        collected = int(collected_count or 0)
+    except (TypeError, ValueError):
+        return False
+    missing = max(0, expected - collected)
+    if missing <= 0:
+        return False
+    # Instagram counts can change while a long run is in flight. Keep tiny live
+    # count drift visible, but still quarantine materially incomplete snapshots.
+    tolerance = max(1, int(expected * 0.0025))
+    return missing > tolerance
 
 
 def _insert_relationship_events(
@@ -384,8 +573,11 @@ def backfill_relationship_events(conn):
         """
         SELECT id, target_username, login_username, timestamp
         FROM runs
+        WHERE COALESCE(snapshot_complete, 1) = 1
+          AND (snapshot_note IS NULL OR LOWER(snapshot_note) NOT LIKE ?)
         ORDER BY target_username ASC, timestamp ASC, id ASC
-        """
+        """,
+        ("%profile_only%",),
     ).fetchall()
     if not runs:
         return 0
@@ -444,7 +636,8 @@ def rebuild_target_relationship_state(conn, *, target_username):
     runs = conn.execute(
         """
         SELECT id, target_username, login_username, timestamp,
-               followers_count, followees_count, non_followbacks_count, snapshot_note
+               followers_count, followees_count, non_followbacks_count,
+               snapshot_complete, snapshot_note
         FROM runs
         WHERE target_username = ?
         ORDER BY timestamp ASC, id ASC
@@ -466,7 +659,25 @@ def rebuild_target_relationship_state(conn, *, target_username):
         run_id = run["id"]
         followers, followees = _get_run_members(conn, run_id)
         snapshot_note = str(run["snapshot_note"] or "").strip().lower()
+        snapshot_complete = bool(int(run["snapshot_complete"] if run["snapshot_complete"] is not None else 1))
         has_member_snapshot = bool(followers or followees)
+        if not snapshot_complete:
+            # Partial snapshots are kept for audit/debug only. They must not
+            # become relationship baselines or emit add/remove events.
+            conn.execute(
+                """
+                UPDATE runs
+                SET prev_run_id = NULL,
+                    followers_added = 0,
+                    followers_removed = 0,
+                    followees_added = 0,
+                    followees_removed = 0,
+                    non_followbacks_count = ?
+                WHERE id = ?
+                """,
+                (len(followees - followers), run_id),
+            )
+            continue
         if not has_member_snapshot:
             # Count/profile-only snapshots do not have member lists, so they cannot
             # safely drive relationship history or delta recalculation.
@@ -578,6 +789,7 @@ def write_run_metadata(
     followers_total_hint=None,
     followees_total_hint=None,
     snapshot_note=None,
+    user_profiles=None,
 ):
     tz = ZoneInfo("America/New_York")
     if not is_postgres():
@@ -606,9 +818,9 @@ def write_run_metadata(
             guardrail_notes.append("followees_deduped")
         if prev_timestamp and str(timestamp) <= str(prev_timestamp):
             guardrail_notes.append("non_monotonic_timestamp")
-        if followers_total_hint is not None and int(followers_total_hint) > len(current_followers):
+        if _is_material_collection_gap(followers_total_hint, len(current_followers)):
             guardrail_notes.append("followers_partial_collection")
-        if followees_total_hint is not None and int(followees_total_hint) > len(current_followees):
+        if _is_material_collection_gap(followees_total_hint, len(current_followees)):
             guardrail_notes.append("followees_partial_collection")
         if snapshot_note:
             guardrail_notes.append(str(snapshot_note))
@@ -649,6 +861,14 @@ def write_run_metadata(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         snapshot_complete = 0 if guardrail_notes else 1
+        if not snapshot_complete:
+            # Incomplete/profile-only rows are audit records only. They must not
+            # contribute apparent deltas even if inspected directly later.
+            prev_run_id = None
+            followers_added = []
+            followers_removed = []
+            followees_added = []
+            followees_removed = []
         params = (
             target_username,
             login_username,
@@ -686,60 +906,68 @@ def write_run_metadata(
             insert_ignore_sql("run_followees", ["run_id", "username"]),
             [(run_id, username) for username in sorted(current_followees)],
         )
-        relationship_events_recorded = _insert_relationship_events(
+        profiles_recorded = upsert_account_profiles(
             conn,
-            target_username=target_username,
-            login_username=login_username,
-            run_id=run_id,
-            prev_run_id=prev_run_id,
-            timestamp=timestamp,
-            followers_added=followers_added,
-            followers_removed=followers_removed,
-            followees_added=followees_added,
-            followees_removed=followees_removed,
+            user_profiles,
+            source="collection",
+            refreshed_at=timestamp,
         )
-        if prev_run_id is None:
-            _update_history_table(
+        relationship_events_recorded = 0
+        if snapshot_complete:
+            relationship_events_recorded = _insert_relationship_events(
                 conn,
-                table="followers_history",
                 target_username=target_username,
+                login_username=login_username,
                 run_id=run_id,
+                prev_run_id=prev_run_id,
                 timestamp=timestamp,
-                added=sorted(current_followers),
-                removed=[],
-                first_seen_known=0,
+                followers_added=followers_added,
+                followers_removed=followers_removed,
+                followees_added=followees_added,
+                followees_removed=followees_removed,
             )
-            _update_history_table(
-                conn,
-                table="followees_history",
-                target_username=target_username,
-                run_id=run_id,
-                timestamp=timestamp,
-                added=sorted(current_followees),
-                removed=[],
-                first_seen_known=0,
-            )
-        else:
-            _update_history_table(
-                conn,
-                table="followers_history",
-                target_username=target_username,
-                run_id=run_id,
-                timestamp=timestamp,
-                added=followers_added,
-                removed=followers_removed,
-                first_seen_known=1,
-            )
-            _update_history_table(
-                conn,
-                table="followees_history",
-                target_username=target_username,
-                run_id=run_id,
-                timestamp=timestamp,
-                added=followees_added,
-                removed=followees_removed,
-                first_seen_known=1,
-            )
+            if prev_run_id is None:
+                _update_history_table(
+                    conn,
+                    table="followers_history",
+                    target_username=target_username,
+                    run_id=run_id,
+                    timestamp=timestamp,
+                    added=sorted(current_followers),
+                    removed=[],
+                    first_seen_known=0,
+                )
+                _update_history_table(
+                    conn,
+                    table="followees_history",
+                    target_username=target_username,
+                    run_id=run_id,
+                    timestamp=timestamp,
+                    added=sorted(current_followees),
+                    removed=[],
+                    first_seen_known=0,
+                )
+            else:
+                _update_history_table(
+                    conn,
+                    table="followers_history",
+                    target_username=target_username,
+                    run_id=run_id,
+                    timestamp=timestamp,
+                    added=followers_added,
+                    removed=followers_removed,
+                    first_seen_known=1,
+                )
+                _update_history_table(
+                    conn,
+                    table="followees_history",
+                    target_username=target_username,
+                    run_id=run_id,
+                    timestamp=timestamp,
+                    added=followees_added,
+                    removed=followees_removed,
+                    first_seen_known=1,
+                )
         conn.commit()
     finally:
         conn.close()
@@ -750,6 +978,7 @@ def write_run_metadata(
             "followers": {"added": followers_added, "removed": followers_removed},
             "followees": {"added": followees_added, "removed": followees_removed},
             "relationship_events_recorded": relationship_events_recorded,
+            "profiles_recorded": profiles_recorded,
             "snapshot_complete": bool(snapshot_complete),
             "snapshot_note": ";".join(guardrail_notes) if guardrail_notes else None,
         },
