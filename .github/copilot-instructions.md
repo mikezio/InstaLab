@@ -1,158 +1,77 @@
 # GitHub Copilot Instructions for InstaLab
 
 ## Project Overview
-InstaLab is an operations console for Instagram snapshot runs (followers/following), scheduling, run history, insights, and unfollow cleanup. It runs as a three-container stack: Flask API, Django UI, and a VNC/noVNC helper for interactive login workflows.
 
-## Architecture
-- **Backend API**: Flask (Python 3.11) - serves REST endpoints
-- **Web UI**: Django (Python 3.11) - admin and dashboard interface
-- **Workers**: Python workers for snapshots, counts, and unfollow operations
-- **Frontend**: Tailwind CSS 3.x for styling
-- **Database**: PostgreSQL only
-- **Deployment**: Docker Compose with multi-container orchestration
+InstaLab is a private Instagram operations console for follower/following snapshots, relationship history, scheduled monitoring, account health, and cleanup workflows.
 
-## Tech Stack
-- **Python**: 3.11
-  - Flask 3.x (API server)
-  - Django 5.x (UI framework)
-  - Instaloader 4.x (Instagram operations)
-  - Selenium & Playwright (browser automation)
-  - APScheduler (job scheduling)
-  - Gunicorn (production WSGI server)
-- **Node.js**: 20
-  - Tailwind CSS 3.x (utility-first CSS)
-  - PostCSS & Autoprefixer
-- **Docker**: Multi-stage builds with docker-compose orchestration
+The active runtime is a two-service app:
 
-## Key File Locations
-- **API Server**: `app/server.py` (Flask)
-- **Django App**: `app/dj.py` and `app/django_app/`
-- **Workers**: `app/snapshot_worker.py`, `app/count_worker.py`, `app/unfollow_bot.py`
-- **Trackers**: `app/instaloader_tracker.py`, `app/selenium_tracker.py`
-- **UI Styles**: `app/ui_src/ui.css` → builds to `app/django_app/static/ui.css`
-- **Dependencies**: `app/requirements.txt` (Python), `app/package.json` (Node)
+- Flask API in `app/server.py`
+- Django UI/API proxy in `app/django_app/`
 
-## Development Setup
+The modern React UI lives in `app/frontend/` and builds into `app/django_app/static/modern/`.
 
-### Local Development
+## Current Architecture
+
+- **API/orchestration:** `app/server.py`
+- **Workers:** `app/snapshot_worker.py`, `app/count_worker.py`, `app/unfollow_bot.py`
+- **Collectors:**
+  - `app/browser_tracker.py` for browser/session collection
+  - `app/private_api_tracker.py` for `instagrapi` private API collection
+- **Persistence:** Postgres only, through `app/db.py` and `app/tracker_db.py`
+- **Login secrets/session state:** `app/login_store.py`, encrypted with `INSTALAB_ENCRYPTION_KEY`
+- **Modern UI:** `app/frontend/src/`
+- **Legacy/Django UI:** `app/django_app/dashboard/`
+
+Do not assume old VNC/noVNC, Selenium, or `instaloader_tracker.py` flows exist. Those are retired from active code paths.
+
+## Local Setup
+
+Use Docker Compose for fresh-clone development:
+
 ```bash
-# Copy environment template
 cp .env.example .env
-
-# Build and start all services
-docker compose -f docker-compose.local.yml up -d --build
-# OR use the script
-./scripts/local_up.sh
-
-# Access the UI
-# UI: http://localhost:8000
-# VNC Helper: http://localhost:7900
-```
-
-### With PostgreSQL
-```bash
 docker compose -f docker-compose.local.yml -f docker-compose.local-postgres.yml up -d --build
-# OR use the script
-./scripts/local_postgres_up.sh
 ```
 
-### UI Development (Tailwind CSS)
+Open:
+
+- UI: `http://localhost:8000/app/`
+- API health: `http://localhost:5000/api/health`
+
+## Build And Test
+
+Python tests should run against Postgres:
+
 ```bash
-cd app
-
-# Install dependencies
-npm ci
-
-# One-time build
-npm run build
-
-# Watch mode for development
-npm run dev
+INSTALAB_DB_HOST=127.0.0.1 pytest
 ```
 
-## Build & Test Commands
+Build UI assets:
 
-### Python
 ```bash
-cd app
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Smoke test imports
-python -c "import server; import instaloader_tracker; print('python ok')"
+npm run -C app build
 ```
 
-### Frontend
+For dependency install outside Docker:
+
 ```bash
-cd app
-
-# Install dependencies
-npm ci
-
-# Build CSS
-npm run build
-
-# Watch mode
-npm run dev
+pip install -r app/requirements.txt
+npm ci --prefix app
+npm ci --prefix app/frontend
 ```
 
-## Branching Strategy
-- `main`: Stable, public-ready releases
-- `dev`: Active development branch
-- Feature branches: Create from `dev`, merge back to `dev`
+## Development Rules
 
-## Code Style Guidelines
-- Python code should follow PEP 8 conventions
-- Use clear, descriptive variable and function names
-- Keep functions focused and single-purpose
-- Add docstrings for complex functions
-- Avoid committing secrets or sensitive data - use `.env` files
+- Keep secrets out of git. Use `.env` and runtime data directories.
+- Update `.env.example` when adding config.
+- Update `API.md` when endpoint request/response behavior changes.
+- Update `ARCHITECTURE.md` when run lifecycle, collectors, or persistence behavior changes.
+- Keep Postgres compatibility in mind for every DB change.
+- Avoid reviving retired recon/VNC/Selenium flows.
 
-## Environment Variables
-- Never commit secrets or sensitive data
-- Use `.env.example` as a template for required variables
-- Store runtime data (DB, cookies, artifacts) outside the repository
+## Branching
 
-## Release Process
-1. Update version/changelog (if maintained)
-2. Run UI build: `cd app && npm run build`
-3. Verify services start cleanly: `docker compose up -d`
-4. Test a complete run end-to-end in dev environment
-5. Merge `dev` → `main`
-6. Tag release: `git tag vX.Y.Z && git push --tags`
-
-## Testing
-- CI runs Python import smoke tests
-- Manual end-to-end testing is performed in dev environment
-- Verify PostgreSQL behavior for all DB changes
-
-## Docker Services
-- **Flask API**: Serves backend endpoints
-- **Django UI**: Admin console and dashboard
-- **VNC/noVNC**: Interactive login helper for 2FA workflows
-- Services are orchestrated via docker-compose files
-
-## Common Tasks
-
-### Making Code Changes
-- Backend API changes: Edit `app/server.py` or related modules
-- UI changes: Edit Django templates in `app/django_app/` and styles in `app/ui_src/`
-- Worker changes: Edit worker files in `app/` directory
-- Always rebuild CSS after style changes: `npm run build`
-
-### Adding Dependencies
-- Python: Add to `app/requirements.txt`
-- Node.js: Use `npm install --save-dev <package>` in `app/` directory
-
-### Database Changes
-- InstaLab is Postgres-only (`INSTALAB_DB_TYPE=postgres`)
-- Test schema and query changes against Postgres
-- Keep migration scripts in appropriate locations
-
-## Important Notes
-- This repo is Docker-first; local dev runs in containers
-- Workers have safeguards to avoid overlapping runs
-- Session/cookie management supports 2FA flows
-- Health endpoints and metrics are available for monitoring
-- VNC helper UI available at port 7900 for interactive login workflows
+- Work on feature branches.
+- Keep `main` public/stable when maintained.
+- Use conventional commits where practical.

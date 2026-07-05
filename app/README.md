@@ -1,34 +1,57 @@
-# InstaLab Console
+# InstaLab App Directory
 
-Single‑pane console for Instagram snapshot runs, scheduling, history, and cleanup actions.
+This directory contains the runnable application code for InstaLab.
 
-## Components
-- **Flask API** (`server.py`): runs snapshots (instagrapi private API), schedules, unfollow cleanup, and provides the API.
-- **Django UI** (`django_app/`): dashboard that proxies `/api/*` to the Flask backend.
+For a fresh clone, start from the root [README](../README.md). The recommended setup is Docker Compose with Postgres:
 
-## Quick start
 ```bash
-cd /srv/apps/instalab/app
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# copy env and add secrets
 cp .env.example .env
-
-# start API
-nohup python server.py > server.log 2>&1 &
-
-# start UI
-cd django_app
-nohup python manage.py runserver 0.0.0.0:8000 > django.log 2>&1 &
+docker compose -f docker-compose.local.yml -f docker-compose.local-postgres.yml up -d --build
 ```
 
-UI: http://<server-ip>:8000/
-API: http://127.0.0.1:5000/api
+## Key Files
 
-## Notes
-- Secrets are kept in `.env` (not committed). Use `.env.example` as a template.
-- Postgres only (see `INSTALAB_DB_*` env vars in `.env.example`).
-- Login sessions are stored in Postgres and cached under `/data/instalab/private`.
-- Settings live in the DB and are editable via the **Settings** button in the UI.
+- `server.py`: Flask API, job orchestration, scheduling, config, integrations
+- `snapshot_worker.py`: snapshot worker entry point
+- `count_worker.py`: count-watch worker
+- `unfollow_bot.py`: cleanup/unfollow worker
+- `browser_tracker.py`: browser/session collector
+- `private_api_tracker.py`: `instagrapi` private API collector
+- `tracker_db.py`: run persistence, relationship events, history rebuilds
+- `login_store.py`: encrypted login/session storage
+- `django_app/`: Django UI and API proxy
+- `frontend/`: modern React UI
+- `tests/`: pytest suite
+
+## Local Commands
+
+Run tests against the local Compose Postgres port:
+
+```bash
+INSTALAB_DB_HOST=127.0.0.1 pytest
+```
+
+Build UI assets:
+
+```bash
+npm run -C app build
+```
+
+Install dependencies outside Docker:
+
+```bash
+pip install -r app/requirements.txt
+npm ci --prefix app
+npm ci --prefix app/frontend
+```
+
+## Runtime Data
+
+Runtime files should not be committed. Keep these in Docker volumes, `/data/instalab`, or another external runtime path:
+
+- browser auth storage
+- private API session settings
+- job artifacts
+- logs
+- SQLite scratch files
+- `.env`

@@ -109,4 +109,4 @@ npm outdated
 
 ## License
 
-This security policy follows the same license terms as the InstaLab project.
+No project license file is currently included. Until a license is added, all rights are reserved by default.
