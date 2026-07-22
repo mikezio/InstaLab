@@ -1,0 +1,95 @@
+services:
+  instalab-api-staging:
+    build:
+      context: /srv/apps/instalab-staging
+    container_name: instalab-api-staging
+    user: "1001:1003"
+    command: ddtrace-run python server.py
+    env_file:
+      - /srv/secrets/instalab-staging.env
+    environment:
+      INSTALAB_ENV: /srv/secrets/instalab-staging.env
+      INSTALAB_DB_HOST: apps-postgres
+      HOME: /data/instalab/home
+      DD_SERVICE: instalab-api-staging
+      DD_ENV: homelab-staging
+      DD_VERSION: "1"
+      DD_TRACE_ENABLED: "false"
+      DD_DYNAMIC_INSTRUMENTATION_ENABLED: "false"
+      DD_TRACE_EXCLUDED_URLS: "/api/health,/api/health/detail"
+      DD_EXCEPTION_REPLAY_ENABLED: "false"
+      DD_LOGS_INJECTION: "false"
+      DD_RUNTIME_METRICS_ENABLED: "false"
+    volumes:
+      - /srv/apps/instalab-staging/app:/app
+      - /srv/secrets/instalab-staging.env:/srv/secrets/instalab-staging.env:ro
+      - /srv/secrets/instalab-staging-logins.json:/srv/secrets/instalab-logins.json
+      - /srv/secrets/instalab-staging-cookies:/data/instalab/cookies
+      - /srv/secrets/instalab-staging-private:/data/instalab/private
+      - /srv/data/instalab-staging:/data/instalab
+    ports:
+      - "192.168.4.30:5100:5000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - apps-db
+
+  instalab-ui-staging:
+    build:
+      context: /srv/apps/instalab-staging
+    container_name: instalab-ui-staging
+    user: "1001:1003"
+    command: /app/scripts/start_ui.sh
+    env_file:
+      - /srv/secrets/instalab-staging.env
+    environment:
+      INSTALAB_ENV: /srv/secrets/instalab-staging.env
+      INSTALAB_API_BASE: http://instalab-api-staging:5000/
+      INSTALAB_DB_HOST: apps-postgres
+      DD_SERVICE: instalab-ui-staging
+      DD_ENV: homelab-staging
+      DD_VERSION: "1"
+      DD_TRACE_ENABLED: "false"
+      DD_DYNAMIC_INSTRUMENTATION_ENABLED: "false"
+      DD_TRACE_EXCLUDED_URLS: "/healthz/"
+      DD_EXCEPTION_REPLAY_ENABLED: "false"
+      DD_LOGS_INJECTION: "false"
+      DD_RUNTIME_METRICS_ENABLED: "false"
+    volumes:
+      - /srv/apps/instalab-staging/app:/app
+      - /srv/secrets/instalab-staging.env:/srv/secrets/instalab-staging.env:ro
+    ports:
+      - "127.0.0.1:8102:8000"
+    depends_on:
+      - instalab-api-staging
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz/', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - apps-db
+
+networks:
+  apps-db:
+    external: true
+    name: apps-db
